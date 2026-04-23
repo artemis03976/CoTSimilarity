@@ -1,0 +1,33 @@
+services:
+  dcpr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: structuredcot:gpu
+    container_name: structuredcot-gpu
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    gpus: all
+    ipc: host
+    shm_size: "16gb"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - HF_HOME=/workspace/.cache/huggingface
+      - TRANSFORMERS_CACHE=/workspace/.cache/huggingface
+      - PYTHONPATH=/workspace/src
+    volumes:
+      - ./:/workspace
+      - ./checkpoints:/workspace/checkpoints
+      - ./output:/workspace/output
+      - ./data:/workspace/data
+      - ./.cache/huggingface:/workspace/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: bash

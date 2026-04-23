@@ -1,0 +1,14 @@
+.claude
+docs/
+output/*
+!output/filter_errors.py
+!output/qwen/
+!output/deepseek/
+output/qwen/*
+output/deepseek/*
+!output/qwen/all_records.jsonl
+!output/deepseek/all_records.jsonl
+
+*.html
+__pycache__
+checkpoints/
