@@ -1,4 +1,4 @@
-# StructuredCoT 实验流程（从零开始）
+# StructuredCoT 实验流程
 
 本文档描述了当前的一套端到端流程，覆盖：
 
@@ -16,8 +16,8 @@
   - `data/<model>/dcpr_train.jsonl`
   - `data/<model>/dcpr_val.jsonl`
   - `data/<model>/dcpr_test.jsonl`
-  - （可选对比）`output/<model>/all_records_50.jsonl`
-- 新加入的模型需要通过 1-6 步生成对应数据，其中仅第一步生成 base model 的回答需要GPU支持模型推理，第三步刚需批量推理模式以处理数据
+  - （可选对比）`output/<model>/all_records.jsonl`
+- 新加入的模型需要通过 1-6 步生成对应数据，其中仅第一步生成 base model 的回答需要GPU支持模型推理；第三步刚需批量推理模式以处理数据，需要手动介入
 - 请先运行 `run_dcpr_pipeline.sh` 中的示例脚本流程，内容是针对 `qwen-2.5-math-7b-instruct` 模型的dcpr训练与推理。如无错误，再运行 3 个 ablation study 脚本中的命令，部分必要超参已经在脚本/默认config中配置完毕
 
 ---
