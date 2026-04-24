@@ -60,7 +60,8 @@ for LAMBDA in "${LAMBDA_VALUES[@]}"; do
         --learning_rate ${LEARNING_RATE} \
         --output_path "${CKPT_DIR}"
 
-    LATEST_CKPT=$(ls -td "${CKPT_DIR}"/checkpoint-*/ 2>/dev/null | head -1 | tr -d '/\\')
+    LATEST_CKPT=$(ls -td "${CKPT_DIR}"/checkpoint-* 2>/dev/null | head -1)
+    LATEST_CKPT="${LATEST_CKPT%/}"
     if [ -z "${LATEST_CKPT}" ]; then
         echo "警告: 训练未产出 checkpoint，跳过本次推理 (lambda_router=${LAMBDA})"
         continue

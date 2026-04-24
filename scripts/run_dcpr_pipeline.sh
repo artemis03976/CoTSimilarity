@@ -53,7 +53,8 @@ echo ""
 # Step 2: 推理测试
 # ---------------------------------------------------------------------------
 # 取最后一个 epoch 的 checkpoint
-LATEST_CKPT=$(ls -td "${CHECKPOINT_DIR}"/checkpoint-*/ 2>/dev/null | head -1 | tr -d '/\\')
+LATEST_CKPT=$(ls -td "${CHECKPOINT_DIR}"/checkpoint-* 2>/dev/null | head -1)
+LATEST_CKPT="${LATEST_CKPT%/}"
 if [ -z "${LATEST_CKPT}" ]; then
     echo "错误: 未找到训练 checkpoint，训练可能失败。"
     exit 1
