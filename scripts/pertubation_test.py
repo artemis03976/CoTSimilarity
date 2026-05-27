@@ -1,7 +1,12 @@
 import json
 import os
 import argparse
+import sys
+from pathlib import Path
 from vllm import LLM, SamplingParams
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 from utils.evaluate import answer_check
 
 DATA_PATH = "data/math_paired.jsonl"

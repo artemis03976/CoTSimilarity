@@ -7,12 +7,16 @@ Mirrors dcpr_inference_test.py but uses StaticPromptModel instead of DCPRModel.
 import json
 import os
 import argparse
+import sys
+from pathlib import Path
 import torch
 from tqdm import tqdm
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 from utils.evaluate import answer_check
-from dcpr.config import DCPRConfig, MATH_SYSTEM_PROMPT
-from dcpr.spt_model import StaticPromptModel
+from dcpr.config import MATH_SYSTEM_PROMPT
+from spt import SPTConfig, StaticPromptModel
 
 DATA_PATH = "data/math_paired.jsonl"
 
@@ -128,7 +132,7 @@ def run_eval(model, data, output_dir, temperature=0.0, top_p=1.0, n=1, max_new_t
 
 
 def load_model(args):
-    config = DCPRConfig(
+    config = SPTConfig(
         model_name=args.model_name,
         prefix_length=args.prefix_length,
         max_seq_length=args.max_seq_length,

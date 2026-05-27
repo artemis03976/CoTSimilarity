@@ -7,17 +7,18 @@ with LM loss (no router, no dual prefix).
 
 import argparse
 import sys
+from pathlib import Path
 import random
 from dataclasses import fields
 import numpy as np
 import torch
 from transformers import TrainingArguments, default_data_collator
-sys.path.append('src')
 
-from dcpr.config import DCPRConfig
-from dcpr.spt_model import StaticPromptModel
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 from dcpr_training.dataset import DCPRDataset
-from dcpr_training.spt_trainer import BaselineTrainer
+from spt import SPTConfig, StaticPromptModel
+from spt_training import BaselineTrainer
 
 
 def set_seed(seed: int):
@@ -30,7 +31,7 @@ def set_seed(seed: int):
 
 
 def parse_args():
-    default_config = DCPRConfig()
+    default_config = SPTConfig()
 
     parser = argparse.ArgumentParser(description="Train StaticPromptModel baseline.")
     parser.add_argument("--model_name", type=str, default=default_config.model_name)
@@ -61,9 +62,9 @@ def parse_args():
 def main():
     args = parse_args()
 
-    config_field_names = {f.name for f in fields(DCPRConfig)}
+    config_field_names = {f.name for f in fields(SPTConfig)}
     config_kwargs = {k: v for k, v in vars(args).items() if k in config_field_names}
-    config = DCPRConfig(**config_kwargs)
+    config = SPTConfig(**config_kwargs)
 
     set_seed(config.seed)
 

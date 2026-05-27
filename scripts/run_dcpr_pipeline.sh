@@ -64,7 +64,7 @@ echo "========== [2/3] DCPR 推理测试 =========="
 echo "使用 checkpoint: ${LATEST_CKPT}"
 mkdir -p "${INFER_OUTPUT_DIR}"
 
-python src/dcpr_inference_test.py \
+python scripts/dcpr_inference_test.py \
     --checkpoint "${LATEST_CKPT}/dcpr_trainable.pt" \
     --model_name "${MODEL_NAME}" \
     --output_dir "${INFER_OUTPUT_DIR}" \
@@ -78,13 +78,13 @@ echo ""
 echo "========== [3/3] 指标统计 =========="
 echo ""
 echo "--- DCPR 推理结果 ---"
-python scripts/calculate_accuracy.py \
+python src/utils/evaluation/calculate_accuracy.py \
     "${INFER_OUTPUT_DIR}/all_records.jsonl"
 
 echo ""
 echo "--- 对比 Baseline（如已有 baseline 结果）---"
 if [ -f "output/base_all_records.jsonl" ]; then
-    python scripts/calculate_accuracy.py \
+    python src/utils/evaluation/calculate_accuracy.py \
         "${INFER_OUTPUT_DIR}/all_records.jsonl" \
         --compare-file "output/qwen/all_records.jsonl"
 else

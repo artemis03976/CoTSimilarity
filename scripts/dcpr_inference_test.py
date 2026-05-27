@@ -1,13 +1,17 @@
 import json
 import os
 import argparse
+import sys
+from pathlib import Path
 import torch
 from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from utils.evaluate import answer_check
 from dcpr.config import DCPRConfig, MATH_SYSTEM_PROMPT
 from dcpr.model import DCPRModel
-from dcpr.visualize_router import plot_alpha_density
+from utils.visualization import plot_alpha_density
 
 DATA_PATH = "data/math_paired.jsonl"
 

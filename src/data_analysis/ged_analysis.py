@@ -293,7 +293,7 @@ def main():
         print(f"\nAll GED results saved to {all_results_path}")
         print(f"Total samples processed: {len(all_results)}")
         print(f"\nTo generate DCPR dataset, run:")
-        print(f"  python src/dcpr_training/data_filter.py --input {all_results_path}")
+        print(f"  python src/dcpr_dataset/data_filter.py --input {all_results_path}")
     else:
         print("No results generated")
 

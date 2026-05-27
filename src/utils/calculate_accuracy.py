@@ -121,7 +121,7 @@ def print_delta(base_metrics, new_metrics):
     print(f"\nΔOverall(all variants pass@k): {d_overall * 100:+.2f}%")
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="统一实验指标统计脚本")
     parser.add_argument("file", type=str, help="待评估 all_records*.jsonl")
     parser.add_argument("--compare-file", type=str, default=None, help="对比文件（如 baseline all_records*.jsonl）")
@@ -141,3 +141,7 @@ if __name__ == "__main__":
         base_metrics = calculate_metrics(args.compare_file)
         print_metrics(f"Baseline - {Path(args.compare_file).name}", base_metrics)
         print_delta(base_metrics, new_metrics)
+
+
+if __name__ == "__main__":
+    main()

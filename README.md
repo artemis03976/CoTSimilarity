@@ -46,7 +46,7 @@ docker compose -f docker-compose.gpu.yml run --rm dcpr
 ## 1. 生成 base model 回答（original 1 条，simple/hard 各 50 条）
 
 ```bash
-python src/data_analysis/pertubation_test.py \
+python scripts/pertubation_test.py \
   --model "Qwen/Qwen2.5-Math-7B-Instruct" \
   --data_path "data/math_paired.jsonl" \
   --output_path "output/qwen/all_records_50.jsonl" \
@@ -122,7 +122,7 @@ python src/data_analysis/ged_analysis.py \
 ## 5. 构建 DCPR 数据集
 
 ```bash
-python src/dcpr_training/data_filter.py \
+python src/dcpr_dataset/data_filter.py \
   --input "output/qwen/all_ged_results.jsonl" \
   --output "data/qwen/dcpr_dataset.jsonl" \
   --top-k 5 \
@@ -134,7 +134,7 @@ python src/dcpr_training/data_filter.py \
 ## 6. 自动划分 train/val/test（按 problem_id）
 
 ```bash
-python scripts/split_dcpr_dataset.py \
+python src/dcpr_dataset/split_dataset.py \
   --input "data/qwen/dcpr_dataset.jsonl" \
   --train-ratio 0.8 \
   --val-ratio 0.1 \
@@ -171,7 +171,7 @@ python scripts/train_dcpr.py \
 ## 8. DCPR 推理评估
 
 ```bash
-python src/dcpr_inference_test.py \
+python scripts/dcpr_inference_test.py \
   --checkpoint "checkpoints/qwen/dcpr/dcpr_trainable.pt" \
   --model_name "Qwen/Qwen2.5-Math-7B-Instruct" \
   --data_path "data/math_paired.jsonl" \
@@ -189,13 +189,13 @@ python src/dcpr_inference_test.py \
 仅统计单个结果：
 
 ```bash
-python scripts/calculate_accuracy.py "output/qwen/dcpr/all_records.jsonl"
+python src/utils/evaluation/calculate_accuracy.py "output/qwen/dcpr/all_records.jsonl"
 ```
 
 与 baseline 对比：
 
 ```bash
-python scripts/calculate_accuracy.py \
+python src/utils/evaluation/calculate_accuracy.py \
   "output/qwen/dcpr/all_records.jsonl" \
   --compare-file "output/qwen/all_records_50.jsonl"
 ```

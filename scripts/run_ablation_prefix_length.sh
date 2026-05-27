@@ -31,7 +31,7 @@ PREFIX_LENGTHS=(5 10 15 20 25 50 100)
 # 前置检查
 # ---------------------------------------------------------------------------
 if [ ! -f "${TRAIN_DATA}" ] || [ ! -f "${VAL_DATA}" ]; then
-    echo "错误: 训练/验证集不存在，请先运行 split_dcpr_dataset.py"
+    echo "错误: 训练/验证集不存在，请先运行 src/dcpr_dataset/split_dataset.py"
     exit 1
 fi
 
@@ -71,7 +71,7 @@ for PLEN in "${PREFIX_LENGTHS[@]}"; do
     # ---- 推理 ----
     echo "[2/3] 推理测试 ..."
     mkdir -p "${INFER_DIR}"
-    python src/dcpr_inference_test.py \
+    python scripts/dcpr_inference_test.py \
         --checkpoint "${LATEST_CKPT}/dcpr_trainable.pt" \
         --model_name "${MODEL_NAME}" \
         --output_dir "${INFER_DIR}" \
@@ -83,13 +83,13 @@ for PLEN in "${PREFIX_LENGTHS[@]}"; do
     echo "[3/3] 指标统计 ..."
     echo ""
     echo "--- prefix_length=${PLEN} 结果 ---"
-    python scripts/calculate_accuracy.py \
+    python src/utils/evaluation/calculate_accuracy.py \
         "${INFER_DIR}/all_records.jsonl"
 
     if [ -f "${BASE_CHECKPOINT}/dcpr_trainable.pt" ]; then
         echo ""
         echo "--- Delta vs Baseline ---"
-        python scripts/calculate_accuracy.py \
+        python src/utils/evaluation/calculate_accuracy.py \
             "${INFER_DIR}/all_records.jsonl" \
             --compare-file "output/qwen/all_records.jsonl"
     fi
