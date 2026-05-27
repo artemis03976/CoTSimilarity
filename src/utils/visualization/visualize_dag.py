@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import html
 import sys
+import re
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from data_analysis.dag_compressor import build_digraph_with_tags, compress_dag_combined
@@ -204,13 +205,13 @@ def load_analyzed_records(input_path: str) -> List[Dict]:
 
                 if "custom_id" in raw_record and "response" in raw_record:
                     custom_id = raw_record["custom_id"]
-                    parts = custom_id.rsplit("_", 1)
-                    if len(parts) != 2:
+                    # Support both "problem_variant" and "problem_variant_sampleIdx".
+                    match = re.match(r"^(?P<problem_id>.+?)_(?P<variant>original|simple|hard)(?:_(?P<sample_idx>\d+))?$", custom_id)
+                    if not match:
                         print(f"Warning: Invalid custom_id format at line {line_num}: {custom_id}")
                         continue
-
-                    problem_id = parts[0]
-                    variant = parts[1]
+                    problem_id = match.group("problem_id")
+                    variant = match.group("variant")
 
                     dag_analysis = extract_dag_from_batch_response(raw_record)
 
@@ -634,6 +635,13 @@ def generate_html_report(
 
     # Serialize records to JSON for client-side rendering
     records_json = json.dumps(records, ensure_ascii=False)
+    # Prevent embedded JSON from breaking <script> parsing in browsers.
+    records_json = (
+        records_json
+        .replace("</", "<\\/")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
 
     # Generate HTML with embedded JavaScript
     # Use string concatenation to avoid f-string escaping issues with JavaScript
@@ -648,10 +656,10 @@ def generate_html_report(
 def main():
     parser = argparse.ArgumentParser(description="可视化 DAG 分析结果")
     parser.add_argument("--input", type=str,
-                       default="output/deepseek/dag_analysis/analyzed_records.jsonl",
+                       default="output/qwen/dag_analysis/analyzed_records.jsonl",
                        help="输入的分析结果文件")
     parser.add_argument("--output", type=str,
-                       default="output/deepseek/dag_analysis/visualization.html",
+                       default="output/qwen/dag_analysis/visualization.html",
                        help="输出的 HTML 文件")
     parser.add_argument("--limit", type=int, default=None,
                        help="限制显示的记录数量")

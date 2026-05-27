@@ -12,7 +12,7 @@ class LLMConfig:
     # Provider settings
     provider: str = "deepseek"
     model: str = "deepseek-chat"
-    api_key: Optional[str] = "sk-dcda9ad70d554b409d6f13ad56b14a3f"
+    api_key: Optional[str] = ""
     base_url: Optional[str] = "https://api.deepseek.com"
 
     # Generation parameters

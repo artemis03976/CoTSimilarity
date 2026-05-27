@@ -306,7 +306,11 @@ def main():
         output_path = args.output
     else:
         input_path_obj = Path(input_path)
-        output_name = input_path_obj.name.replace("all_records", "segmented_records")
+        stem = input_path_obj.stem
+        if stem.startswith("probe_"):
+            output_name = stem.replace("probe_", "segmented_probe_") + input_path_obj.suffix
+        else:
+            output_name = input_path_obj.name.replace("all_records", "segmented_records")
         output_path = str(input_path_obj.with_name(output_name))
 
     with open(input_path, "r", encoding="utf-8") as f:

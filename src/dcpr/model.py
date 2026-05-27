@@ -45,7 +45,7 @@ class DCPRModel(nn.Module):
         model.eval()
         return model, tokenizer
 
-    def forward(self, input_ids, attention_mask, labels=None, prompt_input_ids=None, prompt_attention_mask=None):
+    def forward(self, input_ids, attention_mask, labels=None, prompt_input_ids=None, prompt_attention_mask=None, forced_alpha=None):
         """
         Args:
             input_ids: (batch_size, seq_len)
@@ -53,6 +53,7 @@ class DCPRModel(nn.Module):
             labels: (batch_size, seq_len) - optional, for training
             prompt_input_ids: (batch_size, seq_len) - optional, prompt-only input for context encoder
             prompt_attention_mask: (batch_size, seq_len) - optional, prompt-only attention mask
+            forced_alpha: float or None - if set, bypasses router and uses this value directly
         Returns:
             (lm_loss, alpha) if labels provided, else (logits, alpha)
         """
@@ -62,6 +63,7 @@ class DCPRModel(nn.Module):
             attention_mask=attention_mask,
             prompt_input_ids=prompt_input_ids,
             prompt_attention_mask=prompt_attention_mask,
+            forced_alpha=forced_alpha,
         )
 
         # 7. Adjust labels for prefix (if provided)
@@ -90,6 +92,7 @@ class DCPRModel(nn.Module):
         attention_mask: torch.Tensor,
         prompt_input_ids: torch.Tensor | None = None,
         prompt_attention_mask: torch.Tensor | None = None,
+        forced_alpha: float | None = None,
     ):
         """Build prefix-augmented embeddings and masks for generation."""
         batch_size = input_ids.shape[0]
@@ -98,11 +101,19 @@ class DCPRModel(nn.Module):
         if prompt_attention_mask is None:
             prompt_attention_mask = attention_mask
 
-        h_Q = self.context_encoder(prompt_input_ids, prompt_attention_mask)
-        router_dtype = next(self.router.parameters()).dtype
-        if h_Q.dtype != router_dtype:
-            h_Q = h_Q.to(dtype=router_dtype)
-        alpha = self.router(h_Q)
+        if forced_alpha is not None:
+            alpha = torch.full(
+                (batch_size, 1),
+                fill_value=forced_alpha,
+                dtype=next(self.dual_prefix.parameters()).dtype,
+                device=input_ids.device,
+            )
+        else:
+            h_Q = self.context_encoder(prompt_input_ids, prompt_attention_mask)
+            router_dtype = next(self.router.parameters()).dtype
+            if h_Q.dtype != router_dtype:
+                h_Q = h_Q.to(dtype=router_dtype)
+            alpha = self.router(h_Q)
 
         P_final = self.dual_prefix(alpha, batch_size)
         prompt_embeds = self.frozen_llm.get_input_embeddings()(input_ids)
@@ -126,19 +137,21 @@ class DCPRModel(nn.Module):
         attention_mask: torch.Tensor,
         prompt_input_ids: torch.Tensor | None = None,
         prompt_attention_mask: torch.Tensor | None = None,
+        forced_alpha: float | None = None,
         **generate_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Generate with DCPR prefix routing via transformers.generate.
 
         Returns:
             new_token_ids: generated continuation tokens, shape (batch, new_len)
-            alpha: router outputs, shape (batch, 1)
+            alpha: router outputs (or forced value), shape (batch, 1)
         """
         inputs_embeds, extended_attention_mask, alpha = self._build_prefixed_inputs(
             input_ids=input_ids,
             attention_mask=attention_mask,
             prompt_input_ids=prompt_input_ids,
             prompt_attention_mask=prompt_attention_mask,
+            forced_alpha=forced_alpha,
         )
 
         pad_token_id = self.tokenizer.pad_token_id

@@ -7,6 +7,7 @@ from tqdm import tqdm
 from utils.evaluate import answer_check
 from dcpr.config import DCPRConfig, MATH_SYSTEM_PROMPT
 from dcpr.model import DCPRModel
+from dcpr.visualize_router import plot_alpha_density
 
 DATA_PATH = "data/math_paired.jsonl"
 
@@ -27,7 +28,7 @@ def build_prompt(tokenizer, problem):
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
-def generate_one_answer(model, problem, max_new_tokens=2048, temperature=0.0, top_p=1.0):
+def generate_one_answer(model, problem, max_new_tokens=2048, temperature=0.0, top_p=1.0, forced_alpha=None):
     tokenizer = model.tokenizer
     prompt = build_prompt(tokenizer, problem)
     prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
@@ -45,29 +46,33 @@ def generate_one_answer(model, problem, max_new_tokens=2048, temperature=0.0, to
         generation_kwargs["temperature"] = temperature
         generation_kwargs["top_p"] = top_p
 
-    new_token_ids, _ = model.generate(
+    new_token_ids, alpha = model.generate(
         input_ids=input_ids,
         attention_mask=attention_mask,
         prompt_input_ids=prompt_input_ids,
         prompt_attention_mask=prompt_attention_mask,
+        forced_alpha=forced_alpha,
         **generation_kwargs,
     )
-    return tokenizer.decode(new_token_ids[0], skip_special_tokens=True).strip()
+    alpha_val = alpha.item()
+    return tokenizer.decode(new_token_ids[0], skip_special_tokens=True).strip(), alpha_val
 
 
-def generate_answer(model, problem, temperature=0.0, top_p=1.0, n=1, max_new_tokens=2048):
+def generate_answer(model, problem, temperature=0.0, top_p=1.0, n=1, max_new_tokens=2048, forced_alpha=None):
     responses = []
+    alphas = []
     for _ in range(n):
-        responses.append(
-            generate_one_answer(
-                model,
-                problem,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_p=top_p,
-            )
+        resp, alpha_val = generate_one_answer(
+            model,
+            problem,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            forced_alpha=forced_alpha,
         )
-    return responses
+        responses.append(resp)
+        alphas.append(alpha_val)
+    return responses, alphas
 
 
 def check_answer(problem, response, ground_truth, dataset_type):
@@ -78,12 +83,27 @@ def check_answer(problem, response, ground_truth, dataset_type):
         return False
 
 
-def run_eval(model, data, output_dir, temperature=0.0, top_p=1.0, n=1, max_new_tokens=2048):
+def save_alpha_cache(alpha_dict, alpha_cache_path):
+    os.makedirs(os.path.dirname(alpha_cache_path) or ".", exist_ok=True)
+    with open(alpha_cache_path, "w", encoding="utf-8") as f:
+        json.dump(alpha_dict, f, ensure_ascii=False, indent=2)
+    print(f"Alpha cache saved to {alpha_cache_path}")
+
+
+def load_alpha_cache(alpha_cache_path):
+    with open(alpha_cache_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {k: [float(v) for v in vals] for k, vals in data.items()}
+
+
+def run_eval(model, data, output_dir, alpha_cache_path, temperature=0.0, top_p=1.0, n=1, max_new_tokens=2048):
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, "all_records.jsonl")
 
     total = len(data)
     correct_count = 0
+    all_alphas = {"Original": [], "Simple": [], "Hard": []}
+    label_key_map = [("original", "original", "Original"), ("simple", "simple", "Simple"), ("hard", "hard", "Hard")]
 
     with open(out_path, "w", encoding="utf-8") as fout:
         progress_bar = tqdm(data, total=total, desc="Evaluating")
@@ -93,12 +113,13 @@ def run_eval(model, data, output_dir, temperature=0.0, top_p=1.0, n=1, max_new_t
             results = {}
             all_correct = True
 
-            for label, key in [("original", "original"), ("simple", "simple"), ("hard", "hard")]:
+            for label, key, display in label_key_map:
                 problem = item[key]["problem"]
                 ground_truth = item[key].get("solution") or item[key].get("answer")
                 dataset_type = "original" if key == "original" else "perturb"
 
-                responses = generate_answer(model, problem, temperature, top_p, n, max_new_tokens)
+                responses, alphas = generate_answer(model, problem, temperature, top_p, n, max_new_tokens, forced_alpha=None)
+                all_alphas[display].extend(alphas)
 
                 sample_results = []
                 for resp in responses:
@@ -108,6 +129,7 @@ def run_eval(model, data, output_dir, temperature=0.0, top_p=1.0, n=1, max_new_t
                 results[label] = {
                     "problem": problem,
                     "ground_truth": ground_truth,
+                    "alpha": alphas[0] if len(alphas) == 1 else alphas,
                     "samples": sample_results,
                 }
                 if not any(s["correct"] for s in sample_results):
@@ -129,6 +151,55 @@ def run_eval(model, data, output_dir, temperature=0.0, top_p=1.0, n=1, max_new_t
 
     error_count = total - correct_count
     print(f"\n测试完成: {total} 组, 全部通过 {correct_count} 组, 存在错误 {error_count} 组, 已保存至 {out_path}")
+
+    save_alpha_cache(all_alphas, alpha_cache_path)
+    plot_alpha_density(all_alphas, output_dir)
+
+
+def run_alpha_probe(model, data, output_dir, forced_alpha, temperature=0.0, top_p=1.0, n=1, max_new_tokens=2048):
+    """Run inference on all data with a manually specified alpha, skipping accuracy evaluation.
+
+    Each record contains problems and raw responses. GED computation is left to a separate pipeline.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    tag = f"alpha{forced_alpha:.2f}".replace(".", "p")
+    out_path = os.path.join(output_dir, f"probe_{tag}.jsonl")
+
+    label_key_map = [("original", "original"), ("simple", "simple"), ("hard", "hard")]
+
+    with open(out_path, "w", encoding="utf-8") as fout:
+        progress_bar = tqdm(data, total=len(data), desc=f"Alpha probe α={forced_alpha:.2f}")
+        for item in progress_bar:
+            pid = item["problem_id"]
+            progress_bar.set_postfix(problem_id=pid)
+
+            results = {}
+            for label, key in label_key_map:
+                problem = item[key]["problem"]
+                ground_truth = item[key].get("solution") or item[key].get("answer")
+
+                responses, alphas = generate_answer(
+                    model, problem, temperature, top_p, n, max_new_tokens, forced_alpha=forced_alpha
+                )
+                alpha_val = alphas[0] if len(alphas) == 1 else alphas
+                results[label] = {
+                    "problem": problem,
+                    "ground_truth": ground_truth,
+                    "alpha": alpha_val,
+                    "samples": [{"response": r} for r in responses],
+                }
+
+            record = {
+                "problem_id": pid,
+                "type": item["type"],
+                "level": item["level"],
+                "forced_alpha": forced_alpha,
+                **results,
+            }
+            fout.write(json.dumps(record, ensure_ascii=False) + "\n")
+            fout.flush()
+
+    print(f"\nAlpha probe 完成: {len(data)} 条, forced_alpha={forced_alpha:.2f}, 已保存至 {out_path}")
 
 
 def load_model(args):
@@ -171,7 +242,34 @@ def main():
     parser.add_argument("--router_intermediate_dim", type=int, default=256, help="router 中间层维度")
     parser.add_argument("--router_dropout", type=float, default=0.05, help="router dropout")
     parser.add_argument("--max_seq_length", type=int, default=2048, help="最大序列长度")
+    parser.add_argument(
+        "--alpha_cache_path",
+        type=str,
+        default=None,
+        help="alpha 缓存文件路径（默认: output_dir/alpha_cache.json）",
+    )
+    parser.add_argument(
+        "--plot_only_from_alpha_cache",
+        action="store_true",
+        help="仅从 alpha 缓存重绘密度图，不加载模型也不重新推理",
+    )
+    parser.add_argument(
+        "--forced_alpha",
+        type=float,
+        default=None,
+        help="手动指定 alpha 值 [0,1]，绕过 dynamic router，启用 alpha probe 模式",
+    )
     args = parser.parse_args()
+
+    alpha_cache_path = args.alpha_cache_path or os.path.join(args.output_dir, "alpha_cache.json")
+
+    if args.plot_only_from_alpha_cache:
+        if not os.path.exists(alpha_cache_path):
+            print(f"未找到 alpha 缓存: {alpha_cache_path}")
+            return
+        all_alphas = load_alpha_cache(alpha_cache_path)
+        plot_alpha_density(all_alphas, args.output_dir)
+        return
 
     print("正在加载 DCPR 模型...")
     model = load_model(args)
@@ -185,7 +283,32 @@ def main():
         random.shuffle(data)
         data = data[:args.num]
 
-    run_eval(model, data, args.output_dir, args.temperature, args.top_p, args.n, args.max_new_tokens)
+    if args.forced_alpha is not None:
+        if not (0.0 <= args.forced_alpha <= 1.0):
+            print(f"[ERROR] --forced_alpha 必须在 [0, 1] 范围内，当前值: {args.forced_alpha}")
+            return
+        print(f"Alpha probe 模式: forced_alpha={args.forced_alpha:.2f}，共 {len(data)} 条数据")
+        run_alpha_probe(
+            model,
+            data,
+            args.output_dir,
+            args.forced_alpha,
+            args.temperature,
+            args.top_p,
+            args.n,
+            args.max_new_tokens,
+        )
+    else:
+        run_eval(
+            model,
+            data,
+            args.output_dir,
+            alpha_cache_path,
+            args.temperature,
+            args.top_p,
+            args.n,
+            args.max_new_tokens,
+        )
 
 
 if __name__ == "__main__":

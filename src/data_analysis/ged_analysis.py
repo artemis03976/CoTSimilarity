@@ -1,4 +1,4 @@
-"""Analyze GED between original and variant (simple/hard) problem responses."""
+"""Analyze GED between baseline-original and variant (simple/hard) responses."""
 
 import json
 import argparse
@@ -194,7 +194,11 @@ def main():
     parser.add_argument('--output-root', type=str, default=None,
                         help='模型输出根目录（包含 all_records*.jsonl 与 dag_analysis* 目录）')
     parser.add_argument('--original-records', type=str, default=None,
-                        help='[可选] original DAG 分析结果 JSONL 路径；未提供时从 variant-records 中读取 original_0')
+                        help='[可选] 原始题(original) DAG 分析结果 JSONL 路径；优先级最高')
+    parser.add_argument('--baseline-output-root', type=str, default=None,
+                        help='[可选] baseline 模型输出根目录（如 output/qwen），用于读取 original DAG 作为 GED 基准')
+    parser.add_argument('--baseline-original-records', type=str, default=None,
+                        help='[可选] baseline 的 original DAG 分析 JSONL 路径（优先于 --baseline-output-root 自动推断）')
     parser.add_argument('--variant-records', type=str, default=None,
                         help='simple/hard DAG 分析结果 JSONL 路径（默认: <output-root>/dag_analysis_50/analyzed_records.jsonl）')
     parser.add_argument('--correctness-file', type=str, default=None,
@@ -228,14 +232,37 @@ def main():
 
     all_results_path = Path(args.all_results_output) if args.all_results_output else output_root / "all_ged_results.jsonl"
 
+    # Resolve baseline-original source for GED reference graph.
+    baseline_output_root = Path(args.baseline_output_root) if args.baseline_output_root else None
+
+    baseline_original_records_path = None
+    if args.baseline_original_records:
+        baseline_original_records_path = Path(args.baseline_original_records)
+    elif baseline_output_root is not None:
+        candidate_a = baseline_output_root / "dag_analysis" / "analyzed_records.jsonl"
+        candidate_b = baseline_output_root / "dag_analysis_50" / "analyzed_records.jsonl"
+        if candidate_a.exists():
+            baseline_original_records_path = candidate_a
+        elif candidate_b.exists():
+            baseline_original_records_path = candidate_b
+
     print("Loading data...")
     variant_records = load_batch_records(str(variant_records_path))
     if args.original_records:
         original_records = load_batch_records(str(Path(args.original_records)))
         print(f"Loaded optional original records from {args.original_records}")
+    elif baseline_original_records_path:
+        original_records = load_batch_records(str(baseline_original_records_path))
+        print(
+            "Using baseline original DAG records as GED reference: "
+            f"{baseline_original_records_path}"
+        )
     else:
         original_records = None
-        print("No --original-records provided, using original_0 from variant records as GED baseline.")
+        print(
+            "No explicit baseline original records provided; fallback to "
+            "original_0 from variant records as GED baseline."
+        )
     correctness_data = load_correctness_data(str(correctness_path))
 
     if args.problem_id:
