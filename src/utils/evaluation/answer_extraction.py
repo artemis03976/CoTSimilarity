@@ -452,6 +452,7 @@ def extract_minif2f_isabelle(question, reasoning, task):
     return reasoning.strip()
 
 def extract_cmath_few_shot_test(question, reasoning, task):
+    # Chinese markers are part of the CMATH prompt format and must remain literal.
     if '问题：' in reasoning:
         reasoning = reasoning.split("问题：", 1)[0]
     if '答案是' in reasoning:

@@ -67,7 +67,7 @@ def generate_html_report(records: List[Dict], output_path: str):
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>模型生成结果查看器</title>
+    <title>Model Generation Result Viewer</title>
     <script>
     MathJax = {{
         tex: {{
@@ -81,30 +81,30 @@ def generate_html_report(records: List[Dict], output_path: str):
 </head>
 <body>
     <div class="container">
-        <h1>📊 模型生成结果查看器</h1>
+        <h1>📊 Model Generation Result Viewer</h1>
         <p style="color: #666; margin-bottom: 30px;">Model Generation Results Viewer</p>
 
-        <h2>📈 总体统计</h2>
+        <h2>📈 Overall Statistics</h2>
         <div class="stats">
             <div class="stat-card">
-                <div class="stat-label">总记录数</div>
+                <div class="stat-label">Total Records</div>
                 <div class="stat-value">{stats['total_records']}</div>
             </div>
             <div class="stat-card blue">
-                <div class="stat-label">总变体数</div>
+                <div class="stat-label">Total Variants</div>
                 <div class="stat-value">{stats['total_variants']}</div>
             </div>
             <div class="stat-card green">
-                <div class="stat-label">正确数量</div>
+                <div class="stat-label">Correct</div>
                 <div class="stat-value">{stats['correct_count']}</div>
             </div>
             <div class="stat-card red">
-                <div class="stat-label">错误数量</div>
+                <div class="stat-label">Incorrect</div>
                 <div class="stat-value">{stats['incorrect_count']}</div>
             </div>
         </div>
 
-        <h2>📋 各变体统计</h2>
+        <h2>📋 Variant Statistics</h2>
         <div class="variant-summary">
             <div class="summary-item">
                 <span class="summary-label">Original:</span>
@@ -123,7 +123,7 @@ def generate_html_report(records: List[Dict], output_path: str):
             </div>
         </div>
 
-        <h2>🔍 浏览记录</h2>
+        <h2>🔍 Browse Records</h2>
         {navigation_html}
 
         <div id="recordContainer"></div>
@@ -147,7 +147,7 @@ def generate_html_report(records: List[Dict], output_path: str):
             const level = escapeHtml(record.level || 'Unknown');
 
             let html = `
-                <h2>📝 记录 ${{index + 1}}: Problem ID ${{problemId}}</h2>
+                <h2>📝 Record ${{index + 1}}: Problem ID ${{problemId}}</h2>
                 <div class="record">
                     <div class="record-header">
                         <div>
@@ -171,7 +171,7 @@ def generate_html_report(records: List[Dict], output_path: str):
                     const sample = (entry.samples && entry.samples.length > 0) ? entry.samples[0] : entry;
                     const correct = sample.correct || false;
                     const correctClass = correct ? 'correct' : 'incorrect';
-                    const correctText = correct ? '✓ 正确' : '✗ 错误';
+                    const correctText = correct ? '✓ Correct' : '✗ Incorrect';
                     const problemText = escapeHtml(entry.problem || '');
                     const groundTruth = escapeHtml(String(entry.ground_truth || ''));
                     const response = escapeHtml(sample.response || '');
@@ -179,15 +179,15 @@ def generate_html_report(records: List[Dict], output_path: str):
                     html += `
                         <div id="${{variantName}}" class="tab-content ${{isActive}}">
                             <span class="badge ${{correctClass}}">${{correctText}}</span>
-                            <h3>问题描述</h3>
+                            <h3>Problem</h3>
                             <div class="content-box">
                                 <div class="content-text">${{problemText}}</div>
                             </div>
-                            <h3>标准答案</h3>
+                            <h3>Ground Truth</h3>
                             <div class="content-box">
                                 <div class="content-text">${{groundTruth}}</div>
                             </div>
-                            <h3>模型回答</h3>
+                            <h3>Model Response</h3>
                             <div class="content-box">
                                 <div class="content-text">${{response}}</div>
                             </div>
@@ -226,12 +226,12 @@ def generate_html_report(records: List[Dict], output_path: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="生成模型结果的 HTML 可视化报告")
+    parser = argparse.ArgumentParser(description="Generate an HTML report for model generation results")
     parser.add_argument("--input", type=str,
                        default="output/qwen/dcpr/all_records.jsonl",
-                       help="输入的 JSONL 文件")
+                       help="Input JSONL file")
     parser.add_argument("--output", type=str, default=None,
-                       help="输出的 HTML 文件")
+                       help="Output HTML file")
     args = parser.parse_args()
 
     # Check if input file exists

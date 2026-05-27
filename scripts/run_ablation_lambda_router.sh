@@ -2,40 +2,40 @@
 # =============================================================================
 # run_ablation_lambda_router.sh —— DCPR Ablation: Lambda Router
 #
-# 变动参数：lambda_router（router loss 权重）
-# 搜索范围建议：[0.1, 0.3, 0.5, 0.7, 0.9]
+# Swept parameter: lambda_router (router loss weight)
+# Suggested search range: [0.1, 0.3, 0.5, 0.7, 0.9]
 #
 # =============================================================================
 
 set -e
 
 # ---------------------------------------------------------------------------
-# 配置区
+# Configuration
 # ---------------------------------------------------------------------------
 EXP_NAME="ablation_lambda_router"
 MODEL_NAME="Qwen/Qwen2.5-Math-7B-Instruct"
 TRAIN_DATA="data/qwen/dcpr_train.jsonl"
 VAL_DATA="data/qwen/dcpr_val.jsonl"
 TEST_DATA="data/math_paired.jsonl"
-BASE_CHECKPOINT="checkpoints/dcpr_pipeline_test"   # baseline checkpoint（用于对比）
+BASE_CHECKPOINT="checkpoints/dcpr_pipeline_test"   # baseline checkpoint for comparison
 
 BATCH_SIZE=4
 NUM_EPOCHS=15
 LEARNING_RATE=4e-5
 
-# lambda_router 搜索列表
+# lambda_router sweep values
 LAMBDA_VALUES=(0.1 0.5 1.0 1.5 2.0)
 
 # ---------------------------------------------------------------------------
-# 前置检查
+# Prerequisite checks
 # ---------------------------------------------------------------------------
 if [ ! -f "${TRAIN_DATA}" ] || [ ! -f "${VAL_DATA}" ]; then
-    echo "错误: 训练/验证集不存在，请先运行 src/dcpr_dataset/split_dataset.py"
+    echo "Error: train/validation sets do not exist. Run src/dcpr_dataset/split_dataset.py first."
     exit 1
 fi
 
 # ---------------------------------------------------------------------------
-# 主循环
+# Main loop
 # ---------------------------------------------------------------------------
 for LAMBDA in "${LAMBDA_VALUES[@]}"; do
     RUN_NAME="${EXP_NAME}_lr${LAMBDA}"
@@ -48,8 +48,8 @@ for LAMBDA in "${LAMBDA_VALUES[@]}"; do
     echo "Ablation: lambda_router = ${LAMBDA}"
     echo "============================================================"
 
-    # ---- 训练 ----
-    echo "[1/3] 训练 (lambda_router=${LAMBDA}) ..."
+    # ---- Training ----
+    echo "[1/3] Training (lambda_router=${LAMBDA}) ..."
     python scripts/train_dcpr.py \
         --model_name "${MODEL_NAME}" \
         --train_data_path "${TRAIN_DATA}" \
@@ -63,12 +63,12 @@ for LAMBDA in "${LAMBDA_VALUES[@]}"; do
     LATEST_CKPT=$(ls -td "${CKPT_DIR}"/checkpoint-* 2>/dev/null | head -1)
     LATEST_CKPT="${LATEST_CKPT%/}"
     if [ -z "${LATEST_CKPT}" ]; then
-        echo "警告: 训练未产出 checkpoint，跳过本次推理 (lambda_router=${LAMBDA})"
+        echo "Warning: training did not produce a checkpoint; skipping inference (lambda_router=${LAMBDA})"
         continue
     fi
 
-    # ---- 推理 ----
-    echo "[2/3] 推理测试 ..."
+    # ---- Inference ----
+    echo "[2/3] Inference evaluation ..."
     mkdir -p "${INFER_DIR}"
     python scripts/dcpr_inference_test.py \
         --checkpoint "${LATEST_CKPT}/dcpr_trainable.pt" \
@@ -77,10 +77,10 @@ for LAMBDA in "${LAMBDA_VALUES[@]}"; do
         --data_path "${TEST_DATA}" \
         --device cuda
 
-    # ---- 指标统计 ----
-    echo "[3/3] 指标统计 ..."
+    # ---- Metrics ----
+    echo "[3/3] Metric reporting ..."
     echo ""
-    echo "--- lambda_router=${LAMBDA} 结果 ---"
+    echo "--- lambda_router=${LAMBDA} results ---"
     python src/utils/evaluation/calculate_accuracy.py \
         "${INFER_DIR}/all_records.jsonl"
 
@@ -93,9 +93,9 @@ for LAMBDA in "${LAMBDA_VALUES[@]}"; do
     fi
 
     echo ""
-    echo ">>> lambda_router=${LAMBDA} 完成 <<<"
+    echo ">>> lambda_router=${LAMBDA} complete <<<"
     echo ""
 
 done
 
-echo "========== 全部 lambda_router 实验完成 =========="
+echo "========== All lambda_router experiments complete =========="

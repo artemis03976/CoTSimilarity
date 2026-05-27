@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""统一计算 all_records.jsonl 指标，并支持 baseline 与 DCPR 对比。"""
+"""Compute all_records.jsonl metrics and optionally compare against a baseline."""
 
 import argparse
 import json
@@ -10,7 +10,7 @@ VARIANTS = ["original", "simple", "hard"]
 
 
 def _extract_correct_flags(question_data):
-    """从 question_data 中提取每个 sample 的 correct 标记列表。"""
+    """Extract per-sample correctness flags from one variant record."""
     if "samples" in question_data and question_data["samples"]:
         return [bool(sample.get("correct", False)) for sample in question_data["samples"]]
     if "correct" in question_data:
@@ -19,7 +19,7 @@ def _extract_correct_flags(question_data):
 
 
 def calculate_metrics(jsonl_file):
-    """计算每种题型的 first@1 / any@k / avg_sample_acc。"""
+    """Calculate first@1, any@k, and average sample accuracy by variant."""
     stats = {
         variant: {
             "total": 0,
@@ -122,13 +122,13 @@ def print_delta(base_metrics, new_metrics):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="统一实验指标统计脚本")
-    parser.add_argument("file", type=str, help="待评估 all_records*.jsonl")
-    parser.add_argument("--compare-file", type=str, default=None, help="对比文件（如 baseline all_records*.jsonl）")
+    parser = argparse.ArgumentParser(description="Compute unified experiment accuracy metrics.")
+    parser.add_argument("file", type=str, help="all_records*.jsonl file to evaluate")
+    parser.add_argument("--compare-file", type=str, default=None, help="Optional baseline all_records*.jsonl file")
     args = parser.parse_args()
 
     if not Path(args.file).exists():
-        print(f"错误: 文件不存在 - {args.file}")
+        print(f"Error: file does not exist - {args.file}")
         sys.exit(1)
 
     new_metrics = calculate_metrics(args.file)
@@ -136,7 +136,7 @@ def main():
 
     if args.compare_file:
         if not Path(args.compare_file).exists():
-            print(f"错误: 对比文件不存在 - {args.compare_file}")
+            print(f"Error: compare file does not exist - {args.compare_file}")
             sys.exit(1)
         base_metrics = calculate_metrics(args.compare_file)
         print_metrics(f"Baseline - {Path(args.compare_file).name}", base_metrics)

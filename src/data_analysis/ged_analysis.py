@@ -192,19 +192,19 @@ def write_results_to_csv(results: List[Dict], problem_id: int, output_dir: str):
 def main():
     parser = argparse.ArgumentParser(description='Analyze GED between original and variant responses')
     parser.add_argument('--output-root', type=str, default=None,
-                        help='模型输出根目录（包含 all_records*.jsonl 与 dag_analysis* 目录）')
+                        help='Model output root containing all_records*.jsonl and dag_analysis* directories')
     parser.add_argument('--original-records', type=str, default=None,
-                        help='[可选] 原始题(original) DAG 分析结果 JSONL 路径；优先级最高')
+                        help='Optional original-problem DAG analysis JSONL path; highest priority')
     parser.add_argument('--baseline-output-root', type=str, default=None,
-                        help='[可选] baseline 模型输出根目录（如 output/qwen），用于读取 original DAG 作为 GED 基准')
+                        help='Optional baseline model output root, e.g. output/qwen, used to load original DAGs as GED references')
     parser.add_argument('--baseline-original-records', type=str, default=None,
-                        help='[可选] baseline 的 original DAG 分析 JSONL 路径（优先于 --baseline-output-root 自动推断）')
+                        help='Optional baseline original DAG analysis JSONL path; overrides --baseline-output-root inference')
     parser.add_argument('--variant-records', type=str, default=None,
-                        help='simple/hard DAG 分析结果 JSONL 路径（默认: <output-root>/dag_analysis_50/analyzed_records.jsonl）')
+                        help='simple/hard DAG analysis JSONL path; default: <output-root>/dag_analysis_50/analyzed_records.jsonl')
     parser.add_argument('--correctness-file', type=str, default=None,
-                        help='回答正确性 JSONL 路径（默认: <output-root>/all_records_50.jsonl）')
+                        help='Answer correctness JSONL path; default: <output-root>/all_records_50.jsonl')
     parser.add_argument('--all-results-output', type=str, default=None,
-                        help='GED 汇总 JSONL 输出路径（默认: <output-root>/all_ged_results.jsonl）')
+                        help='GED summary JSONL output path; default: <output-root>/all_ged_results.jsonl')
     parser.add_argument('--problem-id', type=int, help='Specific problem ID to analyze (default: all 279)')
     parser.add_argument('--num-samples', type=int, default=50, help='Number of samples per variant (max 50)')
     parser.add_argument('--save-csv', action='store_true', help='Save individual CSV files per problem')
@@ -217,14 +217,14 @@ def main():
         variant_records_path = Path(args.variant_records)
     else:
         if output_root is None:
-            raise ValueError("需要提供 --output-root 或 --variant-records")
+            raise ValueError("Provide --output-root or --variant-records")
         variant_records_path = output_root / "dag_analysis_50" / "analyzed_records.jsonl"
 
     if args.correctness_file:
         correctness_path = Path(args.correctness_file)
     else:
         if output_root is None:
-            raise ValueError("需要提供 --output-root 或 --correctness-file")
+            raise ValueError("Provide --output-root or --correctness-file")
         correctness_path = output_root / "all_records_50.jsonl"
 
     if output_root is None:

@@ -2,15 +2,15 @@
 # =============================================================================
 # run_ablation_context_layer_idx.sh —— DCPR Ablation: Context Layer Index
 #
-# 变动参数：context_layer_idx（从 Transformer 第几层提取 hidden states 作为 h_Q）
-# 搜索范围建议：[10, 12, 15, 18, 20, 24]（针对 Qwen2.5-Math-7B，层编号 0-27）
+# Swept parameter: context_layer_idx (Transformer layer used to extract h_Q)
+# Suggested search range: [10, 12, 15, 18, 20, 24] for Qwen2.5-Math-7B layers 0-27.
 #
 # =============================================================================
 
 set -e
 
 # ---------------------------------------------------------------------------
-# 配置区
+# Configuration
 # ---------------------------------------------------------------------------
 EXP_NAME="ablation_context_layer_idx"
 MODEL_NAME="Qwen/Qwen2.5-Math-7B-Instruct"
@@ -23,19 +23,19 @@ BATCH_SIZE=4
 NUM_EPOCHS=15
 LEARNING_RATE=4e-5
 
-# context_layer_idx 搜索列表（请根据实际模型层数调整）
+# context_layer_idx sweep values; adjust for the actual number of model layers.
 CONTEXT_LAYER_IDX_LIST=(10 12 15 18 20 24)
 
 # ---------------------------------------------------------------------------
-# 前置检查
+# Prerequisite checks
 # ---------------------------------------------------------------------------
 if [ ! -f "${TRAIN_DATA}" ] || [ ! -f "${VAL_DATA}" ]; then
-    echo "错误: 训练/验证集不存在，请先运行 src/dcpr_dataset/split_dataset.py"
+    echo "Error: train/validation sets do not exist. Run src/dcpr_dataset/split_dataset.py first."
     exit 1
 fi
 
 # ---------------------------------------------------------------------------
-# 主循环
+# Main loop
 # ---------------------------------------------------------------------------
 for LAYER_IDX in "${CONTEXT_LAYER_IDX_LIST[@]}"; do
     RUN_NAME="${EXP_NAME}_layer${LAYER_IDX}"
@@ -48,8 +48,8 @@ for LAYER_IDX in "${CONTEXT_LAYER_IDX_LIST[@]}"; do
     echo "Ablation: context_layer_idx = ${LAYER_IDX}"
     echo "============================================================"
 
-    # ---- 训练 ----
-    echo "[1/3] 训练 (context_layer_idx=${LAYER_IDX}) ..."
+    # ---- Training ----
+    echo "[1/3] Training (context_layer_idx=${LAYER_IDX}) ..."
     python scripts/train_dcpr.py \
         --model_name "${MODEL_NAME}" \
         --train_data_path "${TRAIN_DATA}" \
@@ -63,12 +63,12 @@ for LAYER_IDX in "${CONTEXT_LAYER_IDX_LIST[@]}"; do
     LATEST_CKPT=$(ls -td "${CKPT_DIR}"/checkpoint-* 2>/dev/null | head -1)
     LATEST_CKPT="${LATEST_CKPT%/}"
     if [ -z "${LATEST_CKPT}" ]; then
-        echo "警告: 训练未产出 checkpoint，跳过本次推理 (context_layer_idx=${LAYER_IDX})"
+        echo "Warning: training did not produce a checkpoint; skipping inference (context_layer_idx=${LAYER_IDX})"
         continue
     fi
 
-    # ---- 推理 ----
-    echo "[2/3] 推理测试 ..."
+    # ---- Inference ----
+    echo "[2/3] Inference evaluation ..."
     mkdir -p "${INFER_DIR}"
     python scripts/dcpr_inference_test.py \
         --checkpoint "${LATEST_CKPT}/dcpr_trainable.pt" \
@@ -78,10 +78,10 @@ for LAYER_IDX in "${CONTEXT_LAYER_IDX_LIST[@]}"; do
         --context_layer_idx ${LAYER_IDX} \
         --device cuda
 
-    # ---- 指标统计 ----
-    echo "[3/3] 指标统计 ..."
+    # ---- Metrics ----
+    echo "[3/3] Metric reporting ..."
     echo ""
-    echo "--- context_layer_idx=${LAYER_IDX} 结果 ---"
+    echo "--- context_layer_idx=${LAYER_IDX} results ---"
     python src/utils/evaluation/calculate_accuracy.py \
         "${INFER_DIR}/all_records.jsonl"
 
@@ -94,9 +94,9 @@ for LAYER_IDX in "${CONTEXT_LAYER_IDX_LIST[@]}"; do
     fi
 
     echo ""
-    echo ">>> context_layer_idx=${LAYER_IDX} 完成 <<<"
+    echo ">>> context_layer_idx=${LAYER_IDX} complete <<<"
     echo ""
 
 done
 
-echo "========== 全部 context_layer_idx 实验完成 =========="
+echo "========== All context_layer_idx experiments complete =========="

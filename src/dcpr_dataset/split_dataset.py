@@ -33,31 +33,31 @@ def variant_stats(items):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="按 problem_id 划分 DCPR 训练/验证/测试集")
-    parser.add_argument("--input", required=True, help="输入 JSONL（如 data/<model>/dcpr_dataset.jsonl）")
-    parser.add_argument("--train-ratio", type=float, default=0.8, help="训练集比例")
-    parser.add_argument("--val-ratio", type=float, default=0.1, help="验证集比例")
-    parser.add_argument("--test-ratio", type=float, default=0.1, help="测试集比例")
-    parser.add_argument("--seed", type=int, default=42, help="随机种子")
-    parser.add_argument("--train-output", type=str, default=None, help="训练集输出路径")
-    parser.add_argument("--val-output", type=str, default=None, help="验证集输出路径")
-    parser.add_argument("--test-output", type=str, default=None, help="测试集输出路径")
+    parser = argparse.ArgumentParser(description="Split a DCPR dataset into train/validation/test sets by problem_id")
+    parser.add_argument("--input", required=True, help="Input JSONL, e.g. data/<model>/dcpr_dataset.jsonl")
+    parser.add_argument("--train-ratio", type=float, default=0.8, help="Training set ratio")
+    parser.add_argument("--val-ratio", type=float, default=0.1, help="Validation set ratio")
+    parser.add_argument("--test-ratio", type=float, default=0.1, help="Test set ratio")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--train-output", type=str, default=None, help="Training set output path")
+    parser.add_argument("--val-output", type=str, default=None, help="Validation set output path")
+    parser.add_argument("--test-output", type=str, default=None, help="Test set output path")
     args = parser.parse_args()
 
     ratio_sum = args.train_ratio + args.val_ratio + args.test_ratio
     if abs(ratio_sum - 1.0) > 1e-8:
-        raise ValueError(f"train/val/test 比例之和必须为 1.0，当前为 {ratio_sum}")
+        raise ValueError(f"train/val/test ratios must sum to 1.0, got {ratio_sum}")
 
     input_path = Path(args.input)
     all_items = load_jsonl(input_path)
     if not all_items:
-        raise ValueError(f"输入文件为空：{input_path}")
+        raise ValueError(f"Input file is empty: {input_path}")
 
     by_problem = defaultdict(list)
     for item in all_items:
         pid = item.get("problem_id")
         if pid is None:
-            raise ValueError("检测到缺失 problem_id 的样本，无法按题划分")
+            raise ValueError("Found a sample without problem_id; cannot split by problem")
         by_problem[pid].append(item)
 
     problem_ids = list(by_problem.keys())

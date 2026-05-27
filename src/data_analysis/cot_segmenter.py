@@ -292,13 +292,13 @@ def process_record(record, threshold=LONG_PARAGRAPH_THRESHOLD, min_step=MIN_STEP
 
 
 def main():
-    parser = argparse.ArgumentParser(description="CoT 推理链启发式切分器")
-    parser.add_argument("--input", type=str, required=True, help="输入 JSONL 路径")
-    parser.add_argument("--output", type=str, default=None, help="输出 JSONL 路径（默认按输入自动推导）")
+    parser = argparse.ArgumentParser(description="Heuristic CoT reasoning chain segmenter")
+    parser.add_argument("--input", type=str, required=True, help="Input JSONL path")
+    parser.add_argument("--output", type=str, default=None, help="Output JSONL path, inferred from input by default")
     parser.add_argument("--threshold", type=int, default=LONG_PARAGRAPH_THRESHOLD,
-                        help="长段落阈值（字符数），超过此值才进行逻辑词/句号切分")
+                        help="Long paragraph threshold in characters; logical-word/sentence splitting is only applied above this value")
     parser.add_argument("--min-step", type=int, default=MIN_STEP_LENGTH,
-                        help="最短步骤长度（字符数），过短片段将被合并")
+                        help="Minimum step length in characters; shorter fragments are merged")
     args = parser.parse_args()
 
     input_path = args.input
@@ -331,9 +331,9 @@ def main():
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     avg_steps = total_steps / total_samples if total_samples else 0
-    print(f"已处理 {len(data)} 条记录（{total_samples} 个 response）")
-    print(f"共切分出 {total_steps} 个步骤，平均每个 response {avg_steps:.1f} 步")
-    print(f"结果已保存至 {output_path}")
+    print(f"Processed {len(data)} records ({total_samples} responses)")
+    print(f"Segmented {total_steps} steps in total, {avg_steps:.1f} steps per response on average")
+    print(f"Results saved to {output_path}")
 
 
 if __name__ == "__main__":

@@ -467,24 +467,24 @@ def build_common_css() -> str:
 
 
 def build_navigation_html(total_records: int, include_random: bool = False, total_count_id: str = "totalRecords") -> str:
-    random_button = '<button class="nav-btn" onclick="randomRecord()">🎲 随机</button>' if include_random else ""
+    random_button = '<button class="nav-btn" onclick="randomRecord()">🎲 Random</button>' if include_random else ""
     return dedent(
         f"""
         <div class="navigation">
             <div class="nav-buttons">
-                <button class="nav-btn" id="firstBtn" onclick="goToFirst()">⏮ 首页</button>
-                <button class="nav-btn" id="prevBtn" onclick="goToPrev()">◀ 上一个</button>
+                <button class="nav-btn" id="firstBtn" onclick="goToFirst()">⏮ First</button>
+                <button class="nav-btn" id="prevBtn" onclick="goToPrev()">◀ Previous</button>
             </div>
             <div class="nav-info">
                 <span id="currentIndex">1</span> / <span id="{total_count_id}">{total_records}</span>
             </div>
             <div class="nav-buttons">
-                <button class="nav-btn" id="nextBtn" onclick="goToNext()">下一个 ▶</button>
-                <button class="nav-btn" id="lastBtn" onclick="goToLast()">末页 ⏭</button>
+                <button class="nav-btn" id="nextBtn" onclick="goToNext()">Next ▶</button>
+                <button class="nav-btn" id="lastBtn" onclick="goToLast()">Last ⏭</button>
             </div>
             <div class="jump-controls">
-                <input type="number" class="jump-input" id="jumpInput" min="1" max="{total_records}" placeholder="跳转">
-                <button class="nav-btn" onclick="jumpTo()">跳转</button>
+                <input type="number" class="jump-input" id="jumpInput" min="1" max="{total_records}" placeholder="Jump">
+                <button class="nav-btn" onclick="jumpTo()">Jump</button>
                 {random_button}
             </div>
         </div>
@@ -536,7 +536,7 @@ def build_navigation_js(include_random: bool = False) -> str:
                 renderRecord(currentIndex);
                 input.value = '';
             }} else {{
-                alert('请输入有效的记录编号 (1-' + allRecords.length + ')');
+                alert('Please enter a valid record number (1-' + allRecords.length + ')');
             }}
         }}
 

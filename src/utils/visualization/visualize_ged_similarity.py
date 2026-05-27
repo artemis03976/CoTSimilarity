@@ -213,7 +213,7 @@ def generate_html_report(records: List[Dict], output_path: str, comparison: str,
     compared_variant_label = compared_variant.capitalize()
     variant_order_json = json.dumps(["original", compared_variant], ensure_ascii=False)
 
-    category_label = "最低" if category == "low" else "最高"
+    category_label = "lowest" if category == "low" else "highest"
 
     css_styles = build_common_css()
     navigation_html = build_navigation_html(len(records), total_count_id="totalCount")
@@ -230,7 +230,7 @@ def generate_html_report(records: List[Dict], output_path: str, comparison: str,
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>GED {category_label}相似度示例可视化</title>
+    <title>GED {category_label} Similarity Example Viewer</title>
     <script>
     MathJax = {{
         tex: {{
@@ -245,17 +245,17 @@ def generate_html_report(records: List[Dict], output_path: str, comparison: str,
 </head>
 <body>
     <div class="container">
-        <h1>🔍 图编辑距离 (GED) {category_label}相似度示例分析</h1>
-        <p style="color: #666; margin-bottom: 30px;">展示 original vs {compared_variant} 变体间 GED {category_label}的问题及其完整分析</p>
+        <h1>🔍 Graph Edit Distance (GED) {category_label} Similarity Examples</h1>
+        <p style="color: #666; margin-bottom: 30px;">Problems with the {category_label} GED between original and {compared_variant} variants, with complete analysis</p>
 
         <div class="metadata">
             <div class="metadata-item">
-                <span class="metadata-label">总示例数:</span>
+                <span class="metadata-label">Total Examples:</span>
                 <span id="totalRecords">{len(records)}</span>
             </div>
         </div>
 
-        <h2>🔍 浏览记录</h2>
+        <h2>🔍 Browse Records</h2>
         {navigation_html}
 
         <div id="recordContainer"></div>
@@ -307,11 +307,11 @@ def generate_html_report(records: List[Dict], output_path: str, comparison: str,
                 html += `<div id="${variantName}" class="tab-content ${isActive}">`;
 
                 if (!variant) {
-                    html += '<p style="color: #e74c3c; padding: 20px;">⚠️ 此变体数据缺失</p>';
+                    html += '<p style="color: #e74c3c; padding: 20px;">⚠️ Missing data for this variant</p>';
                 } else {
                     if ('correct' in variant) {
                         const correctClass = variant.correct ? 'correct' : 'incorrect';
-                        const correctText = variant.correct ? '✓ 正确' : '✗ 错误';
+                        const correctText = variant.correct ? '✓ Correct' : '✗ Incorrect';
                         html += `<span class="badge ${correctClass}">${correctText}</span>`;
                     }
 
@@ -319,7 +319,7 @@ def generate_html_report(records: List[Dict], output_path: str, comparison: str,
                     html += `
                         <div class="metadata">
                             <div class="metadata-item">
-                                <span class="metadata-label">步骤数:</span>
+                                <span class="metadata-label">Steps:</span>
                                 <span>${numSteps}</span>
                             </div>
                         </div>
@@ -328,7 +328,7 @@ def generate_html_report(records: List[Dict], output_path: str, comparison: str,
                     const problemText = variant.problem || '';
                     const displayText = problemText.length > 500 ? problemText.substring(0, 500) + '...' : problemText;
                     html += `
-                        <h3>问题描述</h3>
+                        <h3>Problem</h3>
                         <div class="problem-box">
                             <div class="problem-text">${escapeHtml(displayText)}</div>
                         </div>
@@ -337,7 +337,7 @@ def generate_html_report(records: List[Dict], output_path: str, comparison: str,
                     const responseText = variant.response || '';
                     const displayResponse = responseText.length > 2000 ? responseText.substring(0, 2000) + '...' : responseText;
                     html += `
-                        <h3>模型回答</h3>
+                        <h3>Model Response</h3>
                         <div class="response-box">
                             <div class="response-text">${escapeHtml(displayResponse)}</div>
                         </div>
@@ -348,7 +348,7 @@ def generate_html_report(records: List[Dict], output_path: str, comparison: str,
                         const dagMermaid = generateDagMermaid(dagCompressed);
                         const mermaidId = `mermaid-${index}-${variantName}-${mermaidCounter++}`;
                         html += `
-                            <h3>依赖关系图 (DAG) - 压缩视图</h3>
+                            <h3>Dependency Graph (DAG) - Compressed View</h3>
                             <div class="mermaid" id="${mermaidId}">
 ${dagMermaid}
                             </div>
@@ -356,14 +356,14 @@ ${dagMermaid}
 
                         const depTable = generateDependencyTable(dagCompressed);
                         html += `
-                            <h3>依赖分析详情</h3>
+                            <h3>Dependency Analysis Details</h3>
                             <table>
                                 <thead>
                                     <tr>
-                                        <th>步骤序号</th>
-                                        <th>动作类型</th>
-                                        <th>分析说明</th>
-                                        <th>依赖项</th>
+                                        <th>Step</th>
+                                        <th>Action Type</th>
+                                        <th>Analysis</th>
+                                        <th>Dependencies</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -372,7 +372,7 @@ ${depTable}
                             </table>
                         `;
                     } else {
-                        html += '<p style="color: #e67e22; padding: 20px;">⚠️ 此变体没有 DAG 分析数据</p>';
+                        html += '<p style="color: #e67e22; padding: 20px;">⚠️ No DAG analysis data for this variant</p>';
                     }
                 }
 
@@ -418,23 +418,23 @@ ${depTable}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="可视化 GED 相似度示例（百分比过滤）")
+    parser = argparse.ArgumentParser(description="Visualize GED similarity examples with percentile filtering")
     parser.add_argument("--csv", type=str,
                        default="output/qwen/dag_analysis/similarity_results.csv",
-                       help="相似度结果 CSV 文件")
+                       help="Similarity result CSV file")
     parser.add_argument("--segmented", type=str,
                        default="output/qwen/segmented_records.jsonl",
-                       help="切分后的记录文件")
+                       help="Segmented records file")
     parser.add_argument("--analyzed", type=str,
                        default="output/qwen/dag_analysis/analyzed_records.jsonl",
-                       help="DAG 分析结果文件")
+                       help="DAG analysis result file")
     parser.add_argument("--output", type=str,
                        default="output/qwen/dag_analysis/ged_similarity_visualization.html",
-                       help="输出的 HTML 文件前缀")
+                       help="Output HTML file prefix")
     parser.add_argument("--low-percentile", type=float, default=10.0,
-                       help="最低 GED 百分比（例如 10 表示最低的 10%%）")
+                       help="Lowest GED percentile, e.g. 10 means the lowest 10%%")
     parser.add_argument("--high-percentile", type=float, default=10.0,
-                       help="最高 GED 百分比（例如 10 表示最高的 10%%）")
+                       help="Highest GED percentile, e.g. 10 means the highest 10%%")
     args = parser.parse_args()
 
     for path_arg, path_val in [("csv", args.csv), ("segmented", args.segmented), ("analyzed", args.analyzed)]:

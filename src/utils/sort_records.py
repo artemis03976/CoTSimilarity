@@ -85,67 +85,67 @@ def save_records(records: List[Dict], output_path: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="对 DAG 分析结果按 problem_id 排序"
+        description="Sort DAG analysis results by problem_id"
     )
     parser.add_argument(
         "--input",
         type=str,
         default="output/deepseek/dag_analysis/analyzed_records.jsonl",
-        help="输入的分析结果文件"
+        help="Input analysis result file"
     )
     parser.add_argument(
         "--output",
         type=str,
         default="output/deepseek/dag_analysis/analyzed_records_sorted.jsonl",
-        help="输出的排序后文件"
+        help="Output sorted file"
     )
     args = parser.parse_args()
 
     # Check if input file exists
     if not Path(args.input).exists():
-        print(f"错误: 输入文件不存在: {args.input}")
+        print(f"Error: input file does not exist: {args.input}")
         return
 
     # Load records
-    print(f"正在加载数据: {args.input}")
+    print(f"Loading data: {args.input}")
     records = load_records(args.input)
-    print(f"已加载 {len(records)} 条记录")
+    print(f"Loaded {len(records)} records")
 
     if not records:
-        print("警告: 没有找到任何记录")
+        print("Warning: no records found")
         return
 
     # Show sample of original order
-    print("\n原始顺序 (前5条):")
+    print("\nOriginal order (first 5):")
     for i, record in enumerate(records[:5]):
         pid = extract_problem_id_from_record(record)
         print(f"  {i+1}. Problem ID: {pid}")
 
     # Sort records
-    print("\n正在排序...")
+    print("\nSorting...")
     sorted_records = sort_records(records)
 
     # Show sample of sorted order
-    print("\n排序后顺序 (前5条):")
+    print("\nSorted order (first 5):")
     for i, record in enumerate(sorted_records[:5]):
         pid = extract_problem_id_from_record(record)
         print(f"  {i+1}. Problem ID: {pid}")
 
     # Save sorted records
-    print(f"\n正在保存到: {args.output}")
+    print(f"\nSaving to: {args.output}")
     save_records(sorted_records, args.output)
 
-    print(f"\n完成! 已保存 {len(sorted_records)} 条排序后的记录")
-    print(f"输出文件: {Path(args.output).absolute()}")
+    print(f"\nDone. Saved {len(sorted_records)} sorted records")
+    print(f"Output file: {Path(args.output).absolute()}")
 
     # Show statistics
     problem_ids = [extract_problem_id_from_record(r) for r in sorted_records]
     unique_ids = sorted(set(problem_ids), key=extract_numeric_id)
-    print(f"\nProblem ID 统计:")
-    print(f"  总记录数: {len(sorted_records)}")
-    print(f"  唯一 Problem ID 数: {len(unique_ids)}")
-    print(f"  最小 ID: {unique_ids[0]}")
-    print(f"  最大 ID: {unique_ids[-1]}")
+    print(f"\nProblem ID statistics:")
+    print(f"  Total records: {len(sorted_records)}")
+    print(f"  Unique Problem IDs: {len(unique_ids)}")
+    print(f"  Minimum ID: {unique_ids[0]}")
+    print(f"  Maximum ID: {unique_ids[-1]}")
 
 
 if __name__ == "__main__":

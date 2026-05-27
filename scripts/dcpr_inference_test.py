@@ -83,7 +83,7 @@ def check_answer(problem, response, ground_truth, dataset_type):
     try:
         return answer_check(problem, response, ground_truth, dataset_type)
     except Exception as e:
-        print(f"[WARN] answer_check 异常: {e}")
+        print(f"[WARN] answer_check failed: {e}")
         return False
 
 
@@ -154,7 +154,7 @@ def run_eval(model, data, output_dir, alpha_cache_path, temperature=0.0, top_p=1
             fout.flush()
 
     error_count = total - correct_count
-    print(f"\n测试完成: {total} 组, 全部通过 {correct_count} 组, 存在错误 {error_count} 组, 已保存至 {out_path}")
+    print(f"\nEvaluation complete: {total} groups, {correct_count} fully passed, {error_count} failed, saved to {out_path}")
 
     save_alpha_cache(all_alphas, alpha_cache_path)
     plot_alpha_density(all_alphas, output_dir)
@@ -203,7 +203,7 @@ def run_alpha_probe(model, data, output_dir, forced_alpha, temperature=0.0, top_
             fout.write(json.dumps(record, ensure_ascii=False) + "\n")
             fout.flush()
 
-    print(f"\nAlpha probe 完成: {len(data)} 条, forced_alpha={forced_alpha:.2f}, 已保存至 {out_path}")
+    print(f"\nAlpha probe complete: {len(data)} records, forced_alpha={forced_alpha:.2f}, saved to {out_path}")
 
 
 def load_model(args):
@@ -230,38 +230,38 @@ def load_model(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, required=True, help="训练好的 DCPR checkpoint 路径")
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Math-7B-Instruct", help="底座模型名称或路径")
-    parser.add_argument("--output_dir", type=str, default="output", help="输出目录")
-    parser.add_argument("--data_path", type=str, default=DATA_PATH, help="测试数据路径")
-    parser.add_argument("--id", type=int, default=None, help="指定 problem_id")
-    parser.add_argument("--num", type=int, default=None, help="测试条数（未指定 id 时生效）")
-    parser.add_argument("--temperature", type=float, default=0.0, help="采样温度，0 表示 greedy decoding")
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to the trained DCPR checkpoint")
+    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Math-7B-Instruct", help="Base model name or path")
+    parser.add_argument("--output_dir", type=str, default="output", help="Output directory")
+    parser.add_argument("--data_path", type=str, default=DATA_PATH, help="Evaluation data path")
+    parser.add_argument("--id", type=int, default=None, help="Specific problem_id")
+    parser.add_argument("--num", type=int, default=None, help="Number of records to test when --id is not set")
+    parser.add_argument("--temperature", type=float, default=0.0, help="Sampling temperature; 0 means greedy decoding")
     parser.add_argument("--top_p", type=float, default=1.0, help="nucleus sampling")
-    parser.add_argument("--n", type=int, default=1, help="每个问题的采样数")
-    parser.add_argument("--max_new_tokens", type=int, default=2048, help="最大生成 token 数")
-    parser.add_argument("--device", type=str, default="cuda", help="推理设备")
-    parser.add_argument("--context_layer_idx", type=int, default=15, help="上下文编码层")
-    parser.add_argument("--prefix_length", type=int, default=50, help="prefix 长度")
-    parser.add_argument("--router_intermediate_dim", type=int, default=256, help="router 中间层维度")
+    parser.add_argument("--n", type=int, default=1, help="Samples per problem")
+    parser.add_argument("--max_new_tokens", type=int, default=2048, help="Maximum generated tokens")
+    parser.add_argument("--device", type=str, default="cuda", help="Inference device")
+    parser.add_argument("--context_layer_idx", type=int, default=15, help="Context encoding layer")
+    parser.add_argument("--prefix_length", type=int, default=50, help="Prefix length")
+    parser.add_argument("--router_intermediate_dim", type=int, default=256, help="Router hidden dimension")
     parser.add_argument("--router_dropout", type=float, default=0.05, help="router dropout")
-    parser.add_argument("--max_seq_length", type=int, default=2048, help="最大序列长度")
+    parser.add_argument("--max_seq_length", type=int, default=2048, help="Maximum sequence length")
     parser.add_argument(
         "--alpha_cache_path",
         type=str,
         default=None,
-        help="alpha 缓存文件路径（默认: output_dir/alpha_cache.json）",
+        help="Alpha cache file path (default: output_dir/alpha_cache.json)",
     )
     parser.add_argument(
         "--plot_only_from_alpha_cache",
         action="store_true",
-        help="仅从 alpha 缓存重绘密度图，不加载模型也不重新推理",
+        help="Only redraw the density plot from the alpha cache without loading the model or rerunning inference",
     )
     parser.add_argument(
         "--forced_alpha",
         type=float,
         default=None,
-        help="手动指定 alpha 值 [0,1]，绕过 dynamic router，启用 alpha probe 模式",
+        help="Manually set alpha in [0, 1], bypass the dynamic router, and enable alpha probe mode",
     )
     args = parser.parse_args()
 
@@ -269,18 +269,18 @@ def main():
 
     if args.plot_only_from_alpha_cache:
         if not os.path.exists(alpha_cache_path):
-            print(f"未找到 alpha 缓存: {alpha_cache_path}")
+            print(f"Alpha cache not found: {alpha_cache_path}")
             return
         all_alphas = load_alpha_cache(alpha_cache_path)
         plot_alpha_density(all_alphas, args.output_dir)
         return
 
-    print("正在加载 DCPR 模型...")
+    print("Loading DCPR model...")
     model = load_model(args)
 
     data = load_data(args.data_path, args.id)
     if not data:
-        print(f"未找到数据 (problem_id={args.id})")
+        print(f"No data found (problem_id={args.id})")
         return
     if args.id is None and args.num is not None:
         import random
@@ -289,9 +289,9 @@ def main():
 
     if args.forced_alpha is not None:
         if not (0.0 <= args.forced_alpha <= 1.0):
-            print(f"[ERROR] --forced_alpha 必须在 [0, 1] 范围内，当前值: {args.forced_alpha}")
+            print(f"[ERROR] --forced_alpha must be in [0, 1], got: {args.forced_alpha}")
             return
-        print(f"Alpha probe 模式: forced_alpha={args.forced_alpha:.2f}，共 {len(data)} 条数据")
+        print(f"Alpha probe mode: forced_alpha={args.forced_alpha:.2f}, records={len(data)}")
         run_alpha_probe(
             model,
             data,

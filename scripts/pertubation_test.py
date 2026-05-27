@@ -34,11 +34,11 @@ def generate_answer(llm, problem, temperature=1.0, top_p=1.0, n=1, max_tokens=20
     return [output.text for output in outputs[0].outputs]
 
 def check_answer(problem, response, ground_truth, dataset_type):
-    """调用 utils/evaluate.py 中的 answer_check 验证答案正确性"""
+    """Validate answer correctness with utils.evaluate.answer_check."""
     try:
         return answer_check(problem, response, ground_truth, dataset_type)
     except Exception as e:
-        print(f"[WARN] answer_check 异常: {e}")
+        print(f"[WARN] answer_check failed: {e}")
         return False
 
 def run_eval(
@@ -53,7 +53,7 @@ def run_eval(
     n_original=1,
     max_tokens=2048,
 ):
-    """测试指定数据，保存所有记录（含模型回答与正确性判断）"""
+    """Evaluate selected records and save responses with correctness labels."""
     output_path_obj = os.path.abspath(output_path)
     os.makedirs(os.path.dirname(output_path_obj), exist_ok=True)
     out_path = output_path_obj
@@ -120,25 +120,25 @@ def run_eval(
             fout.flush()
 
     error_count = total - correct_count
-    print(f"\n测试完成: {total} 组, 全部通过 {correct_count} 组, 存在错误 {error_count} 组, 已保存至 {out_path}")
+    print(f"\nEvaluation complete: {total} groups, {correct_count} fully passed, {error_count} failed, saved to {out_path}")
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-Math-1.5B-Instruct", help="模型名称或路径")
-    parser.add_argument("--output_path", type=str, default="output/all_records_50.jsonl", help="输出文件路径")
-    parser.add_argument("--data_path", type=str, default=DATA_PATH, help="输入数据路径")
-    parser.add_argument("--id", type=int, default=None, help="指定 problem_id")
-    parser.add_argument("--num", type=int, default=None, help="测试条数（未指定 id 时生效）")
-    parser.add_argument("--temperature", type=float, default=1.0, help="simple/hard 采样温度")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-Math-1.5B-Instruct", help="Model name or path")
+    parser.add_argument("--output_path", type=str, default="output/all_records_50.jsonl", help="Output file path")
+    parser.add_argument("--data_path", type=str, default=DATA_PATH, help="Input data path")
+    parser.add_argument("--id", type=int, default=None, help="Specific problem_id")
+    parser.add_argument("--num", type=int, default=None, help="Number of records to test when --id is not set")
+    parser.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature for simple/hard variants")
     parser.add_argument("--top_p", type=float, default=1.0, help="simple/hard nucleus sampling")
-    parser.add_argument("--n", type=int, default=50, help="simple/hard 每个问题的采样数")
-    parser.add_argument("--original_temperature", type=float, default=0.0, help="original 采样温度")
+    parser.add_argument("--n", type=int, default=50, help="Samples per simple/hard problem")
+    parser.add_argument("--original_temperature", type=float, default=0.0, help="Sampling temperature for original problems")
     parser.add_argument("--original_top_p", type=float, default=1.0, help="original nucleus sampling")
-    parser.add_argument("--n_original", type=int, default=1, help="original 每个问题采样数")
-    parser.add_argument("--max_tokens", type=int, default=2048, help="单次生成最大 token 数")
+    parser.add_argument("--n_original", type=int, default=1, help="Samples per original problem")
+    parser.add_argument("--max_tokens", type=int, default=2048, help="Maximum tokens per generation")
     args = parser.parse_args()
 
-    print("正在加载模型...")
+    print("Loading model...")
     llm = LLM(
         model=args.model,
         trust_remote_code=True,
@@ -147,7 +147,7 @@ def main():
 
     data = load_data(args.data_path, args.id)
     if not data:
-        print(f"未找到数据 (problem_id={args.id})")
+        print(f"No data found (problem_id={args.id})")
         return
     if args.id is None and args.num is not None:
         import random

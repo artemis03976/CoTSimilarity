@@ -2,16 +2,16 @@
 # =============================================================================
 # run_ablation_prefix_length.sh —— DCPR Ablation: Prefix Length
 #
-# 变动参数：prefix_length（prefix token 序列长度）
+# Swept parameter: prefix_length (prefix token sequence length)
 #
-# 注意：prefix_length 变化会导致 checkpoint 形状改变，
-#       必须重新训练，不能直接复用其他 prefix_length 的 checkpoint。
+# Note: changing prefix_length changes checkpoint tensor shapes, so each
+# setting must be retrained and cannot directly reuse another prefix length.
 # =============================================================================
 
 set -e
 
 # ---------------------------------------------------------------------------
-# 配置区
+# Configuration
 # ---------------------------------------------------------------------------
 EXP_NAME="ablation_prefix_length"
 MODEL_NAME="Qwen/Qwen2.5-Math-7B-Instruct"
@@ -24,19 +24,19 @@ BATCH_SIZE=4
 NUM_EPOCHS=15
 LEARNING_RATE=4e-5
 
-# prefix_length 搜索列表
+# prefix_length sweep values
 PREFIX_LENGTHS=(5 10 15 20 25 50 100)
 
 # ---------------------------------------------------------------------------
-# 前置检查
+# Prerequisite checks
 # ---------------------------------------------------------------------------
 if [ ! -f "${TRAIN_DATA}" ] || [ ! -f "${VAL_DATA}" ]; then
-    echo "错误: 训练/验证集不存在，请先运行 src/dcpr_dataset/split_dataset.py"
+    echo "Error: train/validation sets do not exist. Run src/dcpr_dataset/split_dataset.py first."
     exit 1
 fi
 
 # ---------------------------------------------------------------------------
-# 主循环
+# Main loop
 # ---------------------------------------------------------------------------
 for PLEN in "${PREFIX_LENGTHS[@]}"; do
     RUN_NAME="${EXP_NAME}_plen${PLEN}"
@@ -49,8 +49,8 @@ for PLEN in "${PREFIX_LENGTHS[@]}"; do
     echo "Ablation: prefix_length = ${PLEN}"
     echo "============================================================"
 
-    # ---- 训练 ----
-    echo "[1/3] 训练 (prefix_length=${PLEN}) ..."
+    # ---- Training ----
+    echo "[1/3] Training (prefix_length=${PLEN}) ..."
     python scripts/train_dcpr.py \
         --model_name "${MODEL_NAME}" \
         --train_data_path "${TRAIN_DATA}" \
@@ -64,12 +64,12 @@ for PLEN in "${PREFIX_LENGTHS[@]}"; do
     LATEST_CKPT=$(ls -td "${CKPT_DIR}"/checkpoint-* 2>/dev/null | head -1)
     LATEST_CKPT="${LATEST_CKPT%/}"
     if [ -z "${LATEST_CKPT}" ]; then
-        echo "警告: 训练未产出 checkpoint，跳过本次推理 (prefix_length=${PLEN})"
+        echo "Warning: training did not produce a checkpoint; skipping inference (prefix_length=${PLEN})"
         continue
     fi
 
-    # ---- 推理 ----
-    echo "[2/3] 推理测试 ..."
+    # ---- Inference ----
+    echo "[2/3] Inference evaluation ..."
     mkdir -p "${INFER_DIR}"
     python scripts/dcpr_inference_test.py \
         --checkpoint "${LATEST_CKPT}/dcpr_trainable.pt" \
@@ -79,10 +79,10 @@ for PLEN in "${PREFIX_LENGTHS[@]}"; do
         --prefix_length ${PLEN} \
         --device cuda
 
-    # ---- 指标统计 ----
-    echo "[3/3] 指标统计 ..."
+    # ---- Metrics ----
+    echo "[3/3] Metric reporting ..."
     echo ""
-    echo "--- prefix_length=${PLEN} 结果 ---"
+    echo "--- prefix_length=${PLEN} results ---"
     python src/utils/evaluation/calculate_accuracy.py \
         "${INFER_DIR}/all_records.jsonl"
 
@@ -95,7 +95,7 @@ for PLEN in "${PREFIX_LENGTHS[@]}"; do
     fi
 
     echo ""
-    echo ">>> prefix_length=${PLEN} 完成 <<<"
+    echo ">>> prefix_length=${PLEN} complete <<<"
     echo ""
 
 done

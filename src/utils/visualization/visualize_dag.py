@@ -404,52 +404,52 @@ def generate_html_with_js(stats: Dict, records_json: str) -> str:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CoT 依赖分析可视化</title>
+    <title>CoT Dependency Analysis Viewer</title>
     <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
     <style>{css}</style>
 </head>
 <body>
     <div class="container">
-        <h1>🔍 CoT 推理链依赖分析可视化</h1>
+        <h1>🔍 CoT Reasoning Dependency Analysis</h1>
         <p style="color: #666; margin-bottom: 30px;">Chain-of-Thought Dependency DAG Analysis</p>
 
-        <h2>📊 总体统计</h2>
+        <h2>📊 Overall Statistics</h2>
         <div class="stats">
             <div class="stat-card">
-                <div class="stat-label">总记录数</div>
+                <div class="stat-label">Total Records</div>
                 <div class="stat-value">{total_records}</div>
             </div>
             <div class="stat-card green">
-                <div class="stat-label">总变体数</div>
+                <div class="stat-label">Total Variants</div>
                 <div class="stat-value">{total_variants}</div>
             </div>
             <div class="stat-card orange">
-                <div class="stat-label">总推理步骤</div>
+                <div class="stat-label">Total Reasoning Steps</div>
                 <div class="stat-value">{total_steps}</div>
             </div>
             <div class="stat-card blue">
-                <div class="stat-label">平均步骤数</div>
+                <div class="stat-label">Average Steps</div>
                 <div class="stat-value">{avg_steps:.1f}</div>
             </div>
         </div>
 
-        <h2>🎯 依赖类型分布</h2>
+        <h2>🎯 Dependency Type Distribution</h2>
         <div class="legend">
             <div class="legend-item">
                 <div class="legend-color problem"></div>
-                <span>依赖原问题 [0]: {dep_problem}</span>
+                <span>Depends on original problem [0]: {dep_problem}</span>
             </div>
             <div class="legend-item">
                 <div class="legend-color external"></div>
-                <span>依赖外部知识 [External]: {dep_external}</span>
+                <span>Depends on external knowledge [External]: {dep_external}</span>
             </div>
             <div class="legend-item">
                 <div class="legend-color steps"></div>
-                <span>依赖前序步骤: {dep_steps}</span>
+                <span>Depends on previous steps: {dep_steps}</span>
             </div>
         </div>
 
-        <h2>🔍 浏览记录</h2>
+        <h2>🔍 Browse Records</h2>
         {navigation_html}
 
         <div id="recordContainer"></div>
@@ -470,7 +470,7 @@ def generate_html_with_js(stats: Dict, records_json: str) -> str:
             const level = escapeHtml(record.level || 'Unknown');
 
             let html = `
-                <h2>📝 记录 ${{index + 1}}: Problem ID ${{problemId}}</h2>
+                <h2>📝 Record ${{index + 1}}: Problem ID ${{problemId}}</h2>
                 <div class="record">
                     <div class="record-header">
                         <div>
@@ -494,11 +494,11 @@ def generate_html_with_js(stats: Dict, records_json: str) -> str:
                     html += `<div id="${{variantName}}" class="tab-content ${{isActive}}">`;
 
                     if (!entry.dag_analysis) {{
-                        html += '<p style="color: #e74c3c; padding: 20px;">⚠️ 此变体没有依赖分析数据</p>';
+                        html += '<p style="color: #e74c3c; padding: 20px;">⚠️ No dependency analysis data for this variant</p>';
                     }} else {{
                         if ('correct' in entry) {{
                             const correctClass = entry.correct ? 'correct' : 'incorrect';
-                            const correctText = entry.correct ? '✓ 正确' : '✗ 错误';
+                            const correctText = entry.correct ? '✓ Correct' : '✗ Incorrect';
                             html += `<span class="badge ${{correctClass}}">${{correctText}}</span>`;
                         }}
 
@@ -507,15 +507,15 @@ def generate_html_with_js(stats: Dict, records_json: str) -> str:
                             html += `
                                 <div class="metadata">
                                     <div class="metadata-item">
-                                        <span class="metadata-label">模型:</span>
+                                        <span class="metadata-label">Model:</span>
                                         <span>${{meta.model || 'N/A'}}</span>
                                     </div>
                                     <div class="metadata-item">
-                                        <span class="metadata-label">处理时间:</span>
+                                        <span class="metadata-label">Processing Time:</span>
                                         <span>${{((meta.processing_time_ms || 0) / 1000).toFixed(2)}}s</span>
                                     </div>
                                     <div class="metadata-item">
-                                        <span class="metadata-label">步骤数:</span>
+                                        <span class="metadata-label">Steps:</span>
                                         <span>${{entry.num_steps || 0}}</span>
                                     </div>
                                 </div>
@@ -525,7 +525,7 @@ def generate_html_with_js(stats: Dict, records_json: str) -> str:
                         const problemText = entry.problem || '';
                         const displayText = problemText.length > 500 ? problemText.substring(0, 500) + '...' : problemText;
                         html += `
-                            <h3>问题描述</h3>
+                            <h3>Problem</h3>
                             <div class="problem-box">
                                 <div class="problem-text">${{escapeHtml(displayText)}}</div>
                             </div>
@@ -535,7 +535,7 @@ def generate_html_with_js(stats: Dict, records_json: str) -> str:
                         const dagGraph = generateDagGraph(dagData);
                         const mermaidId = `mermaid-${{index}}-${{variantName}}-${{mermaidCounter++}}`;
                         html += `
-                            <h3>依赖关系图 (DAG) - 压缩视图</h3>
+                            <h3>Dependency Graph (DAG) - Compressed View</h3>
                             <div class="mermaid" id="${{mermaidId}}">
 ${{dagGraph}}
                             </div>
@@ -543,14 +543,14 @@ ${{dagGraph}}
 
                         const depTable = generateDependencyTable(dagData);
                         html += `
-                            <h3>依赖分析详情</h3>
+                            <h3>Dependency Analysis Details</h3>
                             <table>
                                 <thead>
                                     <tr>
-                                        <th>步骤序号</th>
-                                        <th>动作类型</th>
-                                        <th>分析说明</th>
-                                        <th>依赖项</th>
+                                        <th>Step</th>
+                                        <th>Action Type</th>
+                                        <th>Analysis</th>
+                                        <th>Dependencies</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -654,17 +654,17 @@ def generate_html_report(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="可视化 DAG 分析结果")
+    parser = argparse.ArgumentParser(description="Visualize DAG analysis results")
     parser.add_argument("--input", type=str,
                        default="output/qwen/dag_analysis/analyzed_records.jsonl",
-                       help="输入的分析结果文件")
+                       help="Input analysis result file")
     parser.add_argument("--output", type=str,
                        default="output/qwen/dag_analysis/visualization.html",
-                       help="输出的 HTML 文件")
+                       help="Output HTML file")
     parser.add_argument("--limit", type=int, default=None,
-                       help="限制显示的记录数量")
+                       help="Limit the number of displayed records")
     parser.add_argument("--no-compress", action="store_true",
-                       help="禁用 DAG 压缩，显示原始完整图")
+                       help="Disable DAG compression and show the original full graph")
     args = parser.parse_args()
 
     # Check if input file exists
