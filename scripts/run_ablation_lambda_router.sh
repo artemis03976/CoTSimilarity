@@ -81,13 +81,13 @@ for LAMBDA in "${LAMBDA_VALUES[@]}"; do
     echo "[3/3] Metric reporting ..."
     echo ""
     echo "--- lambda_router=${LAMBDA} results ---"
-    python src/utils/evaluation/calculate_accuracy.py \
+    python src/utils/calculate_accuracy.py \
         "${INFER_DIR}/all_records.jsonl"
 
     if [ -f "${BASE_CHECKPOINT}/dspr_trainable.pt" ]; then
         echo ""
         echo "--- Delta vs Baseline ---"
-        python src/utils/evaluation/calculate_accuracy.py \
+        python src/utils/calculate_accuracy.py \
             "${INFER_DIR}/all_records.jsonl" \
             --compare-file "output/qwen/all_records.jsonl"
     fi

@@ -1,49 +1,101 @@
-# StructuredCoT 实验流程
+# StructuredCoT
 
-本文档描述了当前的一套端到端流程，覆盖：
+Official repository for "Dynamic Structural Prefix Routing for Structure-Aware Robust LLM Reasoning". The repository contains the full workflow for generating model responses, extracting reasoning structures as IFD-Graphs, computing graph edit distance (GED), constructing DSPR training data, and evaluating DSPR against baselines.
 
-- Base Model 数据生成与分析（一次性）
-- DSPR 数据构建、划分、训练
-- DSPR 与 Base Model 指标对比
+Most workflows are driven by scripts under `scripts/`, with reusable implementation code under `src/`.
 
----
+## Repository Layout
 
-## 说明
+```text
+.
++-- scripts/
+|   +-- pertubation_test.py           # Generate original/simple/hard model responses
+|   +-- train_dspr.py                 # Train the DSPR model
+|   +-- dspr_inference_test.py        # Evaluate trained DSPR checkpoints
+|   +-- train_spt.py                  # Train the Static Prompt Tuning baseline
+|   +-- spt_inference_test.py         # Evaluate the SPT baseline
+|   +-- run_dspr_pipeline.sh          # Example DSPR train/eval pipeline
+|   +-- run_ablation_*.sh             # Ablation for DSPR hyperparameters
+|
++-- src/
+|   +-- dspr/                         # Core DSPR model implementation
+|   +-- dspr_training/                # DSPR dataset wrapper, loss, and Trainer
+|   +-- dspr_dataset/                 # DSPR dataset construction utilities
+|   +-- spt/                          # Static Prompt Tuning baseline model
+|   +-- spt_training/                 # SPT Trainer
+|   +-- data_analysis/                # CoT segmentation, DAG analysis, GED analysis
+|   +-- utils/                        # Evaluation, sorting, reports, visualization
+|
++-- data/                             # Input datasets and derived training splits
++-- output/                           # Generated responses and analysis artifacts
++-- Dockerfile
++-- docker-compose.gpu.yml
++-- requirements.txt
+```
 
-- **1-6 步主要为训练数据生成与预处理准备**，用于生成 DSPR 所需训练数据与中间分析结果。
-- 请优先关注 **DSPR 训练与推理**，即重点执行第 **7-9 步**。
-- 已有以下文件时，可直接跳过 1-6 步：
-  - `data/<model>/dspr_train.jsonl`
-  - `data/<model>/dspr_val.jsonl`
-  - `data/<model>/dspr_test.jsonl`
-  - （可选对比）`output/<model>/all_records.jsonl`
-- 新加入的模型需要通过 1-6 步生成对应数据，其中仅第一步生成 base model 的回答需要GPU支持模型推理；第三步刚需批量推理模式以处理数据，需要手动介入
-- 请先运行 `run_dspr_pipeline.sh` 中的示例脚本流程，内容是针对 `qwen-2.5-math-7b-instruct` 模型的dspr训练与推理。如无错误，再运行 3 个 ablation study 脚本中的命令，部分必要超参已经在脚本/默认config中配置完毕
+## Main Components
 
----
+`src/dspr/` contains the DSPR model:
 
-## 0. 环境准备
+- `config.py`: default model, data, training, and hardware settings.
+- `model.py`: wraps the frozen base LLM with structural prefix routing.
+- `dual_prefix.py`: learnable exploit/explore structural prefixes.
+- `router.py`: MLP router that predicts the exploration weight.
+- `context_encoder.py`: extracts hidden-state context for routing.
+
+`src/data_analysis/` turns raw generated responses into structural features:
+
+- `cot_segmenter.py`: segments chain-of-thought responses into reasoning units.
+- `dag_analyzer.py`: builds prompts or merges batch outputs for DAG extraction.
+- `dag_compressor.py`: normalizes and compresses DAG representations.
+- `dag_similarity.py`: computes graph-level similarity and GED.
+- `ged_analysis.py`: joins DAG similarity with answer correctness to produce records for DSPR dataset construction.
+- `llm/`: provider-agnostic API and batch-processing helpers used by DAG analysis.
+
+`src/spt/` and `src/spt_training/` implement the Static Prompt Tuning baseline, which uses the same frozen LLM and DSPR dataset format but replaces dynamic routing with one static learned prefix.
+
+## Environment Setup
+
+Install dependencies directly:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Docker
+Or use the GPU Docker environment:
 
 ```bash
-# 1) 准备环境变量（可选）
-cp .env.example .env
-
-# 2) 构建镜像
 docker compose -f docker-compose.gpu.yml build
-
-# 3) 进入容器
 docker compose -f docker-compose.gpu.yml run --rm dspr
 ```
 
----
+Most scripts assume they are launched from the repository root. If imports fail in a custom environment, set:
 
-## 1. 生成 base model 回答（original 1 条，simple/hard 各 50 条）
+```bash
+export PYTHONPATH=src
+```
+
+## Data And Artifact Conventions
+
+Common paths used by the current scripts:
+
+- `data/math_paired.jsonl`: source math problems.
+- `output/<model>/all_records_50.jsonl`: generated original/simple/hard responses.
+- `output/<model>/segmented_records_50.jsonl`: segmented CoT records.
+- `output/<model>/dag_analysis_50/analyzed_records.jsonl`: DAG analysis results.
+- `output/<model>/all_ged_results.jsonl`: GED and correctness records.
+- `data/<model>/dspr_dataset.jsonl`: filtered DSPR dataset.
+- `data/<model>/dspr_train.jsonl`, `dspr_val.jsonl`, `dspr_test.jsonl`: DSPR splits.
+- `checkpoints/<model>/dspr/dspr_trainable.pt`: trained DSPR parameters.
+- `output/<model>/dspr/all_records.jsonl`: DSPR inference records.
+
+Some `output/*/all_records.jsonl` files are expensive experiment artifacts and are intentionally kept in the repository workflow.
+
+## End-To-End DSPR Workflow
+
+The example commands below use Qwen2.5-Math-7B-Instruct and write artifacts under `output/qwen`, `data/qwen`, and `checkpoints/qwen`.
+
+### 1. Generate Base Model Responses
 
 ```bash
 python scripts/pertubation_test.py \
@@ -51,14 +103,12 @@ python scripts/pertubation_test.py \
   --data_path "data/math_paired.jsonl" \
   --output_path "output/qwen/all_records_50.jsonl" \
   --n_original 1 \
-  --n 50 \
+  --n 50
 ```
 
-输出：`output/qwen/all_records_50.jsonl`
+This produces original, simple, and hard response samples for each problem.
 
----
-
-## 2. CoT 切分
+### 2. Segment Chain-Of-Thought Responses
 
 ```bash
 python src/data_analysis/cot_segmenter.py \
@@ -66,11 +116,9 @@ python src/data_analysis/cot_segmenter.py \
   --output "output/qwen/segmented_records_50.jsonl"
 ```
 
----
+### 3. Run DAG Analysis
 
-## 3. DAG 分析（批处理模式）
-
-### 3.1 生成批处理请求文件
+Generate batch requests:
 
 ```bash
 python src/data_analysis/dag_analyzer.py \
@@ -81,9 +129,7 @@ python src/data_analysis/dag_analyzer.py \
   --model deepseek-chat
 ```
 
-输出请求文件：`output/qwen/dag_analysis_50/batch/batch_requests.jsonl`
-
-### 3.2 上传到批量推理服务后，合并下载结果
+After the batch inference service returns results, merge them:
 
 ```bash
 python src/data_analysis/dag_analyzer.py \
@@ -93,16 +139,13 @@ python src/data_analysis/dag_analyzer.py \
   --output-dir "output/qwen/dag_analysis_50"
 ```
 
-输出：`output/qwen/dag_analysis_50/analyzed_records.jsonl`
+The merged DAG records are written to:
 
----
+```text
+output/qwen/dag_analysis_50/analyzed_records.jsonl
+```
 
-## 4. GED 分析
-
-当前默认流程下，`ged_analysis.py` 会直接从 `--variant-records` 中读取
-`original_0` 作为 GED 基准。
-
-示例：
+### 4. Compute GED Records
 
 ```bash
 python src/data_analysis/ged_analysis.py \
@@ -112,14 +155,9 @@ python src/data_analysis/ged_analysis.py \
   --all-results-output "output/qwen/all_ged_results.jsonl"
 ```
 
-如需兼容旧流程（original 与 variant 分开分析），可额外传：
-`--original-records "output/qwen/dag_analysis/analyzed_records.jsonl"`
+By default, `ged_analysis.py` uses each problem's `original_0` response as the GED reference graph. For older workflows where original and variant DAG records are stored separately, pass `--original-records` explicitly.
 
-输出：`output/qwen/all_ged_results.jsonl`
-
----
-
-## 5. 构建 DSPR 数据集
+### 5. Build The DSPR Dataset
 
 ```bash
 python src/dspr_dataset/data_filter.py \
@@ -129,9 +167,7 @@ python src/dspr_dataset/data_filter.py \
   --min-variance 1.0
 ```
 
----
-
-## 6. 自动划分 train/val/test（按 problem_id）
+### 6. Split Train/Validation/Test Sets
 
 ```bash
 python src/dspr_dataset/split_dataset.py \
@@ -142,17 +178,13 @@ python src/dspr_dataset/split_dataset.py \
   --seed 42
 ```
 
-默认输出到同目录：
+Default outputs are written next to the input file:
 
 - `data/qwen/dspr_train.jsonl`
 - `data/qwen/dspr_val.jsonl`
 - `data/qwen/dspr_test.jsonl`
 
----
-
-## 7. 训练 DSPR
-
-> 默认应从本步骤开始
+### 7. Train DSPR
 
 ```bash
 python scripts/train_dspr.py \
@@ -164,11 +196,13 @@ python scripts/train_dspr.py \
   --num_epochs 10
 ```
 
-训练产物（默认按 Trainer 保存）：`dspr_trainable.pt`
+The trainer saves the trainable DSPR parameters as:
 
----
+```text
+checkpoints/qwen/dspr/dspr_trainable.pt
+```
 
-## 8. DSPR 推理评估
+### 8. Evaluate DSPR
 
 ```bash
 python scripts/dspr_inference_test.py \
@@ -180,42 +214,34 @@ python scripts/dspr_inference_test.py \
   --temperature 0.0
 ```
 
-输出：`output/qwen/dspr/all_records.jsonl`
+The inference output is:
 
----
-
-## 9. 统一指标统计与对比
-
-仅统计单个结果：
-
-```bash
-python src/utils/evaluation/calculate_accuracy.py "output/qwen/dspr/all_records.jsonl"
+```text
+output/qwen/dspr/all_records.jsonl
 ```
 
-与 baseline 对比：
+### 9. Report Accuracy
+
+Evaluate one result file:
 
 ```bash
-python src/utils/evaluation/calculate_accuracy.py \
+python src/utils/calculate_accuracy.py "output/qwen/dspr/all_records.jsonl"
+```
+
+Compare DSPR against a baseline result file:
+
+```bash
+python src/utils/calculate_accuracy.py \
   "output/qwen/dspr/all_records.jsonl" \
   --compare-file "output/qwen/all_records_50.jsonl"
 ```
 
-脚本会输出：
+## Recommended Reading Order
 
-- `First@1`
-- `Any@k`
-- `AvgSampleAcc`
-- `Overall(all variants pass@k)` 及对比增量
+For new contributors, the fastest way to understand the code is:
 
----
-
-## 常见文件流向（简表）
-
-1. `all_records_50.jsonl`（Base 回答）
-2. `segmented_records_50.jsonl`（CoT 切分）
-3. `analyzed_records.jsonl`（DAG 分析结果）
-4. `all_ged_results.jsonl`（GED 结果）
-5. `dspr_dataset.jsonl`（过滤后训练样本）
-6. `dspr_train/val/test.jsonl`（自动划分）
-7. `dspr_trainable.pt`（DSPR 可训练参数）
-8. `output/.../dspr/all_records.jsonl`（DSPR 推理结果）
+1. `scripts/run_dspr_pipeline.sh` for the high-level workflow.
+2. `src/dspr/config.py` and `src/dspr/model.py` for the model interface.
+3. `src/dspr_training/dataset.py`, `loss.py`, and `trainer.py` for training behavior.
+4. `src/data_analysis/ged_analysis.py` and `src/dspr_dataset/data_filter.py` for dataset construction.
+5. `scripts/dspr_inference_test.py` and `src/utils/calculate_accuracy.py` for evaluation.

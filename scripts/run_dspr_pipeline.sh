@@ -78,13 +78,13 @@ echo ""
 echo "========== [3/3] Metric reporting =========="
 echo ""
 echo "--- DSPR inference results ---"
-python src/utils/evaluation/calculate_accuracy.py \
+python src/utils/calculate_accuracy.py \
     "${INFER_OUTPUT_DIR}/all_records.jsonl"
 
 echo ""
 echo "--- Compare against baseline if available ---"
 if [ -f "output/base_all_records.jsonl" ]; then
-    python src/utils/evaluation/calculate_accuracy.py \
+    python src/utils/calculate_accuracy.py \
         "${INFER_OUTPUT_DIR}/all_records.jsonl" \
         --compare-file "output/qwen/all_records.jsonl"
 else
