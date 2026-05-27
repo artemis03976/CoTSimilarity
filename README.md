@@ -3,22 +3,22 @@
 本文档描述了当前的一套端到端流程，覆盖：
 
 - Base Model 数据生成与分析（一次性）
-- DCPR 数据构建、划分、训练
-- DCPR 与 Base Model 指标对比
+- DSPR 数据构建、划分、训练
+- DSPR 与 Base Model 指标对比
 
 ---
 
 ## 说明
 
-- **1-6 步主要为训练数据生成与预处理准备**，用于生成 DCPR 所需训练数据与中间分析结果。
-- 请优先关注 **DCPR 训练与推理**，即重点执行第 **7-9 步**。
+- **1-6 步主要为训练数据生成与预处理准备**，用于生成 DSPR 所需训练数据与中间分析结果。
+- 请优先关注 **DSPR 训练与推理**，即重点执行第 **7-9 步**。
 - 已有以下文件时，可直接跳过 1-6 步：
-  - `data/<model>/dcpr_train.jsonl`
-  - `data/<model>/dcpr_val.jsonl`
-  - `data/<model>/dcpr_test.jsonl`
+  - `data/<model>/dspr_train.jsonl`
+  - `data/<model>/dspr_val.jsonl`
+  - `data/<model>/dspr_test.jsonl`
   - （可选对比）`output/<model>/all_records.jsonl`
 - 新加入的模型需要通过 1-6 步生成对应数据，其中仅第一步生成 base model 的回答需要GPU支持模型推理；第三步刚需批量推理模式以处理数据，需要手动介入
-- 请先运行 `run_dcpr_pipeline.sh` 中的示例脚本流程，内容是针对 `qwen-2.5-math-7b-instruct` 模型的dcpr训练与推理。如无错误，再运行 3 个 ablation study 脚本中的命令，部分必要超参已经在脚本/默认config中配置完毕
+- 请先运行 `run_dspr_pipeline.sh` 中的示例脚本流程，内容是针对 `qwen-2.5-math-7b-instruct` 模型的dspr训练与推理。如无错误，再运行 3 个 ablation study 脚本中的命令，部分必要超参已经在脚本/默认config中配置完毕
 
 ---
 
@@ -38,7 +38,7 @@ cp .env.example .env
 docker compose -f docker-compose.gpu.yml build
 
 # 3) 进入容器
-docker compose -f docker-compose.gpu.yml run --rm dcpr
+docker compose -f docker-compose.gpu.yml run --rm dspr
 ```
 
 ---
@@ -119,12 +119,12 @@ python src/data_analysis/ged_analysis.py \
 
 ---
 
-## 5. 构建 DCPR 数据集
+## 5. 构建 DSPR 数据集
 
 ```bash
-python src/dcpr_dataset/data_filter.py \
+python src/dspr_dataset/data_filter.py \
   --input "output/qwen/all_ged_results.jsonl" \
-  --output "data/qwen/dcpr_dataset.jsonl" \
+  --output "data/qwen/dspr_dataset.jsonl" \
   --top-k 5 \
   --min-variance 1.0
 ```
@@ -134,8 +134,8 @@ python src/dcpr_dataset/data_filter.py \
 ## 6. 自动划分 train/val/test（按 problem_id）
 
 ```bash
-python src/dcpr_dataset/split_dataset.py \
-  --input "data/qwen/dcpr_dataset.jsonl" \
+python src/dspr_dataset/split_dataset.py \
+  --input "data/qwen/dspr_dataset.jsonl" \
   --train-ratio 0.8 \
   --val-ratio 0.1 \
   --test-ratio 0.1 \
@@ -144,43 +144,43 @@ python src/dcpr_dataset/split_dataset.py \
 
 默认输出到同目录：
 
-- `data/qwen/dcpr_train.jsonl`
-- `data/qwen/dcpr_val.jsonl`
-- `data/qwen/dcpr_test.jsonl`
+- `data/qwen/dspr_train.jsonl`
+- `data/qwen/dspr_val.jsonl`
+- `data/qwen/dspr_test.jsonl`
 
 ---
 
-## 7. 训练 DCPR
+## 7. 训练 DSPR
 
 > 默认应从本步骤开始
 
 ```bash
-python scripts/train_dcpr.py \
+python scripts/train_dspr.py \
   --model_name "Qwen/Qwen2.5-Math-7B-Instruct" \
-  --train_data_path "data/qwen/dcpr_train.jsonl" \
-  --val_data_path "data/qwen/dcpr_val.jsonl" \
-  --output_path "checkpoints/qwen/dcpr" \
+  --train_data_path "data/qwen/dspr_train.jsonl" \
+  --val_data_path "data/qwen/dspr_val.jsonl" \
+  --output_path "checkpoints/qwen/dspr" \
   --batch_size 4 \
   --num_epochs 10
 ```
 
-训练产物（默认按 Trainer 保存）：`dcpr_trainable.pt`
+训练产物（默认按 Trainer 保存）：`dspr_trainable.pt`
 
 ---
 
-## 8. DCPR 推理评估
+## 8. DSPR 推理评估
 
 ```bash
-python scripts/dcpr_inference_test.py \
-  --checkpoint "checkpoints/qwen/dcpr/dcpr_trainable.pt" \
+python scripts/dspr_inference_test.py \
+  --checkpoint "checkpoints/qwen/dspr/dspr_trainable.pt" \
   --model_name "Qwen/Qwen2.5-Math-7B-Instruct" \
   --data_path "data/math_paired.jsonl" \
-  --output_dir "output/qwen/dcpr" \
+  --output_dir "output/qwen/dspr" \
   --n 1 \
   --temperature 0.0
 ```
 
-输出：`output/qwen/dcpr/all_records.jsonl`
+输出：`output/qwen/dspr/all_records.jsonl`
 
 ---
 
@@ -189,14 +189,14 @@ python scripts/dcpr_inference_test.py \
 仅统计单个结果：
 
 ```bash
-python src/utils/evaluation/calculate_accuracy.py "output/qwen/dcpr/all_records.jsonl"
+python src/utils/evaluation/calculate_accuracy.py "output/qwen/dspr/all_records.jsonl"
 ```
 
 与 baseline 对比：
 
 ```bash
 python src/utils/evaluation/calculate_accuracy.py \
-  "output/qwen/dcpr/all_records.jsonl" \
+  "output/qwen/dspr/all_records.jsonl" \
   --compare-file "output/qwen/all_records_50.jsonl"
 ```
 
@@ -215,7 +215,7 @@ python src/utils/evaluation/calculate_accuracy.py \
 2. `segmented_records_50.jsonl`（CoT 切分）
 3. `analyzed_records.jsonl`（DAG 分析结果）
 4. `all_ged_results.jsonl`（GED 结果）
-5. `dcpr_dataset.jsonl`（过滤后训练样本）
-6. `dcpr_train/val/test.jsonl`（自动划分）
-7. `dcpr_trainable.pt`（DCPR 可训练参数）
-8. `output/.../dcpr/all_records.jsonl`（DCPR 推理结果）
+5. `dspr_dataset.jsonl`（过滤后训练样本）
+6. `dspr_train/val/test.jsonl`（自动划分）
+7. `dspr_trainable.pt`（DSPR 可训练参数）
+8. `output/.../dspr/all_records.jsonl`（DSPR 推理结果）

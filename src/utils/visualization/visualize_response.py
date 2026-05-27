@@ -1,4 +1,4 @@
-"""HTML rendering script for model generation results."""
+﻿"""HTML rendering script for model generation results."""
 
 import json
 import argparse
@@ -228,7 +228,7 @@ def generate_html_report(records: List[Dict], output_path: str):
 def main():
     parser = argparse.ArgumentParser(description="Generate an HTML report for model generation results")
     parser.add_argument("--input", type=str,
-                       default="output/qwen/dcpr/all_records.jsonl",
+                       default="output/qwen/dspr/all_records.jsonl",
                        help="Input JSONL file")
     parser.add_argument("--output", type=str, default=None,
                        help="Output HTML file")

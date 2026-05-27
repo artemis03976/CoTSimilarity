@@ -1,7 +1,7 @@
-"""
+﻿"""
 Training script for StaticPromptModel baseline.
 
-Uses the same DCPR dataset but trains only a single soft prompt
+Uses the same DSPR dataset but trains only a single soft prompt
 with LM loss (no router, no dual prefix).
 """
 
@@ -16,7 +16,7 @@ from transformers import TrainingArguments, default_data_collator
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from dcpr_training.dataset import DCPRDataset
+from dspr_training.dataset import DSPRDataset
 from spt import SPTConfig, StaticPromptModel
 from spt_training import BaselineTrainer
 
@@ -71,13 +71,13 @@ def main():
     print("Loading StaticPromptModel baseline...")
     model = StaticPromptModel(config)
 
-    # Print trainable parameter count for comparison with DCPR
+    # Print trainable parameter count for comparison with DSPR
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Trainable parameters: {trainable_params:,} (soft_prompt only)")
 
     print("Loading datasets...")
-    train_dataset = DCPRDataset(config.train_data_path, model.tokenizer, config.max_seq_length)
-    val_dataset = DCPRDataset(config.val_data_path, model.tokenizer, config.max_seq_length)
+    train_dataset = DSPRDataset(config.train_data_path, model.tokenizer, config.max_seq_length)
+    val_dataset = DSPRDataset(config.val_data_path, model.tokenizer, config.max_seq_length)
 
     eval_strategy = "epoch" if len(val_dataset) > 0 else "no"
     save_strategy = "epoch" if len(val_dataset) > 0 else "no"

@@ -1,4 +1,12 @@
-"""Main orchestrator script for DAG analysis."""
+"""LLM-based DAG analysis over segmented reasoning chains.
+
+Input records are expected to come from cot_segmenter.py and contain per-sample
+`steps`. This script asks an external LLM to label each step with dependencies,
+then stores the resulting DAG annotations back into each sample.
+
+Use normal mode for small runs. Use batch mode for full experiments because it
+creates provider-ready request files and avoids many synchronous API calls.
+"""
 
 import json
 import logging
@@ -48,7 +56,10 @@ def process_normal_mode(
     output_dir: Path,
     variants: List[str] = ["original", "simple", "hard"]
 ):
-    """Process records using normal API mode."""
+    """Process records with synchronous API calls.
+
+    This mode is easier to debug but slower and more expensive for large all_records_50-style datasets.
+    """
     client = LLMClient(config)
     output_file = output_dir / "normal" / "analyzed_records.jsonl"
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -127,7 +138,12 @@ def process_batch_mode(
     output_dir: Path,
     variants: List[str] = ["original", "simple", "hard"]
 ):
-    """Process records using batch inference mode."""
+    """Create batch API requests for all requested variants.
+
+    The output is not the final analyzed JSONL. Users must upload the generated
+    request file to the provider, download the batch results, and run
+    merge-batch mode.
+    """
     processor = BatchProcessor(config, output_dir / "batch")
 
     # Prepare a single batch file containing all variants

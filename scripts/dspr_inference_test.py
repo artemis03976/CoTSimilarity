@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import argparse
 import sys
@@ -9,8 +9,8 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from utils.evaluate import answer_check
-from dcpr.config import DCPRConfig, MATH_SYSTEM_PROMPT
-from dcpr.model import DCPRModel
+from dspr.config import DSPRConfig, MATH_SYSTEM_PROMPT
+from dspr.model import DSPRModel
 from utils.visualization import plot_alpha_density
 
 DATA_PATH = "data/math_paired.jsonl"
@@ -207,7 +207,7 @@ def run_alpha_probe(model, data, output_dir, forced_alpha, temperature=0.0, top_
 
 
 def load_model(args):
-    config = DCPRConfig(
+    config = DSPRConfig(
         model_name=args.model_name,
         context_layer_idx=args.context_layer_idx,
         prefix_length=args.prefix_length,
@@ -219,7 +219,7 @@ def load_model(args):
         checkpoint_dir=os.path.dirname(args.checkpoint) or "checkpoints",
     )
 
-    model = DCPRModel(config)
+    model = DSPRModel(config)
     ckpt = torch.load(args.checkpoint, map_location=args.device)
     model.dual_prefix.load_state_dict(ckpt["dual_prefix_state_dict"])
     model.router.load_state_dict(ckpt["router_state_dict"])
@@ -230,7 +230,7 @@ def load_model(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to the trained DCPR checkpoint")
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to the trained DSPR checkpoint")
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-Math-7B-Instruct", help="Base model name or path")
     parser.add_argument("--output_dir", type=str, default="output", help="Output directory")
     parser.add_argument("--data_path", type=str, default=DATA_PATH, help="Evaluation data path")
@@ -275,7 +275,7 @@ def main():
         plot_alpha_density(all_alphas, args.output_dir)
         return
 
-    print("Loading DCPR model...")
+    print("Loading DSPR model...")
     model = load_model(args)
 
     data = load_data(args.data_path, args.id)

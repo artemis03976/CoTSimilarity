@@ -1,4 +1,9 @@
-"""Compute DAG similarity between CoT variants using Graph Edit Distance."""
+"""Compute structural similarity between CoT DAGs.
+
+The main metric is Graph Edit Distance (GED). A lower GED means two reasoning
+graphs are structurally closer. The helper functions here intentionally use
+simple unit costs so experiment interpretation remains transparent.
+"""
 
 import json
 import logging
@@ -13,7 +18,11 @@ logger = logging.getLogger(__name__)
 
 
 def extract_dag_from_batch_response(response_data: Dict) -> Optional[List[Dict]]:
-    """Extract DAG analysis from batch inference response format."""
+    """Extract DAG analysis from a provider batch-response object.
+
+    LLM batch outputs often wrap the actual JSON in markdown fences or may be
+    truncated. This helper performs conservative cleanup before parsing.
+    """
     try:
         content = response_data.get("response", {}).get("body", {}).get("choices", [{}])[0].get("message", {}).get("content", "")
         if not content:
@@ -51,7 +60,11 @@ def extract_dag_from_batch_response(response_data: Dict) -> Optional[List[Dict]]
 
 
 def build_digraph(dag_analysis: List[Dict], exclude_external: bool = False) -> nx.DiGraph:
-    """Build a directed graph from DAG analysis."""
+    """Build a NetworkX DiGraph from step dependency annotations.
+
+    Each reasoning step becomes a node. Dependencies point into the dependent
+    step, so an edge A -> B means B depends on A.
+    """
     G = nx.DiGraph()
     for step in dag_analysis:
         node_id = step["id"]
@@ -110,7 +123,11 @@ def edge_ins_cost(attrs: dict) -> float:
 
 
 def compute_ged_similarity(G1: nx.DiGraph, G2: nx.DiGraph, timeout: float = 30.0) -> Dict:
-    """Compute GED and normalized similarity between two DAGs."""
+    """Compute GED and normalized similarity between two DAGs.
+
+    Exact GED can be expensive. Small graphs use optimize_graph_edit_distance;
+    larger graphs use NetworkX's timeout-aware graph_edit_distance path.
+    """
     max_nodes = max(len(G1), len(G2))
     max_edges = max(G1.number_of_edges(), G2.number_of_edges())
     normalizer = max_nodes + max_edges

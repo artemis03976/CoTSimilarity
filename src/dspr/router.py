@@ -2,7 +2,11 @@ import torch
 import torch.nn as nn
 
 class UCBRouter(nn.Module):
-    """Lightweight MLP that predicts exploration weight α ∈ [0,1] from context vector h_Q."""
+    """Predict exploration weight alpha in [0, 1] from context vector h_Q.
+
+    The router is deliberately small because the paper's intervention is meant
+    to be a lightweight prefix-routing layer over a frozen LLM.
+    """
 
     def __init__(self, hidden_dim=4096, intermediate_dim=256, dropout=0.1):
         super().__init__()

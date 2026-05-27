@@ -1,6 +1,6 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # =============================================================================
-# run_ablation_context_layer_idx.sh —— DCPR Ablation: Context Layer Index
+# run_ablation_context_layer_idx.sh —— DSPR Ablation: Context Layer Index
 #
 # Swept parameter: context_layer_idx (Transformer layer used to extract h_Q)
 # Suggested search range: [10, 12, 15, 18, 20, 24] for Qwen2.5-Math-7B layers 0-27.
@@ -14,10 +14,10 @@ set -e
 # ---------------------------------------------------------------------------
 EXP_NAME="ablation_context_layer_idx"
 MODEL_NAME="Qwen/Qwen2.5-Math-7B-Instruct"
-TRAIN_DATA="data/qwen/dcpr_train.jsonl"
-VAL_DATA="data/qwen/dcpr_val.jsonl"
+TRAIN_DATA="data/qwen/dspr_train.jsonl"
+VAL_DATA="data/qwen/dspr_val.jsonl"
 TEST_DATA="data/math_paired.jsonl"
-BASE_CHECKPOINT="checkpoints/dcpr_pipeline_test"
+BASE_CHECKPOINT="checkpoints/dspr_pipeline_test"
 
 BATCH_SIZE=4
 NUM_EPOCHS=15
@@ -30,7 +30,7 @@ CONTEXT_LAYER_IDX_LIST=(10 12 15 18 20 24)
 # Prerequisite checks
 # ---------------------------------------------------------------------------
 if [ ! -f "${TRAIN_DATA}" ] || [ ! -f "${VAL_DATA}" ]; then
-    echo "Error: train/validation sets do not exist. Run src/dcpr_dataset/split_dataset.py first."
+    echo "Error: train/validation sets do not exist. Run src/dspr_dataset/split_dataset.py first."
     exit 1
 fi
 
@@ -50,7 +50,7 @@ for LAYER_IDX in "${CONTEXT_LAYER_IDX_LIST[@]}"; do
 
     # ---- Training ----
     echo "[1/3] Training (context_layer_idx=${LAYER_IDX}) ..."
-    python scripts/train_dcpr.py \
+    python scripts/train_dspr.py \
         --model_name "${MODEL_NAME}" \
         --train_data_path "${TRAIN_DATA}" \
         --val_data_path "${VAL_DATA}" \
@@ -70,8 +70,8 @@ for LAYER_IDX in "${CONTEXT_LAYER_IDX_LIST[@]}"; do
     # ---- Inference ----
     echo "[2/3] Inference evaluation ..."
     mkdir -p "${INFER_DIR}"
-    python scripts/dcpr_inference_test.py \
-        --checkpoint "${LATEST_CKPT}/dcpr_trainable.pt" \
+    python scripts/dspr_inference_test.py \
+        --checkpoint "${LATEST_CKPT}/dspr_trainable.pt" \
         --model_name "${MODEL_NAME}" \
         --output_dir "${INFER_DIR}" \
         --data_path "${TEST_DATA}" \
@@ -85,7 +85,7 @@ for LAYER_IDX in "${CONTEXT_LAYER_IDX_LIST[@]}"; do
     python src/utils/evaluation/calculate_accuracy.py \
         "${INFER_DIR}/all_records.jsonl"
 
-    if [ -f "${BASE_CHECKPOINT}/dcpr_trainable.pt" ]; then
+    if [ -f "${BASE_CHECKPOINT}/dspr_trainable.pt" ]; then
         echo ""
         echo "--- Delta vs Baseline ---"
         python src/utils/evaluation/calculate_accuracy.py \

@@ -1,4 +1,4 @@
-import torch
+﻿import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -8,7 +8,7 @@ from .config import SPTConfig
 class StaticPromptModel(nn.Module):
     """Single static soft prompt baseline — no router, no dual prefix.
 
-    Uses the same frozen LLM and prefix length as DCPR, but replaces the
+    Uses the same frozen LLM and prefix length as DSPR, but replaces the
     dual-prefix + router mechanism with a single learnable prefix that is
     shared across all inputs regardless of difficulty.
     """
@@ -23,7 +23,7 @@ class StaticPromptModel(nn.Module):
 
         llm_hidden_dim = self.frozen_llm.config.hidden_size
 
-        # Single learnable soft prompt (same size as each of DCPR's dual prefixes)
+        # Single learnable soft prompt (same size as each of DSPR's dual prefixes)
         self.soft_prompt = nn.Parameter(
             torch.randn(config.prefix_length, llm_hidden_dim) * 0.02
         )
@@ -33,7 +33,7 @@ class StaticPromptModel(nn.Module):
             param.requires_grad = False
 
     def _load_frozen_llm(self):
-        """Load frozen LLM (identical to DCPRModel)."""
+        """Load frozen LLM (identical to DSPRModel)."""
         tokenizer = AutoTokenizer.from_pretrained(self.config.model_name, trust_remote_code=True)
 
         model_kwargs = {

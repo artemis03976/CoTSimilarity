@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 import torch
 from transformers import Trainer
@@ -7,12 +7,12 @@ from transformers import Trainer
 class BaselineTrainer(Trainer):
     """HuggingFace Trainer for StaticPromptModel baseline.
 
-    Unlike DCPRTrainer, this uses only the LM cross-entropy loss
+    Unlike DSPRTrainer, this uses only the LM cross-entropy loss
     (no router loss) since there is no routing mechanism.
     """
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        # Drop DCPR-specific fields that come from the shared dataset
+        # Drop DSPR-specific fields that come from the shared dataset
         inputs.pop("target_alpha", None)
         inputs.pop("variant_type", None)
         inputs.pop("prompt_input_ids", None)

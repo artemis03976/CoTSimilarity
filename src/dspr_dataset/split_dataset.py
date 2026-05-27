@@ -1,5 +1,5 @@
-#!/usr/bin/env python3
-"""Split DCPR dataset into train/val/test by problem_id."""
+﻿#!/usr/bin/env python3
+"""Split DSPR dataset into train/val/test by problem_id."""
 
 import argparse
 import json
@@ -33,8 +33,8 @@ def variant_stats(items):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Split a DCPR dataset into train/validation/test sets by problem_id")
-    parser.add_argument("--input", required=True, help="Input JSONL, e.g. data/<model>/dcpr_dataset.jsonl")
+    parser = argparse.ArgumentParser(description="Split a DSPR dataset into train/validation/test sets by problem_id")
+    parser.add_argument("--input", required=True, help="Input JSONL, e.g. data/<model>/dspr_dataset.jsonl")
     parser.add_argument("--train-ratio", type=float, default=0.8, help="Training set ratio")
     parser.add_argument("--val-ratio", type=float, default=0.1, help="Validation set ratio")
     parser.add_argument("--test-ratio", type=float, default=0.1, help="Test set ratio")
@@ -84,9 +84,9 @@ def main():
             test_items.extend(items)
 
     out_dir = input_path.parent
-    train_output = Path(args.train_output) if args.train_output else out_dir / "dcpr_train.jsonl"
-    val_output = Path(args.val_output) if args.val_output else out_dir / "dcpr_val.jsonl"
-    test_output = Path(args.test_output) if args.test_output else out_dir / "dcpr_test.jsonl"
+    train_output = Path(args.train_output) if args.train_output else out_dir / "dspr_train.jsonl"
+    val_output = Path(args.val_output) if args.val_output else out_dir / "dspr_val.jsonl"
+    test_output = Path(args.test_output) if args.test_output else out_dir / "dspr_test.jsonl"
 
     dump_jsonl(train_output, train_items)
     dump_jsonl(val_output, val_items)

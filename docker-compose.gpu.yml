@@ -1,5 +1,5 @@
-services:
-  dcpr:
+﻿services:
+  dspr:
     build:
       context: .
       dockerfile: Dockerfile

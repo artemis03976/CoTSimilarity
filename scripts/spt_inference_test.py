@@ -1,7 +1,7 @@
-"""
+﻿"""
 Inference evaluation script for StaticPromptModel baseline.
 
-Mirrors dcpr_inference_test.py but uses StaticPromptModel instead of DCPRModel.
+Mirrors dspr_inference_test.py but uses StaticPromptModel instead of DSPRModel.
 """
 
 import json
@@ -15,7 +15,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from utils.evaluate import answer_check
-from dcpr.config import MATH_SYSTEM_PROMPT
+from dspr.config import MATH_SYSTEM_PROMPT
 from spt import SPTConfig, StaticPromptModel
 
 DATA_PATH = "data/math_paired.jsonl"

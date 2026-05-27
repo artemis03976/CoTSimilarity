@@ -1,4 +1,9 @@
-"""DAG compression module using connected-component contraction."""
+"""DAG compression utilities for macro-level reasoning comparison.
+
+The LLM-generated DAG may contain many adjacent or parallel steps with the same
+macro_action_tag. Compression reduces this local redundancy before GED so the
+metric reflects high-level reasoning changes instead of formatting granularity.
+"""
 
 import networkx as nx
 from typing import Dict, List, Tuple
@@ -72,7 +77,8 @@ def can_contract(G: nx.DiGraph, u, v) -> bool:
     if tag_u != tag_v:
         return False
 
-    # Anti-cycle check: if an alternate path u~>v exists, contraction would create a cycle
+    # Anti-cycle check: if an alternate path u~>v exists, contraction would
+    # create a cycle or remove meaningful ordering information.
     if _has_alternate_path(G, u, v):
         return False
 
@@ -231,7 +237,8 @@ def compress_parallel_layers(G: nx.DiGraph,
     for iteration in range(max_iterations):
         folded_this_iteration = False
 
-        # Get all step nodes (exclude Problem and External)
+        # Only numbered reasoning steps are eligible. Node 0 is the original
+        # problem and "External" represents outside knowledge.
         step_nodes = [n for n in G_compressed.nodes()
                      if isinstance(n, int) and n > 0]
 
@@ -353,7 +360,7 @@ def compress_dag_combined(G: nx.DiGraph,
                           merge_metadata: bool = True,
                           use_contraction: bool = True,
                           use_parallel_fold: bool = True) -> Tuple[nx.DiGraph, Dict]:
-    """Apply multiple compression strategies in sequence.
+    """Apply vertical and horizontal compression strategies in sequence.
 
     Strategies:
     1. Connected-component contraction (vertical compression)
@@ -419,6 +426,8 @@ def build_digraph_with_tags(dag_analysis: List[Dict],
         DiGraph with 'type' and 'macro_action_tag' node attributes
     """
     G = nx.DiGraph()
+    # Node 0 is the problem statement. Step dependencies on 0 mean the step
+    # directly uses information from the original problem.
     G.add_node(0, type="problem", macro_action_tag=None)
 
     for entry in dag_analysis:

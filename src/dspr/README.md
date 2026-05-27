@@ -1,37 +1,32 @@
-# DCPR Model Implementation
+﻿# DSPR Model Implementation
 
-This directory contains the implementation of the Dynamic Cognitive Prefix Routing (DCPR) model.
+This directory contains the implementation of the Dynamic Structural Prefix Routing (DSPR) model.
 
 ## Structure
 
 ```
 src/
-├── dcpr/                      # Core model components
-│   ├── model.py              # Main DCPRModel
+├── dspr/                      # Core model components
+│   ├── model.py              # Main DSPRModel
 │   ├── router.py             # UCB Router MLP
 │   ├── context_encoder.py    # Context extraction
-│   ├── dual_prefix.py        # Dual cognitive prefixes
+│   ├── dual_prefix.py        # Dual structural prefixes
 │   └── config.py             # Configuration
 │
-└── dcpr_training/            # Training pipeline
+├── dspr_training/            # Training pipeline
     ├── dataset.py            # Dataset loader
     ├── trainer.py            # Training loop
-    ├── loss.py               # Joint loss function
-    └── data_filter.py        # GED-based filtering (interface only)
+│   └── loss.py               # Joint loss function
+│
+└── dspr_dataset/             # Dataset construction utilities
+    ├── data_filter.py        # GED-based trajectory filtering
+    └── split_dataset.py      # Train/validation/test split by problem_id
 ```
-
-## Model Architecture
-
-- **Frozen LLM**: Qwen2.5-Math-7B-Instruct (7B parameters, frozen)
-- **Trainable Components**: ~1.2M parameters
-  - P_exploit: (20, 4096) - Conservative reasoning prefix
-  - P_explore: (20, 4096) - Divergent reasoning prefix
-  - UCB Router: MLP (4096 → 256 → 1) - Predicts exploration weight α
 
 ## Training
 
 ```bash
-python scripts/train_dcpr.py
+python scripts/train_dspr.py
 ```
 
 ## Dataset Format
@@ -50,7 +45,7 @@ Expected JSONL format:
 
 - `variant_type`: "simple" or "hard"
 - `target_alpha`: 0.0 for simple (exploit), 1.0 for hard (explore)
-- `ged_score`: Graph edit distance (placeholder for now)
+- `ged_score`: Graph edit distance used to select training samples
 
 ## Key Features
 

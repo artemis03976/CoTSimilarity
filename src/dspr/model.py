@@ -1,35 +1,46 @@
-import torch
+﻿import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .context_encoder import ContextEncoder
 from .router import UCBRouter
-from .dual_prefix import DualCognitivePrefix
-from .config import DCPRConfig
+from .dual_prefix import DualStructuralPrefix
+from .config import DSPRConfig
 
 
-class DCPRModel(nn.Module):
-    """Dynamic Cognitive Prefix Routing model."""
+class DSPRModel(nn.Module):
+    """Dynamic Structural Prefix Routing model.
+
+    DSPR only trains three lightweight components:
+    a context encoder readout, a router that predicts the exploration weight
+    alpha, and two soft-prefix tables mixed by that alpha.
+    """
     supports_gradient_checkpointing = True
 
-    def __init__(self, config: DCPRConfig):
+    def __init__(self, config: DSPRConfig):
         super().__init__()
         self.config = config
 
-        # Load frozen LLM
+        # The frozen LLM supplies both token embeddings and hidden states.
+        # All trainable behavior is introduced through prefixes prepended to
+        # the input embedding sequence.
         self.frozen_llm, self.tokenizer = self._load_frozen_llm()
 
         llm_hidden_dim = self.frozen_llm.config.hidden_size
         self.context_encoder = ContextEncoder(self.frozen_llm, layer_idx=config.context_layer_idx)
         self.router = UCBRouter(llm_hidden_dim, config.router_intermediate_dim, config.router_dropout)
-        self.dual_prefix = DualCognitivePrefix(config.prefix_length, llm_hidden_dim)
+        self.dual_prefix = DualStructuralPrefix(config.prefix_length, llm_hidden_dim)
 
-        # Freeze base LLM
+        # Freeze base LLM parameters so optimization only updates DSPR modules.
         for param in self.frozen_llm.parameters():
             param.requires_grad = False
 
     def _load_frozen_llm(self):
-        """Load frozen LLM"""
+        """Load the base causal LM and tokenizer.
+
+        The model is kept in eval mode.
+        Gradient checkpointing can still be enabled for memory savings during prefix training.
+        """
         tokenizer = AutoTokenizer.from_pretrained(self.config.model_name, trust_remote_code=True)
 
         model_kwargs = {
@@ -94,7 +105,11 @@ class DCPRModel(nn.Module):
         prompt_attention_mask: torch.Tensor | None = None,
         forced_alpha: float | None = None,
     ):
-        """Build prefix-augmented embeddings and masks for generation."""
+        """Build prefix-augmented embeddings and masks.
+
+        alpha is either predicted from the prompt context or forced for probe
+        experiments. The final prefix is prepended at the embedding level.
+        """
         batch_size = input_ids.shape[0]
         if prompt_input_ids is None:
             prompt_input_ids = input_ids
@@ -102,6 +117,8 @@ class DCPRModel(nn.Module):
             prompt_attention_mask = attention_mask
 
         if forced_alpha is not None:
+            # Probe mode: bypass the router to inspect how fixed exploration
+            # weights affect generation and downstream DAG/GED behavior.
             alpha = torch.full(
                 (batch_size, 1),
                 fill_value=forced_alpha,
@@ -115,11 +132,13 @@ class DCPRModel(nn.Module):
                 h_Q = h_Q.to(dtype=router_dtype)
             alpha = self.router(h_Q)
 
+        # P_final is a interpolation between reuse and adapt prefixes.
         P_final = self.dual_prefix(alpha, batch_size)
         prompt_embeds = self.frozen_llm.get_input_embeddings()(input_ids)
         if P_final.dtype != prompt_embeds.dtype:
             P_final = P_final.to(dtype=prompt_embeds.dtype)
 
+        # Prepend the prefix to the input embeddings
         inputs_embeds = torch.cat([P_final, prompt_embeds], dim=1)
         prefix_mask = torch.ones(
             batch_size,
@@ -140,7 +159,11 @@ class DCPRModel(nn.Module):
         forced_alpha: float | None = None,
         **generate_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Generate with DCPR prefix routing via transformers.generate.
+        """Generate with DSPR prefix routing via transformers.generate.
+
+        HuggingFace generation sometimes still requires token ids even when inputs_embeds
+        are provided. We prepend dummy ids only to align generated-token slicing;
+        the actual prefix content comes from inputs_embeds.
 
         Returns:
             new_token_ids: generated continuation tokens, shape (batch, new_len)

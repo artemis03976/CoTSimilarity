@@ -1,7 +1,7 @@
-import torch
+﻿import torch
 import torch.nn as nn
 
-class DCPRLoss(nn.Module):
+class DSPRLoss(nn.Module):
     """Joint loss: L_total = L_LLM_Gen + λ * L_Router"""
 
     def __init__(self, lambda_router=0.1):

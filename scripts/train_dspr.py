@@ -1,5 +1,5 @@
-"""
-Training script for DCPR model.
+﻿"""
+Training script for DSPR model.
 """
 
 import argparse
@@ -11,10 +11,10 @@ import torch
 from transformers import TrainingArguments, default_data_collator
 sys.path.append('src')
 
-from dcpr.config import DCPRConfig
-from dcpr.model import DCPRModel
-from dcpr_training.dataset import DCPRDataset
-from dcpr_training.trainer import DCPRTrainer, compute_dcpr_metrics
+from dspr.config import DSPRConfig
+from dspr.model import DSPRModel
+from dspr_training.dataset import DSPRDataset
+from dspr_training.trainer import DSPRTrainer, compute_dspr_metrics
 
 
 def set_seed(seed: int):
@@ -27,9 +27,9 @@ def set_seed(seed: int):
 
 
 def parse_args():
-    default_config = DCPRConfig()
+    default_config = DSPRConfig()
 
-    parser = argparse.ArgumentParser(description="Train DCPR model with configurable hyperparameters.")
+    parser = argparse.ArgumentParser(description="Train DSPR model with configurable hyperparameters.")
     parser.add_argument("--model_name", type=str, default=default_config.model_name)
     parser.add_argument("--context_layer_idx", type=int, default=default_config.context_layer_idx)
     parser.add_argument("--prefix_length", type=int, default=default_config.prefix_length)
@@ -62,21 +62,21 @@ def parse_args():
 def main():
     args = parse_args()
 
-    config_field_names = {f.name for f in fields(DCPRConfig)}
+    config_field_names = {f.name for f in fields(DSPRConfig)}
     config_kwargs = {k: v for k, v in vars(args).items() if k in config_field_names}
-    config = DCPRConfig(**config_kwargs)
+    config = DSPRConfig(**config_kwargs)
 
     # Set seed for reproducibility
     set_seed(config.seed)
 
     # Initialize model
-    print("Loading DCPR model...")
-    model = DCPRModel(config)
+    print("Loading DSPR model...")
+    model = DSPRModel(config)
 
     # Load datasets
     print("Loading datasets...")
-    train_dataset = DCPRDataset(config.train_data_path, model.tokenizer, config.max_seq_length)
-    val_dataset = DCPRDataset(config.val_data_path, model.tokenizer, config.max_seq_length)
+    train_dataset = DSPRDataset(config.train_data_path, model.tokenizer, config.max_seq_length)
+    val_dataset = DSPRDataset(config.val_data_path, model.tokenizer, config.max_seq_length)
 
     eval_strategy = "epoch" if len(val_dataset) > 0 else "no"
     save_strategy = "epoch" if len(val_dataset) > 0 else "no"
@@ -107,13 +107,13 @@ def main():
     )
 
     # Initialize trainer
-    trainer = DCPRTrainer(
+    trainer = DSPRTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=default_data_collator,
-        compute_metrics=compute_dcpr_metrics if len(val_dataset) > 0 else None,
+        compute_metrics=compute_dspr_metrics if len(val_dataset) > 0 else None,
         lambda_router=config.lambda_router,
     )
 

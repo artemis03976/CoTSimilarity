@@ -1,5 +1,5 @@
-"""
-GED-based trajectory filtering for DCPR dataset construction.
+﻿"""
+GED-based trajectory filtering for DSPR dataset construction.
 """
 
 import json
@@ -25,7 +25,7 @@ def filter_trajectories_by_ged(
     min_ged_variance: float = 1.0
 ) -> None:
     """
-    Filter trajectories using GED to create D_exploit and D_explore datasets.
+    Filter trajectories using GED to create D_reuse and D_adapt datasets.
 
     Args:
         all_results: All GED analysis results
@@ -43,7 +43,7 @@ def filter_trajectories_by_ged(
             problems[key] = []
         problems[key].append(r)
 
-    dcpr_data = []
+    dspr_data = []
     stats = {'total_problems': 0, 'skipped_no_correct': 0, 'skipped_low_variance': 0, 'selected': 0}
 
     for (problem_id, variant), samples in sorted(problems.items()):
@@ -75,7 +75,7 @@ def filter_trajectories_by_ged(
         selected = sorted_samples[:top_k]
 
         for sample in selected:
-            dcpr_data.append({
+            dspr_data.append({
                 'problem_id': problem_id,
                 'problem': sample['problem'],
                 'response': sample['response'],
@@ -87,10 +87,10 @@ def filter_trajectories_by_ged(
             stats['selected'] += 1
 
     with open(output_path, 'w', encoding='utf-8') as f:
-        for item in dcpr_data:
+        for item in dspr_data:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
-    print(f"\n=== DCPR Dataset Statistics ===")
+    print(f"\n=== DSPR Dataset Statistics ===")
     print(f"Total problem variants: {stats['total_problems']}")
     print(f"Skipped (no correct): {stats['skipped_no_correct']}")
     print(f"Skipped (low variance): {stats['skipped_low_variance']}")
@@ -99,14 +99,14 @@ def filter_trajectories_by_ged(
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Filter GED results to create DCPR training dataset')
+    parser = argparse.ArgumentParser(description='Filter GED results to create DSPR training dataset')
     parser.add_argument('--input', required=True, help='Input JSONL file with GED results')
-    parser.add_argument('--output', help='Output JSONL file (default: data/dcpr_dataset.jsonl)')
+    parser.add_argument('--output', help='Output JSONL file (default: data/dspr_dataset.jsonl)')
     parser.add_argument('--top-k', type=int, default=5, help='Top-k samples per problem (default: 5)')
     parser.add_argument('--min-variance', type=float, default=1.0, help='Min GED variance (default: 1.0)')
     args = parser.parse_args()
 
-    output_path = args.output or 'data/dcpr_dataset.jsonl'
+    output_path = args.output or 'data/dspr_dataset.jsonl'
 
     print(f"Loading GED results from {args.input}...")
     all_results = load_ged_results(args.input)
@@ -118,4 +118,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

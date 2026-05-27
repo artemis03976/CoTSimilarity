@@ -1,19 +1,19 @@
-import os
+﻿import os
 from typing import Any
 
 import numpy as np
 import torch
 from transformers import Trainer
 
-from .loss import DCPRLoss
+from .loss import DSPRLoss
 
 
-class DCPRTrainer(Trainer):
-    """HuggingFace Trainer for DCPR model."""
+class DSPRTrainer(Trainer):
+    """HuggingFace Trainer for DSPR model."""
 
     def __init__(self, *args, lambda_router: float = 0.1, **kwargs):
         super().__init__(*args, **kwargs)
-        self.loss_fn = DCPRLoss(lambda_router=lambda_router)
+        self.loss_fn = DSPRLoss(lambda_router=lambda_router)
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         target_alpha = inputs.pop("target_alpha")
@@ -39,14 +39,14 @@ class DCPRTrainer(Trainer):
         os.makedirs(output_dir, exist_ok=True)
         model_to_save = self.model.module if hasattr(self.model, "module") else self.model
 
-        # Save only trainable DCPR parameters to avoid huge checkpoints of frozen base LLM.
+        # Save only trainable DSPR parameters to avoid huge checkpoints of frozen base LLM.
         torch.save(
             {
                 "dual_prefix_state_dict": model_to_save.dual_prefix.state_dict(),
                 "router_state_dict": model_to_save.router.state_dict(),
                 "training_args": self.args.to_dict(),
             },
-            os.path.join(output_dir, "dcpr_trainable.pt"),
+            os.path.join(output_dir, "dspr_trainable.pt"),
         )
 
     def load_trainable_checkpoint(self, checkpoint_path: str):
@@ -56,7 +56,7 @@ class DCPRTrainer(Trainer):
         model_to_load.router.load_state_dict(ckpt["router_state_dict"])
 
 
-def compute_dcpr_metrics(eval_pred: Any) -> dict[str, float]:
+def compute_dspr_metrics(eval_pred: Any) -> dict[str, float]:
     """Compute router alpha diagnostics on validation set."""
     predictions, label_ids = eval_pred
 

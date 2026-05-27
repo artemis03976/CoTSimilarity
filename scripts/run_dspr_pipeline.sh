@@ -1,17 +1,17 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # =============================================================================
-# run_dcpr_pipeline.sh - Full DCPR pipeline test script
+# run_dspr_pipeline.sh - Full DSPR pipeline test script
 #
 # Workflow: data split -> training -> inference -> metric reporting
 #
 # Prerequisites:
-#   - data/qwen/dcpr_train.jsonl
-#   - data/qwen/dcpr_val.jsonl
+#   - data/qwen/dspr_train.jsonl
+#   - data/qwen/dspr_val.jsonl
 #   - data/math_paired.jsonl for inference evaluation
 #
 # Outputs:
 #   checkpoints/<RUN_NAME>/              training artifacts (dual_prefix + router)
-#   output/<RUN_NAME>/all_records.jsonl  DCPR inference results
+#   output/<RUN_NAME>/all_records.jsonl  DSPR inference results
 # =============================================================================
 
 set -e
@@ -19,12 +19,12 @@ set -e
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-RUN_NAME="dcpr_pipeline"
+RUN_NAME="dspr_pipeline"
 
 # Training
 MODEL_NAME="Qwen/Qwen2.5-Math-7B-Instruct"
-TRAIN_DATA="data/qwen/dcpr_train.jsonl"
-VAL_DATA="data/qwen/dcpr_val.jsonl"
+TRAIN_DATA="data/qwen/dspr_train.jsonl"
+VAL_DATA="data/qwen/dspr_val.jsonl"
 CHECKPOINT_DIR="checkpoints/${RUN_NAME}"
 
 # Inference evaluation
@@ -36,10 +36,10 @@ NUM_EPOCHS=15
 LEARNING_RATE=4e-5
 
 # ---------------------------------------------------------------------------
-# Step 1: Train DCPR
+# Step 1: Train DSPR
 # ---------------------------------------------------------------------------
-echo "========== [1/3] Training DCPR =========="
-python scripts/train_dcpr.py \
+echo "========== [1/3] Training DSPR =========="
+python scripts/train_dspr.py \
     --model_name "${MODEL_NAME}" \
     --train_data_path "${TRAIN_DATA}" \
     --val_data_path "${VAL_DATA}" \
@@ -60,12 +60,12 @@ if [ -z "${LATEST_CKPT}" ]; then
     exit 1
 fi
 
-echo "========== [2/3] DCPR inference evaluation =========="
+echo "========== [2/3] DSPR inference evaluation =========="
 echo "Using checkpoint: ${LATEST_CKPT}"
 mkdir -p "${INFER_OUTPUT_DIR}"
 
-python scripts/dcpr_inference_test.py \
-    --checkpoint "${LATEST_CKPT}/dcpr_trainable.pt" \
+python scripts/dspr_inference_test.py \
+    --checkpoint "${LATEST_CKPT}/dspr_trainable.pt" \
     --model_name "${MODEL_NAME}" \
     --output_dir "${INFER_OUTPUT_DIR}" \
     --data_path "${TEST_DATA}" \
@@ -77,7 +77,7 @@ echo ""
 # ---------------------------------------------------------------------------
 echo "========== [3/3] Metric reporting =========="
 echo ""
-echo "--- DCPR inference results ---"
+echo "--- DSPR inference results ---"
 python src/utils/evaluation/calculate_accuracy.py \
     "${INFER_OUTPUT_DIR}/all_records.jsonl"
 

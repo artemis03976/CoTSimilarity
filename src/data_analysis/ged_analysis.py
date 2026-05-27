@@ -1,4 +1,10 @@
-"""Analyze GED between baseline-original and variant (simple/hard) responses."""
+﻿"""Analyze GED between baseline-original and variant responses.
+
+This is the bridge between DAG analysis and DSPR dataset construction. For each
+problem, it compares simple/hard response DAGs against an original-problem
+reference DAG, joins answer correctness labels from all_records*.jsonl, and
+writes one flat GED record per sampled response.
+"""
 
 import json
 import argparse
@@ -33,7 +39,12 @@ def load_batch_records(path: str) -> List[Dict]:
 
 
 def load_correctness_data(path: str) -> Dict[int, Dict]:
-    """Load correctness labels from all_records_50.jsonl."""
+    """Load correctness labels and raw responses from all_records_50.jsonl.
+
+    The DAG analysis files only contain dependency annotations. We keep this
+    separate lookup so the final GED records can include both structure metrics
+    and whether the sampled answer was correct.
+    """
     correctness = {}
     with open(path, encoding='utf-8') as f:
         for line in f:
@@ -69,7 +80,7 @@ def get_original_graph(records: List[Dict], problem_id: int):
 
 
 def get_variant_samples(records: List[Dict], problem_id: int, variant: str, num_samples: int) -> List[Dict]:
-    """Get variant samples from dag_analysis_50."""
+    """Get DAG-analyzed samples for one variant from dag_analysis_50 output."""
     samples = []
     for record in records:
         custom_id = record.get('custom_id', '')
@@ -89,13 +100,19 @@ def analyze_problem(
     variant_records: List[Dict],
     correctness_data: Dict
 ) -> List[Dict]:
-    """Analyze GED for one problem's variants."""
+    """Analyze GED for one problem's simple/hard variants.
+
+    The original graph is compressed once and reused as the reference. Each
+    variant sample graph is also compressed before GED so comparisons focus on
+    macro reasoning structure rather than repeated same-tag micro steps.
+    """
 
     original_graph = None
     if original_records:
         original_graph = get_original_graph(original_records, problem_id)
     if original_graph is None:
-        # New default path: use the same analyzed file that already includes original_0.
+        # Default path for the current pipeline: use original_0 from the same
+        # analyzed file that also contains simple/hard samples.
         original_graph = get_original_graph(variant_records, problem_id)
 
     if not original_graph:
@@ -292,8 +309,8 @@ def main():
                 f.write(json.dumps(item, ensure_ascii=False) + '\n')
         print(f"\nAll GED results saved to {all_results_path}")
         print(f"Total samples processed: {len(all_results)}")
-        print(f"\nTo generate DCPR dataset, run:")
-        print(f"  python src/dcpr_dataset/data_filter.py --input {all_results_path}")
+        print(f"\nTo generate DSPR dataset, run:")
+        print(f"  python src/dspr_dataset/data_filter.py --input {all_results_path}")
     else:
         print("No results generated")
 

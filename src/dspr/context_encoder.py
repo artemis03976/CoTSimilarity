@@ -2,7 +2,9 @@ import torch
 import torch.nn as nn
 
 class ContextEncoder(nn.Module):
-    """Extracts hidden state h_Q from frozen LLM's last layer, last token position."""
+    """
+    Extract h_Q from a frozen LLM hidden state.
+    """
 
     def __init__(self, frozen_model, layer_idx=-1):
         super().__init__()
@@ -25,6 +27,8 @@ class ContextEncoder(nn.Module):
                 use_cache=False
             )
             hidden_states = outputs.hidden_states[self.layer_idx]
+            # Use the last non-padding token for each sequence. This keeps the
+            # readout stable under right padding in batched training.
             last_token_indices = attention_mask.long().sum(dim=1) - 1
             last_token_indices = torch.clamp(last_token_indices, min=0)
             batch_indices = torch.arange(hidden_states.size(0), device=hidden_states.device)

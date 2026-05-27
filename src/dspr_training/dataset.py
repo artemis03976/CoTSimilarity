@@ -1,12 +1,12 @@
-import json
+﻿import json
 import torch
 from torch.utils.data import Dataset
 
-from dcpr.config import MATH_SYSTEM_PROMPT
+from dspr.config import MATH_SYSTEM_PROMPT
 
 
-class DCPRDataset(Dataset):
-    """Dataset for DCPR training."""
+class DSPRDataset(Dataset):
+    """Dataset for DSPR training."""
 
     def __init__(self, jsonl_path, tokenizer, max_length=2048):
         self.data = self._load_jsonl(jsonl_path)

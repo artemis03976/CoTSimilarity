@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+﻿from dataclasses import dataclass
 
 
 @dataclass
@@ -18,8 +18,8 @@ class SPTConfig:
     warmup_steps: int = 100
 
     # Data
-    train_data_path: str = "data/qwen/dcpr_train.jsonl"
-    val_data_path: str = "data/qwen/dcpr_val.jsonl"
+    train_data_path: str = "data/qwen/dspr_train.jsonl"
+    val_data_path: str = "data/qwen/dspr_val.jsonl"
     checkpoint_dir: str = "checkpoints"
     max_seq_length: int = 2048
 

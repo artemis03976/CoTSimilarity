@@ -1,11 +1,11 @@
-from dataclasses import dataclass
+﻿from dataclasses import dataclass
 
 MATH_SYSTEM_PROMPT = "Please reason step by step, and put your final answer within \\boxed{}."
 
 
 @dataclass
-class DCPRConfig:
-    """Configuration for DCPR model."""
+class DSPRConfig:
+    """Configuration for DSPR model."""
     # Model architecture
     model_name: str = "Qwen/Qwen2.5-Math-7B-Instruct"
     context_layer_idx: int = 15
@@ -25,8 +25,8 @@ class DCPRConfig:
     lambda_router: float = 0.5
 
     # Data
-    train_data_path: str = "data/qwen/dcpr_train.jsonl"
-    val_data_path: str = "data/qwen/dcpr_val.jsonl"
+    train_data_path: str = "data/qwen/dspr_train.jsonl"
+    val_data_path: str = "data/qwen/dspr_val.jsonl"
     checkpoint_dir: str = "checkpoints"
     max_seq_length: int = 2048
 

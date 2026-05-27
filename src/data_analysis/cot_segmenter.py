@@ -1,3 +1,11 @@
+"""Heuristically split model reasoning chains into analysis steps.
+
+This module is the first stage after raw model generation. It reads
+all_records*.jsonl files, segments each sampled response into coarse reasoning
+steps, and writes those steps back under each sample. The downstream DAG
+analyzer assumes each sample has a `steps` list.
+"""
+
 import json
 import re
 import argparse
@@ -18,7 +26,12 @@ RE_INLINE_DOLLAR = re.compile(r'(?<!\$)\$(?!\$)(?!\s)(.+?)(?<!\s|\$)\$(?!\$)')
 
 
 def protect_latex(text):
-    """Replace all LaTeX regions with placeholders. Returns (protected_text, mapping)."""
+    """Replace LaTeX regions with placeholders before text splitting.
+
+    Most splitting rules are regex based. Protecting math prevents formulas
+    such as `$a. b$` or display equations from being accidentally split into
+    separate reasoning steps.
+    """
     mapping = {}
     counter = [0]
 
@@ -136,6 +149,11 @@ RE_LOGICAL_ZH = re.compile(
 
 
 def split_logical_connectors(chunk, threshold=LONG_PARAGRAPH_THRESHOLD):
+    """Split long prose chunks on common discourse markers.
+
+    This is intentionally heuristic. The goal is not perfect sentence parsing;
+    it is to create stable, human-readable units for the LLM-based DAG analyzer.
+    """
     if len(chunk) <= threshold:
         return [chunk]
     parts = RE_LOGICAL_EN.split(chunk)
