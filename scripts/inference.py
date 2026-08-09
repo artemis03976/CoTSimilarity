@@ -67,8 +67,20 @@ def parse_args() -> argparse.Namespace:
     # Mechanical trajectory validation.  Invalid greedy outputs remain in the
     # evaluation file and count as model outputs; they are never resampled.
     parser.add_argument("--min-response-characters", type=int, default=20)
-    parser.add_argument("--repeat-ngram-size", type=int, default=8)
+    parser.add_argument(
+        "--repeat-ngram-size",
+        "--max-repeat-period",
+        type=int,
+        default=64,
+        help="Maximum consecutive loop period in tokens; distant phrase reuse is allowed",
+    )
     parser.add_argument("--max-ngram-repeats", type=int, default=5)
+    parser.add_argument(
+        "--min-repeat-span-tokens",
+        type=int,
+        default=64,
+        help="Minimum contiguous token span required before rejecting a periodic loop",
+    )
     parser.add_argument(
         "--require-boxed-answer",
         action=argparse.BooleanOptionalAction,
@@ -142,6 +154,7 @@ def main() -> int:
         min_characters=args.min_response_characters,
         repeat_ngram_size=args.repeat_ngram_size,
         max_ngram_repeats=args.max_ngram_repeats,
+        min_repeat_span_tokens=args.min_repeat_span_tokens,
     )
     print(f"Loading {args.baseline} model...")
     generator = load_greedy_generator(model_config)

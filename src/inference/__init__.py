@@ -8,6 +8,7 @@ from .common import (
     run_evaluator_self_test,
 )
 from .quality import CoTValidationConfig, ValidationResult, validate_cot
+from .revalidate import revalidate_multiple
 
 __all__ = [
     "CoTValidationConfig",
@@ -16,6 +17,7 @@ __all__ = [
     "VARIANTS",
     "ValidationResult",
     "read_math_records",
+    "revalidate_multiple",
     "run_evaluator_self_test",
     "validate_cot",
 ]

@@ -104,7 +104,26 @@ def compute_dag_max_width(G: nx.DiGraph) -> int:
 
 # Cost functions for GED
 def node_subst_cost(attrs1: dict, attrs2: dict) -> float:
-    return 0.0 if attrs1.get("type") == attrs2.get("type") else 1.0
+    """Unit substitution cost for node kind and reasoning-role mismatch.
+
+    ``build_digraph_with_tags`` stores the coarse node kind (problem, step, or
+    external) in ``type`` and the IFD semantic role in ``macro_action_tag``.
+    Comparing only ``type`` would make every pair of reasoning-step nodes
+    interchangeable, regardless of whether they are Define, Derive, Conclude,
+    and so on.
+    """
+
+    kind1 = attrs1.get("type")
+    kind2 = attrs2.get("type")
+    if kind1 != kind2:
+        return 1.0
+    if kind1 == "step":
+        return (
+            0.0
+            if attrs1.get("macro_action_tag") == attrs2.get("macro_action_tag")
+            else 1.0
+        )
+    return 0.0
 
 def node_del_cost(attrs: dict) -> float:
     return 1.0
@@ -127,10 +146,18 @@ def compute_ged_similarity(G1: nx.DiGraph, G2: nx.DiGraph, timeout: float = 30.0
 
     Exact GED can be expensive. Small graphs use optimize_graph_edit_distance;
     larger graphs use NetworkX's timeout-aware graph_edit_distance path.
+
+    With the unit edit costs used here, deleting every node/edge in ``G1`` and
+    inserting every node/edge in ``G2`` is a valid upper bound on the edit
+    distance.  We therefore normalize by
+    ``|V1| + |V2| + |E1| + |E2|``.  The previous ``max(|V|) + max(|E|)``
+    denominator was not an upper bound when both graphs contained different
+    edges and could produce misleading negative similarities.
     """
     max_nodes = max(len(G1), len(G2))
-    max_edges = max(G1.number_of_edges(), G2.number_of_edges())
-    normalizer = max_nodes + max_edges
+    node_edit_budget = len(G1) + len(G2)
+    edge_edit_budget = G1.number_of_edges() + G2.number_of_edges()
+    normalizer = node_edit_budget + edge_edit_budget
 
     timed_out = False
     ged = None
@@ -159,11 +186,20 @@ def compute_ged_similarity(G1: nx.DiGraph, G2: nx.DiGraph, timeout: float = 30.0
     except Exception as e:
         logger.warning(f"GED computation error: {e}")
 
-    result = {"ged": ged, "timed_out": timed_out}
+    result = {
+        "ged": ged,
+        "timed_out": timed_out,
+        "ged_normalizer": normalizer,
+        "node_edit_budget": node_edit_budget,
+        "edge_edit_budget": edge_edit_budget,
+    }
     if ged is not None and normalizer > 0:
-        result["similarity_normalized"] = round(1 - ged / normalizer, 4)
+        ged_normalized = max(0.0, min(1.0, ged / normalizer))
+        result["ged_normalized"] = round(ged_normalized, 4)
+        result["similarity_normalized"] = round(1 - ged_normalized, 4)
         result["similarity_inverse"] = round(1 / (1 + ged), 4)
     else:
+        result["ged_normalized"] = None
         result["similarity_normalized"] = None
         result["similarity_inverse"] = None
 

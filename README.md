@@ -135,9 +135,22 @@ reasons and sampling shortfalls. The command fails rather than silently
 returning fewer than 50 valid paths.
 
 The repetition validator only rejects a token block with a period of at most
-64 tokens when it repeats consecutively five times; reuse of the same phrase
-at distant positions is allowed. During generation, the progress display shows
-both accepted valid paths and raw attempts against the bounded attempt budget.
+64 tokens when it repeats consecutively five times **and** the consecutive loop
+spans at least 64 tokens. This avoids rejecting short arithmetic patterns such
+as `3 * 3 * 3 * 3 * 3 * 3` or runs of zeros in large integers; reuse of the same
+phrase at distant positions is also allowed. During generation, the progress
+display shows both accepted valid paths and raw attempts against the bounded
+attempt budget.
+
+If validation thresholds change after an expensive vLLM run, rebuild the
+accepted pool from the saved raw attempts without loading the model again:
+
+```bash
+python scripts/revalidate_multiple.py \
+  --raw-path output/qwen/multiple_seed42/raw_generations.jsonl \
+  --records-path output/qwen/multiple_seed42/all_records.jsonl \
+  --output-dir output/qwen/multiple_seed42_corrected
+```
 
 ### 2. Segment Chain-Of-Thought Responses
 
@@ -188,6 +201,13 @@ python src/data_analysis/ged_analysis.py \
 
 By default, `ged_analysis.py` uses each problem's `original_0` response as the GED reference graph. For older workflows where original and variant DAG records are stored separately, pass `--original-records` explicitly.
 
+Each GED record keeps the raw `ged` used by the existing within-problem
+selection protocol and also reports `ged_normalized` in `[0, 1]`. The latter
+uses the conservative unit-cost upper bound
+`|V1| + |V2| + |E1| + |E2|`; `similarity_normalized` is its complement. This
+prevents graph size and edge-count differences from producing an invalid
+negative similarity while keeping the original raw GED available for audit.
+
 ### 5. Build The DSPR Dataset
 
 ```bash
@@ -195,8 +215,17 @@ python src/dspr_dataset/data_filter.py \
   --input "output/qwen/all_ged_results.jsonl" \
   --output "data/qwen/dspr_dataset.jsonl" \
   --top-k 5 \
-  --min-variance 1.0
+  --min-ged-range 3 \
+  --eligibility-output "output/qwen/eligible_problem_ids_ged_range_ge_3.json" \
+  --model-name qwen
 ```
+
+Dataset curation and k-fold eligibility use the same protocol: only correct,
+non-timeout trajectories with a valid GED are considered; a problem-variant is
+eligible when its within-group GED range is at least 3; Simple selects the five
+lowest-GED trajectories and Hard selects the five highest-GED trajectories.
+The eligibility JSON written above is consumed directly by
+`scripts/build_kfold_splits.py`.
 
 ### 6. Split Train/Validation/Test Sets
 

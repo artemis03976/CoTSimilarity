@@ -46,6 +46,9 @@ Expected JSONL format:
 - `variant_type`: "simple" or "hard"
 - `target_alpha`: 0.0 for simple (exploit), 1.0 for hard (explore)
 - `ged_score`: Graph edit distance used to select training samples
+- `ged_normalized`: GED divided by the conservative unit-edit budget across
+  both graphs, retained for scale-free analysis
+- `similarity_normalized`: `1 - ged_normalized`, also in `[0, 1]`
 
 ## Key Features
 

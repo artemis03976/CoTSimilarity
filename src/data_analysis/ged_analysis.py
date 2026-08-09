@@ -28,14 +28,45 @@ except ModuleNotFoundError:
     from data_analysis.dag_compressor import compress_dag_combined, build_digraph_with_tags
 
 
-def load_batch_records(path: str) -> List[Dict]:
-    """Load batch format JSONL records."""
+VARIANTS = ("original", "simple", "hard")
+
+
+def load_dag_records(path: str) -> Dict[str, List[Dict]]:
+    """Load DAG annotations from either supported on-disk representation.
+
+    Historical experiments stored the provider's batch responses directly,
+    with one top-level ``custom_id`` per trajectory.  The current
+    ``merge-batch`` pipeline stores DAG annotations inside each problem's
+    variant/sample hierarchy.  Normalize both representations to the same
+    ``custom_id -> dag_analysis`` lookup used by GED computation.
+    """
+
     records = []
     with open(path, encoding='utf-8') as f:
         for line in f:
             if line.strip():
                 records.append(json.loads(line))
-    return records
+
+    dag_records: Dict[str, List[Dict]] = {}
+    for record in records:
+        custom_id = record.get('custom_id')
+        if custom_id is not None:
+            dag = extract_dag_from_batch_response(record)
+            if dag:
+                dag_records[str(custom_id)] = dag
+            continue
+
+        problem_id = record.get('problem_id', record.get('id'))
+        if problem_id is None:
+            continue
+        for variant in VARIANTS:
+            samples = record.get(variant, {}).get('samples', [])
+            for sample_num, sample in enumerate(samples):
+                dag = sample.get('dag_analysis')
+                if isinstance(dag, list) and dag:
+                    dag_records[f"{problem_id}_{variant}_{sample_num}"] = dag
+
+    return dag_records
 
 
 def load_correctness_data(path: str) -> Dict[int, Dict]:
@@ -59,36 +90,36 @@ def load_correctness_data(path: str) -> Dict[int, Dict]:
     return correctness
 
 
-def get_original_graph(records: List[Dict], problem_id: int):
+def get_original_graph(records: Dict[str, List[Dict]], problem_id: int):
     """Find original problem graph.
 
     Supports both legacy custom_id (`<pid>_original`) and current batch style
     custom_id (`<pid>_original_0`).
     """
     target_ids = {f"{problem_id}_original_0", f"{problem_id}_original"}
-    for record in records:
-        custom_id = record.get('custom_id', '')
-        if custom_id in target_ids:
-            dag = extract_dag_from_batch_response(record)
-            if dag:
-                return build_digraph_with_tags(dag)
-            else:
-                print(f"Warning: Found {custom_id} but failed to extract DAG")
-                return None
-    print(f"Warning: original graph not found for problem {problem_id} in {len(records)} records")
+    for custom_id in target_ids:
+        dag = records.get(custom_id)
+        if dag:
+            return build_digraph_with_tags(dag)
+    print(f"Warning: original graph not found for problem {problem_id} in {len(records)} DAG records")
     return None
 
 
-def get_variant_samples(records: List[Dict], problem_id: int, variant: str, num_samples: int) -> List[Dict]:
+def get_variant_samples(
+    records: Dict[str, List[Dict]],
+    problem_id: int,
+    variant: str,
+    num_samples: int,
+) -> List[Dict]:
     """Get DAG-analyzed samples for one variant from dag_analysis_50 output."""
     samples = []
-    for record in records:
-        custom_id = record.get('custom_id', '')
+    for custom_id, dag in records.items():
         if custom_id.startswith(f"{problem_id}_{variant}_"):
-            sample_num = int(custom_id.split('_')[-1])
-            dag = extract_dag_from_batch_response(record)
-            if dag:
-                samples.append({'sample_num': sample_num, 'dag': dag, 'custom_id': custom_id})
+            try:
+                sample_num = int(custom_id.rsplit('_', 1)[-1])
+            except ValueError:
+                continue
+            samples.append({'sample_num': sample_num, 'dag': dag, 'custom_id': custom_id})
     samples.sort(key=lambda x: x['sample_num'])
     return samples[:num_samples]
 
@@ -96,8 +127,8 @@ def get_variant_samples(records: List[Dict], problem_id: int, variant: str, num_
 def analyze_problem(
     problem_id: int,
     num_samples: int,
-    original_records: Optional[List[Dict]],
-    variant_records: List[Dict],
+    original_records: Optional[Dict[str, List[Dict]]],
+    variant_records: Dict[str, List[Dict]],
     correctness_data: Dict
 ) -> List[Dict]:
     """Analyze GED for one problem's simple/hard variants.
@@ -172,6 +203,8 @@ def analyze_problem(
                 'response': response,
                 'correct': correct,
                 'ged': ged_result['ged'],
+                'ged_normalized': ged_result['ged_normalized'],
+                'ged_normalizer': ged_result['ged_normalizer'],
                 'similarity_normalized': ged_result['similarity_normalized'],
                 'timed_out': ged_result['timed_out']
             })
@@ -185,7 +218,14 @@ def write_results_to_csv(results: List[Dict], problem_id: int, output_dir: str):
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=['problem_id', 'sample_id', 'variant', 'problem', 'response', 'correct', 'ged', 'similarity_normalized', 'timed_out'])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                'problem_id', 'sample_id', 'variant', 'problem', 'response',
+                'correct', 'ged', 'ged_normalized', 'ged_normalizer',
+                'similarity_normalized', 'timed_out',
+            ],
+        )
         writer.writeheader()
         writer.writerows(results)
 
@@ -217,7 +257,10 @@ def main():
     parser.add_argument('--baseline-original-records', type=str, default=None,
                         help='Optional baseline original DAG analysis JSONL path; overrides --baseline-output-root inference')
     parser.add_argument('--variant-records', type=str, default=None,
-                        help='simple/hard DAG analysis JSONL path; default: <output-root>/dag_analysis_50/analyzed_records.jsonl')
+                        help=(
+                            'Merged DAG analysis JSONL (legacy raw batch responses are also '
+                            'accepted); default: <output-root>/dag_analysis_50/analyzed_records.jsonl'
+                        ))
     parser.add_argument('--correctness-file', type=str, default=None,
                         help='Answer correctness JSONL path; default: <output-root>/all_records_50.jsonl')
     parser.add_argument('--all-results-output', type=str, default=None,
@@ -264,14 +307,18 @@ def main():
             baseline_original_records_path = candidate_b
 
     print("Loading data...")
-    variant_records = load_batch_records(str(variant_records_path))
+    variant_records = load_dag_records(str(variant_records_path))
+    print(f"Loaded {len(variant_records)} trajectory DAGs from {variant_records_path}")
     if args.original_records:
-        original_records = load_batch_records(str(Path(args.original_records)))
-        print(f"Loaded optional original records from {args.original_records}")
-    elif baseline_original_records_path:
-        original_records = load_batch_records(str(baseline_original_records_path))
+        original_records = load_dag_records(str(Path(args.original_records)))
         print(
-            "Using baseline original DAG records as GED reference: "
+            f"Loaded {len(original_records)} optional reference DAGs "
+            f"from {args.original_records}"
+        )
+    elif baseline_original_records_path:
+        original_records = load_dag_records(str(baseline_original_records_path))
+        print(
+            f"Using {len(original_records)} baseline DAG records as GED reference: "
             f"{baseline_original_records_path}"
         )
     else:

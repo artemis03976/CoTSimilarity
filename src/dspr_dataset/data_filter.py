@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import List, Dict
 
 
+VARIANTS = ("simple", "hard")
+DEFAULT_TOP_K = 5
+DEFAULT_MIN_GED_RANGE = 3.0
+
+
 def load_ged_results(input_path: str) -> List[Dict]:
     """Load GED analysis results from JSONL."""
     results = []
@@ -18,21 +23,88 @@ def load_ged_results(input_path: str) -> List[Dict]:
     return results
 
 
+def valid_correct_samples(samples: List[Dict]) -> List[Dict]:
+    """Return samples admitted by the shared GED curation protocol."""
+
+    return [
+        sample
+        for sample in samples
+        if sample.get('correct')
+        and sample.get('ged') is not None
+        and not sample.get('timed_out', False)
+    ]
+
+
+def build_eligibility_payload(
+    all_results: List[Dict],
+    eligible: Dict[str, List[int]],
+    top_k: int,
+    min_ged_range: float,
+    model_name: str | None = None,
+    source_file: str | None = None,
+) -> Dict:
+    """Build the eligibility manifest consumed by k-fold construction."""
+
+    simple = set(eligible['simple'])
+    hard = set(eligible['hard'])
+    union = simple | hard
+    intersection = simple & hard
+    payload = {
+        'ged_range_threshold': min_ged_range,
+        'top_k': top_k,
+        'comparison': (
+            'max(correct non-timeout GEDs) - min(correct non-timeout GEDs) '
+            '>= threshold'
+        ),
+        'total_problem_ids': len({result['problem_id'] for result in all_results}),
+        'counts': {
+            'simple_eligible': len(simple),
+            'hard_eligible': len(hard),
+            'eligible_union': len(union),
+            'eligible_intersection': len(intersection),
+            'simple_only': len(simple - hard),
+            'hard_only': len(hard - simple),
+        },
+        'problem_ids': {
+            'simple': sorted(simple),
+            'hard': sorted(hard),
+            'union': sorted(union),
+            'intersection': sorted(intersection),
+            'simple_only': sorted(simple - hard),
+            'hard_only': sorted(hard - simple),
+        },
+    }
+    if model_name:
+        payload['model'] = model_name
+    if source_file:
+        payload['source_files'] = [source_file]
+    return payload
+
+
 def filter_trajectories_by_ged(
     all_results: List[Dict],
     output_path: str,
-    top_k: int = 5,
-    min_ged_variance: float = 1.0
-) -> None:
+    top_k: int = DEFAULT_TOP_K,
+    min_ged_range: float = DEFAULT_MIN_GED_RANGE,
+    eligibility_output_path: str | None = None,
+    model_name: str | None = None,
+    source_file: str | None = None,
+) -> Dict:
     """
     Filter trajectories using GED to create D_reuse and D_adapt datasets.
 
     Args:
         all_results: All GED analysis results
         output_path: Path to output filtered dataset
-        top_k: Number of top samples to select per problem (default: 5)
-        min_ged_variance: Minimum GED variance required (default: 1.0)
+        top_k: Number of top samples to select per problem-variant (default: 5)
+        min_ged_range: Minimum within-group GED range (default: 3.0)
+        eligibility_output_path: Optional k-fold eligibility manifest output
     """
+    if top_k < 1:
+        raise ValueError('top_k must be positive')
+    if min_ged_range < 0:
+        raise ValueError('min_ged_range must be non-negative')
+
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     # Group by problem_id and variant
@@ -44,33 +116,52 @@ def filter_trajectories_by_ged(
         problems[key].append(r)
 
     dspr_data = []
-    stats = {'total_problems': 0, 'skipped_no_correct': 0, 'skipped_low_variance': 0, 'selected': 0}
+    stats = {
+        'total_problem_variants': 0,
+        'skipped_no_correct': 0,
+        'skipped_low_ged_range': 0,
+        'selected': 0,
+    }
+    eligible = {variant: [] for variant in VARIANTS}
 
     for (problem_id, variant), samples in sorted(problems.items()):
-        stats['total_problems'] += 1
+        if variant not in VARIANTS:
+            continue
+        stats['total_problem_variants'] += 1
 
-        # Step 1: Filter correct answers only
-        correct_samples = [s for s in samples if s['correct'] and s['ged'] is not None and not s['timed_out']]
+        # Step 1: keep correct, non-timeout trajectories with a GED value.
+        correct_samples = valid_correct_samples(samples)
 
         if not correct_samples:
             stats['skipped_no_correct'] += 1
             print(f"  Problem {problem_id} {variant}: No correct samples, skipped")
             continue
 
-        # Step 2: Check GED variance
+        # Step 2: require the shared within-group GED range threshold.
         geds = [s['ged'] for s in correct_samples]
-        ged_variance = max(geds) - min(geds)
+        ged_range = max(geds) - min(geds)
 
-        if ged_variance < min_ged_variance:
-            stats['skipped_low_variance'] += 1
-            print(f"  Problem {problem_id} {variant}: Low GED variance ({ged_variance:.2f}), skipped")
+        if ged_range < min_ged_range:
+            stats['skipped_low_ged_range'] += 1
+            print(
+                f"  Problem {problem_id} {variant}: Low GED range "
+                f"({ged_range:.2f} < {min_ged_range:.2f}), skipped"
+            )
             continue
+
+        eligible[variant].append(problem_id)
 
         # Step 3: Relative ranking - select top-k
         if variant == 'simple':
-            sorted_samples = sorted(correct_samples, key=lambda x: x['ged'])
+            sorted_samples = sorted(
+                correct_samples,
+                key=lambda x: (x['ged'], str(x.get('sample_id', ''))),
+            )
         else:
-            sorted_samples = sorted(correct_samples, key=lambda x: x['ged'], reverse=True)
+            sorted_samples = sorted(
+                correct_samples,
+                key=lambda x: (-x['ged'], str(x.get('sample_id', ''))),
+            )
 
         selected = sorted_samples[:top_k]
 
@@ -82,6 +173,8 @@ def filter_trajectories_by_ged(
                 'variant_type': variant,
                 'target_alpha': 0.0 if variant == 'simple' else 1.0,
                 'ged_score': sample['ged'],
+                'ged_normalized': sample.get('ged_normalized'),
+                'similarity_normalized': sample.get('similarity_normalized'),
                 'sample_id': sample['sample_id']
             })
             stats['selected'] += 1
@@ -90,20 +183,64 @@ def filter_trajectories_by_ged(
         for item in dspr_data:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
 
+    eligibility_payload = build_eligibility_payload(
+        all_results,
+        eligible,
+        top_k,
+        min_ged_range,
+        model_name=model_name,
+        source_file=source_file,
+    )
+    if eligibility_output_path:
+        eligibility_path = Path(eligibility_output_path)
+        eligibility_path.parent.mkdir(parents=True, exist_ok=True)
+        eligibility_path.write_text(
+            json.dumps(eligibility_payload, ensure_ascii=False, indent=2) + '\n',
+            encoding='utf-8',
+        )
+
     print(f"\n=== DSPR Dataset Statistics ===")
-    print(f"Total problem variants: {stats['total_problems']}")
+    print(f"Total problem variants: {stats['total_problem_variants']}")
     print(f"Skipped (no correct): {stats['skipped_no_correct']}")
-    print(f"Skipped (low variance): {stats['skipped_low_variance']}")
+    print(f"Skipped (GED range < {min_ged_range:g}): {stats['skipped_low_ged_range']}")
     print(f"Selected samples: {stats['selected']}")
     print(f"Output: {output_path}")
+    if eligibility_output_path:
+        print(f"Eligibility: {eligibility_output_path}")
+
+    return {
+        'stats': stats,
+        'eligibility': eligibility_payload,
+        'selected': dspr_data,
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(description='Filter GED results to create DSPR training dataset')
     parser.add_argument('--input', required=True, help='Input JSONL file with GED results')
     parser.add_argument('--output', help='Output JSONL file (default: data/dspr_dataset.jsonl)')
-    parser.add_argument('--top-k', type=int, default=5, help='Top-k samples per problem (default: 5)')
-    parser.add_argument('--min-variance', type=float, default=1.0, help='Min GED variance (default: 1.0)')
+    parser.add_argument(
+        '--top-k',
+        type=int,
+        default=DEFAULT_TOP_K,
+        help=f'Top-k samples per problem-variant (default: {DEFAULT_TOP_K})',
+    )
+    parser.add_argument(
+        '--min-ged-range',
+        '--min-variance',
+        dest='min_ged_range',
+        type=float,
+        default=DEFAULT_MIN_GED_RANGE,
+        help=(
+            'Minimum range of correct, non-timeout GEDs; --min-variance is a '
+            f'legacy alias (default: {DEFAULT_MIN_GED_RANGE:g})'
+        ),
+    )
+    parser.add_argument(
+        '--eligibility-output',
+        help='Optional eligibility JSON used by k-fold construction',
+    )
+    parser.add_argument('--model-name', help='Optional model label stored in eligibility JSON')
     args = parser.parse_args()
 
     output_path = args.output or 'data/dspr_dataset.jsonl'
@@ -112,8 +249,19 @@ def main():
     all_results = load_ged_results(args.input)
     print(f"Loaded {len(all_results)} samples")
 
-    print(f"\nFiltering with top_k={args.top_k}, min_variance={args.min_variance}...")
-    filter_trajectories_by_ged(all_results, output_path, args.top_k, args.min_variance)
+    print(
+        f"\nFiltering with top_k={args.top_k}, "
+        f"min_ged_range={args.min_ged_range}..."
+    )
+    filter_trajectories_by_ged(
+        all_results,
+        output_path,
+        top_k=args.top_k,
+        min_ged_range=args.min_ged_range,
+        eligibility_output_path=args.eligibility_output,
+        model_name=args.model_name,
+        source_file=args.input,
+    )
 
 
 if __name__ == '__main__':

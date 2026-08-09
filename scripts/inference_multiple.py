@@ -79,6 +79,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-ngram-repeats", type=int, default=5)
     parser.add_argument(
+        "--min-repeat-span-tokens",
+        type=int,
+        default=64,
+        help="Minimum contiguous token span required before rejecting a periodic loop",
+    )
+    parser.add_argument(
         "--require-boxed-answer",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -124,6 +130,7 @@ def main() -> int:
         min_characters=args.min_response_characters,
         repeat_ngram_size=args.repeat_ngram_size,
         max_ngram_repeats=args.max_ngram_repeats,
+        min_repeat_span_tokens=args.min_repeat_span_tokens,
     )
     print("Loading vLLM model...")
     sampler = None

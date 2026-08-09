@@ -125,6 +125,7 @@ def run_greedy_evaluation(
                 "min_characters": validation_config.min_characters,
                 "repeat_ngram_size": validation_config.repeat_ngram_size,
                 "max_ngram_repeats": validation_config.max_ngram_repeats,
+                "min_repeat_span_tokens": validation_config.min_repeat_span_tokens,
             },
         },
     )
