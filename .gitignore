@@ -12,3 +12,6 @@ output/deepseek/*
 *.html
 __pycache__
 checkpoints/
+tests/
+
+NeurIPS2026/

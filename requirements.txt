@@ -6,6 +6,7 @@ datasets==3.1.0
 huggingface-hub==0.33.0
 flash-attn==2.8.0.post2
 accelerate==1.3.0
+peft==0.14.0
 
 # Numerics / utils
 numpy==1.26.4
@@ -15,6 +16,7 @@ networkx==3.6.1
 
 # Math evaluation
 sympy==1.13.1
+lark==1.3.1
 
 # Visualization / analysis
 matplotlib==3.10.8
