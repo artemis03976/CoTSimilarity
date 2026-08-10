@@ -6,15 +6,11 @@ with LM loss (no router, no dual prefix).
 """
 
 import argparse
-import sys
-from pathlib import Path
 import random
 from dataclasses import fields
 import numpy as np
 import torch
 from transformers import TrainingArguments, default_data_collator
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from dspr_training.dataset import DSPRDataset
 from spt import SPTConfig, StaticPromptModel

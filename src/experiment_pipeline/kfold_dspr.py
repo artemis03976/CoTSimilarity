@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Train DSPR on the prepared Qwen K-fold splits.
 
-This is an orchestration layer around ``scripts/train_dspr.py``.  It keeps the
+This is an orchestration layer around ``scripts/train.py dspr``.  It keeps the
 actual training pipeline in one place and runs one independent process per GPU.
 When fewer GPUs than folds are available, each GPU takes the next fold as soon
 as its previous fold finishes (a small dynamic work queue).
@@ -10,15 +10,15 @@ Examples
 --------
 Dry-run the five-fold schedule without importing the model::
 
-    python scripts/train_dspr_kfold.py --dry-run
+    python scripts/train_kfold.py dspr --dry-run
 
 Run all folds on five GPUs::
 
-    python scripts/train_dspr_kfold.py --gpus 0,1,2,3,4
+    python scripts/train_kfold.py dspr --gpus 0,1,2,3,4
 
 Run on two GPUs; folds are assigned dynamically::
 
-    python scripts/train_dspr_kfold.py --gpus 0,1
+    python scripts/train_kfold.py dspr --gpus 0,1
 
 The GPU identifiers are physical IDs.  Each child process receives one ID in
 ``CUDA_VISIBLE_DEVICES`` and therefore sees that GPU as ``cuda:0`` internally.
@@ -148,6 +148,7 @@ def build_train_command(
     return [
         sys.executable,
         str(train_script),
+        "dspr",
         "--model_name",
         args.model_name,
         "--context_layer_idx",
@@ -229,7 +230,7 @@ def parse_args() -> argparse.Namespace:
         default="checkpoints/qwen_kfold_seed42",
         help="Root directory; each fold is written to <output-root>/fold_N",
     )
-    parser.add_argument("--train-script", default="scripts/train_dspr.py")
+    parser.add_argument("--train-script", default="scripts/train.py")
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--folds", nargs="+", type=int, default=None, help="Subset of folds, e.g. --folds 0 1")
@@ -358,7 +359,7 @@ def run_dynamic_schedule(specs: list[FoldSpec], repo_root: Path, gpu_ids: list[s
 
 def main() -> int:
     args = parse_args()
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     folds = parse_fold_list(args.folds)
     gpu_ids = parse_gpu_list(args.gpus)
     fold_root = resolve_path(repo_root, args.fold_root).resolve()

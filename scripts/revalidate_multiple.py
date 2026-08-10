@@ -18,15 +18,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--raw-path",
-        default="output/qwen/multiple_seed42/raw_generations.jsonl",
+        default="output/qwen-2.5/multiple_seed42/raw_generations.jsonl",
     )
     parser.add_argument(
         "--records-path",
-        default="output/qwen/multiple_seed42/all_records.jsonl",
+        default="output/qwen-2.5/multiple_seed42/all_records.jsonl",
     )
     parser.add_argument(
         "--output-dir",
-        default="output/qwen/multiple_seed42_corrected",
+        default="output/qwen-2.5/multiple_seed42_revalidated",
     )
     parser.add_argument("--samples-per-problem", type=int, default=None)
     parser.add_argument("--repeat-ngram-size", "--max-repeat-period", type=int, default=64)

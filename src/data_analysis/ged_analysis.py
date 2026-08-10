@@ -253,7 +253,7 @@ def main():
     parser.add_argument('--original-records', type=str, default=None,
                         help='Optional original-problem DAG analysis JSONL path; highest priority')
     parser.add_argument('--baseline-output-root', type=str, default=None,
-                        help='Optional baseline model output root, e.g. output/qwen, used to load original DAGs as GED references')
+                        help='Optional baseline model output root, e.g. output/qwen-2.5, used to load original DAGs as GED references')
     parser.add_argument('--baseline-original-records', type=str, default=None,
                         help='Optional baseline original DAG analysis JSONL path; overrides --baseline-output-root inference')
     parser.add_argument('--variant-records', type=str, default=None,

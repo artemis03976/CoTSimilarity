@@ -656,10 +656,10 @@ def generate_html_report(
 def main():
     parser = argparse.ArgumentParser(description="Visualize DAG analysis results")
     parser.add_argument("--input", type=str,
-                       default="output/qwen/dag_analysis/analyzed_records.jsonl",
+                       default="output/qwen-2.5/dag_analysis/analyzed_records.jsonl",
                        help="Input analysis result file")
     parser.add_argument("--output", type=str,
-                       default="output/qwen/dag_analysis/visualization.html",
+                       default="output/qwen-2.5/dag_analysis/visualization.html",
                        help="Output HTML file")
     parser.add_argument("--limit", type=int, default=None,
                        help="Limit the number of displayed records")

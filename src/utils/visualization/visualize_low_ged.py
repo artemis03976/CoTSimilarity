@@ -407,16 +407,16 @@ ${{depTable}}
 def main():
     parser = argparse.ArgumentParser(description="Visualize low-GED examples")
     parser.add_argument("--csv", type=str,
-                       default="output/qwen/dag_analysis/similarity_results.csv",
+                       default="output/qwen-2.5/dag_analysis/similarity_results.csv",
                        help="Similarity result CSV file")
     parser.add_argument("--segmented", type=str,
-                       default="output/qwen/segmented_records.jsonl",
+                       default="output/qwen-2.5/segmented_records.jsonl",
                        help="Segmented records file")
     parser.add_argument("--analyzed", type=str,
-                       default="output/qwen/dag_analysis/analyzed_records.jsonl",
+                       default="output/qwen-2.5/dag_analysis/analyzed_records.jsonl",
                        help="DAG analysis result file")
     parser.add_argument("--output", type=str,
-                       default="output/qwen/dag_analysis/low_ged_visualization.html",
+                       default="output/qwen-2.5/dag_analysis/low_ged_visualization.html",
                        help="Output HTML file prefix; simple/hard reports are generated automatically")
     parser.add_argument("--max-ged", type=float, default=0.0,
                        help="Maximum GED threshold, inclusive")

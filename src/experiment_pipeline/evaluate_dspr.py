@@ -10,11 +10,11 @@ Examples
 --------
 Run all five folds on five GPUs::
 
-    python scripts/evaluate_dspr_kfold.py --gpus 0,1,2,3,4
+    python scripts/evaluate.py dspr run --gpus 0,1,2,3,4
 
 Run a Fold-0 smoke test on the held-out problem 2::
 
-    python scripts/evaluate_dspr_kfold.py \
+    python scripts/evaluate.py dspr run \
         --folds 0 --problem-id 2 --gpus 0 \
         --output-root output/qwen_kfold_seed42_smoke
 """
@@ -513,7 +513,7 @@ def main() -> int:
         raise ValueError("--problem-id smoke tests require exactly one selected fold")
     gpu_ids = parse_gpu_list(args.gpus)
 
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     checkpoint_root = resolve_path(repo_root, args.checkpoint_root).resolve()
     test_root = resolve_path(repo_root, args.test_root).resolve()
     id_root = resolve_path(repo_root, args.id_root).resolve()

@@ -370,7 +370,7 @@ def write_balance_csv(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-data", default="data/math_paired.jsonl")
-    parser.add_argument("--qwen-eligibility", default="output/qwen/eligible_problem_ids_ged_range_ge_3.json")
+    parser.add_argument("--qwen-eligibility", default="output/qwen-2.5/eligible_problem_ids_ged_range_ge_3.json")
     parser.add_argument("--deepseek-eligibility", default="output/deepseek/eligible_problem_ids_ged_range_ge_3.json")
     parser.add_argument("--qwen-refined", default="data/qwen/dcpr_dataset.jsonl")
     parser.add_argument("--deepseek-refined", default="data/deepseek/dcpr_dataset.jsonl")

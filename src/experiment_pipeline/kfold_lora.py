@@ -10,10 +10,9 @@ from dataclasses import asdict
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
-from scripts.train_dspr_kfold import (
+from .kfold_dspr import (
     DEFAULT_FOLDS,
     DEFAULT_MODEL_NAME,
     FoldSpec,
@@ -25,7 +24,7 @@ from scripts.train_dspr_kfold import (
     validate_inputs,
     write_json,
 )
-from scripts.train_lora import DEFAULT_DSPR_BUDGET
+from .train_lora import DEFAULT_DSPR_BUDGET
 
 
 def build_train_command(
@@ -36,6 +35,7 @@ def build_train_command(
     command = [
         sys.executable,
         str(train_script),
+        "lora",
         "--model_name",
         args.model_name,
         "--train_data_path",
@@ -92,7 +92,7 @@ def parse_args() -> argparse.Namespace:
         "--output-root",
         default="checkpoints/qwen_lora_qv_r3_seed42",
     )
-    parser.add_argument("--train-script", default="scripts/train_lora.py")
+    parser.add_argument("--train-script", default="scripts/train.py")
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--folds", nargs="+", type=int, default=None)

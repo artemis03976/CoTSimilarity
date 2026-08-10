@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Recompute GED for the existing deterministic Qwen base-model CoTs.
+# Recompute GED for the archived deterministic Qwen base-model CoTs.
 #
 # This script does not generate responses or call the DAG analyzer.  It reads
 # the legacy one-sample-per-variant DAG output and writes a separate GED result
@@ -11,11 +11,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
 # Existing deterministic greedy DAG records (279 original + 279 simple + 279 hard).
-DAG_RECORDS="${DAG_RECORDS:-${ROOT_DIR}/output/qwen/dag_analysis/analyzed_records.jsonl}"
+DAG_RECORDS="${DAG_RECORDS:-${ROOT_DIR}/output/qwen_legacy/dag_analysis/analyzed_records.jsonl}"
 # Correctness labels for the same deterministic greedy responses.
-CORRECTNESS_FILE="${CORRECTNESS_FILE:-${ROOT_DIR}/output/qwen/all_records.jsonl}"
+CORRECTNESS_FILE="${CORRECTNESS_FILE:-${ROOT_DIR}/output/qwen_legacy/all_records.jsonl}"
 
-OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/output/qwen/ged_base_greedy_normalized}"
+OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/output/qwen_legacy/ged_base_greedy_normalized}"
 GED_OUTPUT="${GED_OUTPUT:-${OUTPUT_DIR}/all_ged_results.jsonl}"
 
 for required_file in "${DAG_RECORDS}" "${CORRECTNESS_FILE}"; do

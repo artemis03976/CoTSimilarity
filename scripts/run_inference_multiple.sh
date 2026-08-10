@@ -2,7 +2,7 @@ export CUDA_VISIBLE_DEVICES=7
 
 python scripts/inference_multiple.py \
   --model Qwen/Qwen2.5-Math-7B-Instruct \
-  --output-dir output/qwen/multiple_seed42 \
+  --output-dir output/qwen-2.5/multiple_seed42 \
   --sampled-variants simple hard \
   --samples-per-problem 50 \
   --temperature 0.7 \

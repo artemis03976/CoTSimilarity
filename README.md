@@ -12,22 +12,14 @@ Most workflows are driven by scripts under `scripts/`, with reusable implementat
 |   +-- inference.py                  # Unified greedy Base/DSPR/SPT/LoRA inference
 |   +-- inference_multiple.py         # Batched validated vLLM trajectory sampling
 |   +-- pertubation_test.py           # Legacy response-generation entrypoint
-|   +-- train_dspr.py                 # Train the DSPR model
-|   +-- train_dspr_kfold.py           # Run Qwen DSPR K-fold training across GPUs
-|   +-- dspr_inference_test.py        # Evaluate trained DSPR checkpoints
-|   +-- evaluate_dspr_kfold.py        # Run held-out K-fold inference across GPUs
-|   +-- aggregate_dspr_kfold.py       # Validate, pool, and report OOF predictions
-|   +-- train_lora.py                 # Train one parameter-matched LoRA adapter
-|   +-- train_lora_kfold.py           # Run LoRA K-fold training across GPUs
-|   +-- lora_inference_test.py        # Evaluate one LoRA adapter
-|   +-- evaluate_lora_kfold.py        # Run LoRA held-out inference across GPUs
-|   +-- aggregate_lora_kfold.py       # Pool LoRA OOF results and compare methods
-|   +-- train_spt.py                  # Train the Static Prompt Tuning baseline
-|   +-- spt_inference_test.py         # Evaluate the SPT baseline
+|   +-- train.py                      # Unified DSPR/SPT/LoRA training entrypoint
+|   +-- train_kfold.py                # Unified multi-GPU DSPR/LoRA K-fold training
+|   +-- evaluate.py                   # Unified K-fold inference and OOF aggregation
 |   +-- run_dspr_pipeline.sh          # Example DSPR train/eval pipeline
 |   +-- run_ablation_*.sh             # Ablation for DSPR hyperparameters
 |
 +-- src/
+|   +-- experiment_pipeline/          # Reusable training, K-fold, and OOF capabilities
 |   +-- inference/                    # Shared model adapters, validation, and runners
 |   +-- dspr/                         # Core DSPR model implementation
 |   +-- dspr_training/                # DSPR dataset wrapper, loss, and Trainer
@@ -111,7 +103,7 @@ Some `output/*/all_records.jsonl` files are expensive experiment artifacts and a
 
 ## End-To-End DSPR Workflow
 
-The example commands below use Qwen2.5-Math-7B-Instruct and write artifacts under `output/qwen`, `data/qwen`, and `checkpoints/qwen`.
+The example commands below use Qwen2.5-Math-7B-Instruct and write new artifacts under `output/qwen-2.5`, `data/qwen`, and `checkpoints/qwen`. Results from the earlier pipeline are archived under `output/qwen_legacy`.
 
 ### 1. Generate Base Model Responses
 
@@ -119,7 +111,7 @@ The example commands below use Qwen2.5-Math-7B-Instruct and write artifacts unde
 python scripts/inference_multiple.py \
   --model Qwen/Qwen2.5-Math-7B-Instruct \
   --data-path data/math_paired.jsonl \
-  --output-dir output/qwen/multiple_seed42 \
+  --output-dir output/qwen-2.5/multiple_seed42 \
   --sampled-variants simple hard \
   --samples-per-problem 50 \
   --temperature 0.7 \
@@ -147,17 +139,17 @@ accepted pool from the saved raw attempts without loading the model again:
 
 ```bash
 python scripts/revalidate_multiple.py \
-  --raw-path output/qwen/multiple_seed42/raw_generations.jsonl \
-  --records-path output/qwen/multiple_seed42/all_records.jsonl \
-  --output-dir output/qwen/multiple_seed42_corrected
+  --raw-path output/qwen-2.5/multiple_seed42/raw_generations.jsonl \
+  --records-path output/qwen-2.5/multiple_seed42/all_records.jsonl \
+  --output-dir output/qwen-2.5/multiple_seed42_revalidated
 ```
 
 ### 2. Segment Chain-Of-Thought Responses
 
 ```bash
 python src/data_analysis/cot_segmenter.py \
-  --input "output/qwen/multiple_seed42/all_records.jsonl" \
-  --output "output/qwen/segmented_records_50.jsonl"
+  --input "output/qwen-2.5/multiple_seed42/all_records.jsonl" \
+  --output "output/qwen-2.5/segmented_records_50.jsonl"
 ```
 
 ### 3. Run DAG Analysis
@@ -167,8 +159,8 @@ Generate batch requests:
 ```bash
 python src/data_analysis/dag_analyzer.py \
   --mode batch \
-  --input "output/qwen/segmented_records_50.jsonl" \
-  --output-dir "output/qwen/dag_analysis_50" \
+  --input "output/qwen-2.5/segmented_records_50.jsonl" \
+  --output-dir "output/qwen-2.5/dag_analysis_50" \
   --provider deepseek \
   --model deepseek-chat
 ```
@@ -178,25 +170,25 @@ After the batch inference service returns results, merge them:
 ```bash
 python src/data_analysis/dag_analyzer.py \
   --mode merge-batch \
-  --input "output/qwen/segmented_records_50.jsonl" \
+  --input "output/qwen-2.5/segmented_records_50.jsonl" \
   --batch-results-file "path/to/batch_results.jsonl" \
-  --output-dir "output/qwen/dag_analysis_50"
+  --output-dir "output/qwen-2.5/dag_analysis_50"
 ```
 
 The merged DAG records are written to:
 
 ```text
-output/qwen/dag_analysis_50/analyzed_records.jsonl
+output/qwen-2.5/dag_analysis_50/analyzed_records.jsonl
 ```
 
 ### 4. Compute GED Records
 
 ```bash
 python src/data_analysis/ged_analysis.py \
-  --output-root "output/qwen" \
-  --variant-records "output/qwen/dag_analysis_50/analyzed_records.jsonl" \
-  --correctness-file "output/qwen/multiple_seed42/all_records.jsonl" \
-  --all-results-output "output/qwen/all_ged_results.jsonl"
+  --output-root "output/qwen-2.5" \
+  --variant-records "output/qwen-2.5/dag_analysis_50/analyzed_records.jsonl" \
+  --correctness-file "output/qwen-2.5/multiple_seed42/all_records.jsonl" \
+  --all-results-output "output/qwen-2.5/all_ged_results.jsonl"
 ```
 
 By default, `ged_analysis.py` uses each problem's `original_0` response as the GED reference graph. For older workflows where original and variant DAG records are stored separately, pass `--original-records` explicitly.
@@ -212,11 +204,11 @@ negative similarity while keeping the original raw GED available for audit.
 
 ```bash
 python src/dspr_dataset/data_filter.py \
-  --input "output/qwen/all_ged_results.jsonl" \
+  --input "output/qwen-2.5/all_ged_results.jsonl" \
   --output "data/qwen/dspr_dataset.jsonl" \
   --top-k 5 \
   --min-ged-range 3 \
-  --eligibility-output "output/qwen/eligible_problem_ids_ged_range_ge_3.json" \
+  --eligibility-output "output/qwen-2.5/eligible_problem_ids_ged_range_ge_3.json" \
   --model-name qwen
 ```
 
@@ -247,7 +239,7 @@ Default outputs are written next to the input file:
 ### 7. Train DSPR
 
 ```bash
-python scripts/train_dspr.py \
+python scripts/train.py dspr \
   --model_name "Qwen/Qwen2.5-Math-7B-Instruct" \
   --train_data_path "data/qwen/dspr_train.jsonl" \
   --val_data_path "data/qwen/dspr_val.jsonl" \
@@ -270,7 +262,7 @@ GPU workers dynamically claim the next unfinished fold, so the same command
 also works when fewer than five GPUs are available:
 
 ```bash
-python scripts/train_dspr_kfold.py --gpus 0,1,2,3,4
+python scripts/train_kfold.py dspr --gpus 0,1,2,3,4
 ```
 
 Use `--dry-run` to validate the fold files and print the exact child commands
@@ -284,7 +276,7 @@ First run one held-out Fold-0 problem as a smoke test. Use a separate output
 root so the smoke result cannot overwrite the formal fold output:
 
 ```bash
-python scripts/evaluate_dspr_kfold.py \
+python scripts/evaluate.py dspr run \
   --folds 0 \
   --problem-id 2 \
   --gpus 0 \
@@ -296,7 +288,7 @@ After the smoke test passes, run all folds. The evaluator reads each fold's
 prefix length 15, and dynamically assigns pending folds to available GPUs:
 
 ```bash
-python scripts/evaluate_dspr_kfold.py --gpus 0,1,2,3,4
+python scripts/evaluate.py dspr run --gpus 0,1,2,3,4
 ```
 
 Each fold writes `all_records.jsonl`, `inference.log`, and `run_status.json`
@@ -306,7 +298,7 @@ under `output/qwen_kfold_seed42/fold_N`. The parent directory also contains an
 Validate and pool the five folds into one OOF result:
 
 ```bash
-python scripts/aggregate_dspr_kfold.py
+python scripts/evaluate.py dspr aggregate
 ```
 
 To add paired bootstrap confidence intervals and exact McNemar tests against a
@@ -326,7 +318,7 @@ python scripts/inference.py \
 Then pass the resulting 279-problem file to the aggregator:
 
 ```bash
-python scripts/aggregate_dspr_kfold.py \
+python scripts/evaluate.py dspr aggregate \
   --baseline output/qwen_matched_greedy/all_records.jsonl
 ```
 
@@ -344,20 +336,20 @@ budget at runtime and aborts if the gap exceeds 10%.
 Validate the fold commands without loading the model, then train all folds:
 
 ```bash
-python scripts/train_lora_kfold.py --dry-run --gpus 0,1,2,3,4
-python scripts/train_lora_kfold.py --gpus 0,1,2,3,4
+python scripts/train_kfold.py lora --dry-run --gpus 0,1,2,3,4
+python scripts/train_kfold.py lora --gpus 0,1,2,3,4
 ```
 
 Run one held-out smoke test before starting all-fold inference:
 
 ```bash
-python scripts/evaluate_lora_kfold.py \
+python scripts/evaluate.py lora run \
   --folds 0 \
   --problem-id 2 \
   --gpus 0 \
   --output-root output/qwen_lora_qv_r3_seed42_smoke
 
-python scripts/evaluate_lora_kfold.py --gpus 0,1,2,3,4
+python scripts/evaluate.py lora run --gpus 0,1,2,3,4
 ```
 
 The inference entrypoint runs symbolic-answer evaluator self-tests before it
@@ -365,8 +357,8 @@ loads the model. Pool the exact OOF coverage and compare LoRA against both the
 matched greedy base model and DSPR:
 
 ```bash
-python scripts/aggregate_lora_kfold.py \
-  --base output/qwen/all_records.jsonl \
+python scripts/evaluate.py lora aggregate \
+  --base output/qwen-2.5/greedy/all_records.jsonl \
   --dspr output/qwen_kfold_seed42/oof_all_records.jsonl
 ```
 
@@ -383,7 +375,7 @@ python scripts/inference.py \
   --checkpoint "checkpoints/qwen/dspr/dspr_trainable.pt" \
   --model-name "Qwen/Qwen2.5-Math-7B-Instruct" \
   --data-path "data/math_paired.jsonl" \
-  --output-dir "output/qwen/dspr" \
+  --output-dir "output/qwen-2.5/dspr" \
   --prefix-length 50 \
   --max-new-tokens 4096
 ```
@@ -396,7 +388,7 @@ greedy-only by design: invalid or truncated outputs are recorded in
 The inference output is:
 
 ```text
-output/qwen/dspr/all_records.jsonl
+output/qwen-2.5/dspr/all_records.jsonl
 ```
 
 ### 11. Report Accuracy
@@ -404,14 +396,14 @@ output/qwen/dspr/all_records.jsonl
 Evaluate one result file:
 
 ```bash
-python src/utils/calculate_accuracy.py "output/qwen/dspr/all_records.jsonl"
+python src/utils/calculate_accuracy.py "output/qwen-2.5/dspr/all_records.jsonl"
 ```
 
 Compare DSPR against a baseline result file:
 
 ```bash
 python src/utils/calculate_accuracy.py \
-  "output/qwen/dspr/all_records.jsonl" \
+  "output/qwen-2.5/dspr/all_records.jsonl" \
   --compare-file "output/qwen_matched_greedy/all_records.jsonl"
 ```
 
@@ -423,4 +415,4 @@ For new contributors, the fastest way to understand the code is:
 2. `src/dspr/config.py` and `src/dspr/model.py` for the model interface.
 3. `src/dspr_training/dataset.py`, `loss.py`, and `trainer.py` for training behavior.
 4. `src/data_analysis/ged_analysis.py` and `src/dspr_dataset/data_filter.py` for dataset construction.
-5. `scripts/dspr_inference_test.py` and `src/utils/calculate_accuracy.py` for evaluation.
+5. `scripts/inference.py`, `scripts/evaluate.py`, and `src/utils/calculate_accuracy.py` for evaluation.

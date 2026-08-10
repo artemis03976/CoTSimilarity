@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import random
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -97,8 +96,6 @@ def main() -> int:
             "LoRA training dependencies are missing. Install requirements.txt, including peft."
         ) from exc
 
-    repo_root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(repo_root / "src"))
     from dspr_training.dataset import DSPRDataset
 
     class LoRADataset(DSPRDataset):

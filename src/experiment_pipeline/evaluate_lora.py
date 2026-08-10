@@ -17,10 +17,9 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
-from scripts.evaluate_dspr_kfold import (
+from .evaluate_dspr import (
     DEFAULT_FOLDS,
     DEFAULT_MODEL_NAME,
     checkpoint_step,

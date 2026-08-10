@@ -39,7 +39,7 @@ LEARNING_RATE=4e-5
 # Step 1: Train DSPR
 # ---------------------------------------------------------------------------
 echo "========== [1/3] Training DSPR =========="
-python scripts/train_dspr.py \
+python scripts/train.py dspr \
     --model_name "${MODEL_NAME}" \
     --train_data_path "${TRAIN_DATA}" \
     --val_data_path "${VAL_DATA}" \
@@ -64,7 +64,8 @@ echo "========== [2/3] DSPR inference evaluation =========="
 echo "Using checkpoint: ${LATEST_CKPT}"
 mkdir -p "${INFER_OUTPUT_DIR}"
 
-python scripts/dspr_inference_test.py \
+python scripts/inference.py \
+    --baseline dspr \
     --checkpoint "${LATEST_CKPT}/dspr_trainable.pt" \
     --model_name "${MODEL_NAME}" \
     --output_dir "${INFER_OUTPUT_DIR}" \
@@ -86,9 +87,9 @@ echo "--- Compare against baseline if available ---"
 if [ -f "output/base_all_records.jsonl" ]; then
     python src/utils/calculate_accuracy.py \
         "${INFER_OUTPUT_DIR}/all_records.jsonl" \
-        --compare-file "output/qwen/all_records.jsonl"
+        --compare-file "output/qwen-2.5/greedy/all_records.jsonl"
 else
-    echo "Qwen result file not found (output/qwen/all_records.jsonl); skipping comparison."
+    echo "Qwen result file not found (output/qwen-2.5/greedy/all_records.jsonl); skipping comparison."
 fi
 
 echo ""

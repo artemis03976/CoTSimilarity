@@ -3,13 +3,11 @@ Training script for DSPR model.
 """
 
 import argparse
-import sys
 import random
 from dataclasses import fields
 import numpy as np
 import torch
 from transformers import TrainingArguments, default_data_collator
-sys.path.append('src')
 
 from dspr.config import DSPRConfig
 from dspr.model import DSPRModel

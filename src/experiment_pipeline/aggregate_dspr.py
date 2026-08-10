@@ -446,7 +446,7 @@ def main() -> int:
     if args.bootstrap_samples < 1:
         raise ValueError("--bootstrap-samples must be positive")
 
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = Path(__file__).resolve().parents[2]
     result_root = (repo_root / args.result_root).resolve() if not Path(args.result_root).is_absolute() else Path(args.result_root)
     id_root = (repo_root / args.id_root).resolve() if not Path(args.id_root).is_absolute() else Path(args.id_root)
     raw_path = (repo_root / args.raw_data).resolve() if not Path(args.raw_data).is_absolute() else Path(args.raw_data)

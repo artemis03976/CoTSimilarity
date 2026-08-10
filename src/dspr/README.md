@@ -26,7 +26,7 @@ src/
 ## Training
 
 ```bash
-python scripts/train_dspr.py
+python scripts/train.py dspr
 ```
 
 ## Dataset Format

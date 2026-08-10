@@ -5,15 +5,13 @@ from __future__ import annotations
 
 import argparse
 import csv
-import sys
 from pathlib import Path
 from typing import Any, Iterable
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
-from scripts import aggregate_dspr_kfold as common
+from . import aggregate_dspr as common
 
 
 FOLDS = common.FOLDS
@@ -210,7 +208,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-data", default="data/math_paired.jsonl")
     parser.add_argument(
         "--base",
-        default="output/qwen/all_records.jsonl",
+        default="output/qwen-2.5/greedy/all_records.jsonl",
         help="Matched greedy base-model result; use an empty string to skip",
     )
     parser.add_argument(
