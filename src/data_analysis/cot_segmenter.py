@@ -309,6 +309,70 @@ def process_record(record, threshold=LONG_PARAGRAPH_THRESHOLD, min_step=MIN_STEP
     return record
 
 
+def infer_output_path(input_path):
+    """Infer the historical segmented-cache name for an input JSONL file."""
+    input_path = Path(input_path)
+    stem = input_path.stem
+    if stem.startswith("probe_"):
+        output_name = stem.replace("probe_", "segmented_probe_", 1) + input_path.suffix
+    else:
+        output_name = input_path.name.replace("all_records", "segmented_records")
+        if output_name == input_path.name:
+            output_name = f"segmented_{input_path.name}"
+    return input_path.with_name(output_name)
+
+
+def segment_jsonl_file(
+    input_path,
+    output_path=None,
+    threshold=LONG_PARAGRAPH_THRESHOLD,
+    min_step=MIN_STEP_LENGTH,
+):
+    """Segment one records JSONL file and persist the result as a cache.
+
+    Records are processed one at a time so the combined DAG preparation path
+    does not need to retain both the raw and segmented full datasets in memory.
+    Returns a small summary dictionary for CLI and orchestrator logging.
+    """
+    input_path = Path(input_path)
+    output_path = Path(output_path) if output_path else infer_output_path(input_path)
+    if input_path.resolve() == output_path.resolve():
+        raise ValueError("Segmented output must not overwrite the input JSONL")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    total_records = 0
+    total_steps = 0
+    total_samples = 0
+    with input_path.open("r", encoding="utf-8") as source, output_path.open(
+        "w", encoding="utf-8", newline="\n"
+    ) as destination:
+        for line_number, line in enumerate(source, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Invalid JSON in {input_path} line {line_number}: {exc}"
+                ) from exc
+
+            process_record(record, threshold, min_step)
+            for variant in VARIANTS:
+                for sample in record.get(variant, {}).get("samples", []):
+                    total_steps += sample.get("num_steps", 0)
+                    total_samples += 1
+            destination.write(json.dumps(record, ensure_ascii=False) + "\n")
+            total_records += 1
+
+    return {
+        "output_path": output_path,
+        "records": total_records,
+        "samples": total_samples,
+        "steps": total_steps,
+        "average_steps": total_steps / total_samples if total_samples else 0.0,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Heuristic CoT reasoning chain segmenter")
     parser.add_argument("--input", type=str, required=True, help="Input JSONL path")
@@ -319,39 +383,18 @@ def main():
                         help="Minimum step length in characters; shorter fragments are merged")
     args = parser.parse_args()
 
-    input_path = args.input
-    if args.output:
-        output_path = args.output
-    else:
-        input_path_obj = Path(input_path)
-        stem = input_path_obj.stem
-        if stem.startswith("probe_"):
-            output_name = stem.replace("probe_", "segmented_probe_") + input_path_obj.suffix
-        else:
-            output_name = input_path_obj.name.replace("all_records", "segmented_records")
-        output_path = str(input_path_obj.with_name(output_name))
-
-    with open(input_path, "r", encoding="utf-8") as f:
-        data = [json.loads(line) for line in f]
-
-    total_steps = 0
-    total_samples = 0
-    for record in data:
-        process_record(record, args.threshold, args.min_step)
-        for v in VARIANTS:
-            samples = record.get(v, {}).get("samples", [])
-            for sample in samples:
-                total_steps += sample.get("num_steps", 0)
-                total_samples += 1
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        for record in data:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-    avg_steps = total_steps / total_samples if total_samples else 0
-    print(f"Processed {len(data)} records ({total_samples} responses)")
-    print(f"Segmented {total_steps} steps in total, {avg_steps:.1f} steps per response on average")
-    print(f"Results saved to {output_path}")
+    summary = segment_jsonl_file(
+        args.input,
+        args.output,
+        threshold=args.threshold,
+        min_step=args.min_step,
+    )
+    print(f"Processed {summary['records']} records ({summary['samples']} responses)")
+    print(
+        f"Segmented {summary['steps']} steps in total, "
+        f"{summary['average_steps']:.1f} steps per response on average"
+    )
+    print(f"Results saved to {summary['output_path']}")
 
 
 if __name__ == "__main__":

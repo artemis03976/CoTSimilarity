@@ -1,8 +1,10 @@
 """LLM-based DAG analysis over segmented reasoning chains.
 
-Input records are expected to come from cot_segmenter.py and contain per-sample
-`steps`. This script asks an external LLM to label each step with dependencies,
-then stores the resulting DAG annotations back into each sample.
+Input records may either come from cot_segmenter.py and contain per-sample
+`steps`, or be raw all_records JSONL passed with ``--raw-input``. In the latter
+case this script creates or reuses a persistent segmented cache before DAG
+processing. It then asks an external LLM to label each step with dependencies
+and stores the resulting DAG annotations back into each sample.
 
 Use normal mode for small runs. Use batch mode for full experiments because it
 creates provider-ready request files and avoids many synchronous API calls.
@@ -20,10 +22,20 @@ from typing import List, Dict, Optional
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 try:
+    from data_analysis.cot_segmenter import (
+        LONG_PARAGRAPH_THRESHOLD,
+        MIN_STEP_LENGTH,
+        segment_jsonl_file,
+    )
     from data_analysis.llm.config import LLMConfig
     from data_analysis.llm.api_client import LLMClient
     from data_analysis.llm.batch_processor import BatchProcessor
 except ModuleNotFoundError:
+    from src.data_analysis.cot_segmenter import (
+        LONG_PARAGRAPH_THRESHOLD,
+        MIN_STEP_LENGTH,
+        segment_jsonl_file,
+    )
     from src.data_analysis.llm.config import LLMConfig
     from src.data_analysis.llm.api_client import LLMClient
     from src.data_analysis.llm.batch_processor import BatchProcessor
@@ -48,6 +60,66 @@ def load_records(input_path: str, limit: Optional[int] = None) -> List[Dict]:
 
     logger.info(f"Loaded {len(records)} records from {input_path}")
     return records
+
+
+def resolve_segmented_input(
+    input_path: Optional[str],
+    raw_input_path: Optional[str],
+    segmented_cache: Optional[str],
+    output_dir: Path,
+    refresh_cache: bool,
+    segment_threshold: int,
+    segment_min_step: int,
+) -> Path:
+    """Resolve an existing segmented input or build/reuse its cache."""
+    if input_path:
+        if segmented_cache or refresh_cache:
+            raise ValueError(
+                "--segmented-cache and --refresh-segment-cache require --raw-input"
+            )
+        path = Path(input_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Segmented input does not exist: {path}")
+        return path
+
+    if not raw_input_path:
+        raise ValueError("Either --input or --raw-input is required")
+
+    raw_path = Path(raw_input_path)
+    if not raw_path.is_file():
+        raise FileNotFoundError(f"Raw input does not exist: {raw_path}")
+    cache_path = (
+        Path(segmented_cache)
+        if segmented_cache
+        else output_dir / "segmented_records.jsonl"
+    )
+    if raw_path.resolve() == cache_path.resolve():
+        raise ValueError("Segmented cache must not overwrite the raw input")
+
+    cache_is_fresh = (
+        cache_path.is_file()
+        and cache_path.stat().st_size > 0
+        and cache_path.stat().st_mtime_ns >= raw_path.stat().st_mtime_ns
+    )
+    if refresh_cache or not cache_is_fresh:
+        reason = "explicit refresh" if refresh_cache else "missing or stale cache"
+        logger.info("Segmenting raw CoTs (%s): %s", reason, raw_path)
+        summary = segment_jsonl_file(
+            raw_path,
+            cache_path,
+            threshold=segment_threshold,
+            min_step=segment_min_step,
+        )
+        logger.info(
+            "Segmented %d responses into %d steps (%.1f per response)",
+            summary["samples"],
+            summary["steps"],
+            summary["average_steps"],
+        )
+        logger.info("Segmented cache saved to: %s", summary["output_path"])
+    else:
+        logger.info("Using fresh segmented cache: %s", cache_path)
+    return cache_path
 
 
 def process_normal_mode(
@@ -185,8 +257,34 @@ def merge_batch_results(
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze reasoning chains with LLM")
-    parser.add_argument("--input", type=str, default=None,
-                       help="Input JSONL file with segmented records")
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--input", type=str, default=None,
+                             help="Existing segmented-records JSONL file")
+    input_group.add_argument("--raw-input", type=str, default=None,
+                             help="Raw all_records JSONL; segment it before DAG processing")
+    parser.add_argument(
+        "--segmented-cache",
+        type=str,
+        default=None,
+        help="Cache path used with --raw-input; default: <output-dir>/segmented_records.jsonl",
+    )
+    parser.add_argument(
+        "--refresh-segment-cache",
+        action="store_true",
+        help="Regenerate the segmented cache even when it is newer than the raw input",
+    )
+    parser.add_argument(
+        "--segment-threshold",
+        type=int,
+        default=LONG_PARAGRAPH_THRESHOLD,
+        help="Long-paragraph threshold forwarded to the CoT segmenter",
+    )
+    parser.add_argument(
+        "--segment-min-step",
+        type=int,
+        default=MIN_STEP_LENGTH,
+        help="Minimum segment length forwarded to the CoT segmenter",
+    )
     parser.add_argument("--output-dir", type=str, default=DEFAULT_OUTPUT_DIR,
                        help="Output directory for results")
     parser.add_argument("--mode", choices=["normal", "batch", "merge-batch"], default="normal",
@@ -204,19 +302,28 @@ def main():
                        help="Which variants to process")
     args = parser.parse_args()
 
-    if not args.input:
-        parser.error("--input is required")
+    output_dir = Path(args.output_dir)
+    try:
+        segmented_input = resolve_segmented_input(
+            args.input,
+            args.raw_input,
+            args.segmented_cache,
+            output_dir,
+            args.refresh_segment_cache,
+            args.segment_threshold,
+            args.segment_min_step,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        parser.error(str(exc))
 
     # Load records
-    records = load_records(args.input, args.limit)
+    records = load_records(str(segmented_input), args.limit)
 
     # Initialize config
     config = LLMConfig(
         provider=args.provider,
         model=args.model
     )
-
-    output_dir = Path(args.output_dir)
 
     # Process based on mode
     if args.mode == "normal":

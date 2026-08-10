@@ -144,33 +144,35 @@ python scripts/revalidate_multiple.py \
   --output-dir output/qwen-2.5/multiple_seed42_revalidated
 ```
 
-### 2. Segment Chain-Of-Thought Responses
-
-```bash
-python src/data_analysis/cot_segmenter.py \
-  --input "output/qwen-2.5/multiple_seed42/all_records.jsonl" \
-  --output "output/qwen-2.5/segmented_records_50.jsonl"
-```
-
-### 3. Run DAG Analysis
-
-Generate batch requests:
+### 2. Segment CoTs and Prepare DAG Batch Requests
 
 ```bash
 python src/data_analysis/dag_analyzer.py \
   --mode batch \
-  --input "output/qwen-2.5/segmented_records_50.jsonl" \
+  --raw-input "output/qwen-2.5/multiple_seed42/all_records.jsonl" \
   --output-dir "output/qwen-2.5/dag_analysis_50" \
   --provider deepseek \
   --model deepseek-chat
 ```
 
-After the batch inference service returns results, merge them:
+This single command segments every CoT, saves the reusable cache at
+`output/qwen-2.5/dag_analysis_50/segmented_records.jsonl`, and then creates the
+provider-ready file under `dag_analysis_50/batch/`. A cache newer than the raw
+input is reused automatically. Pass `--refresh-segment-cache` to regenerate it,
+or `--segmented-cache <path>` to choose another cache location.
+
+The standalone `cot_segmenter.py` entrypoint remains available when only
+segmentation is needed.
+
+### 3. Merge DAG Batch Results
+
+After the batch inference service returns results, merge them with the same
+segmented cache:
 
 ```bash
 python src/data_analysis/dag_analyzer.py \
   --mode merge-batch \
-  --input "output/qwen-2.5/segmented_records_50.jsonl" \
+  --input "output/qwen-2.5/dag_analysis_50/segmented_records.jsonl" \
   --batch-results-file "path/to/batch_results.jsonl" \
   --output-dir "output/qwen-2.5/dag_analysis_50"
 ```
