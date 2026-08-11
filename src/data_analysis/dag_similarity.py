@@ -1,18 +1,20 @@
 """Compute structural similarity between CoT DAGs.
 
 The main metric is Graph Edit Distance (GED). A lower GED means two reasoning
-graphs are structurally closer. The helper functions here intentionally use
-simple unit costs so experiment interpretation remains transparent.
+graphs are structurally closer. Insertions/deletions use unit costs, while node
+substitution combines semantic-role mismatch and compressed-node text cosine.
 """
 
 import json
 import logging
 import time
 import re
+from functools import partial
 from pathlib import Path
 from typing import List, Dict, Optional
 
 import networkx as nx
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -103,14 +105,22 @@ def compute_dag_max_width(G: nx.DiGraph) -> int:
 
 
 # Cost functions for GED
-def node_subst_cost(attrs1: dict, attrs2: dict) -> float:
-    """Unit substitution cost for node kind and reasoning-role mismatch.
+def node_subst_cost(
+    attrs1: dict,
+    attrs2: dict,
+    *,
+    lambda_role: float = 1.0,
+    lambda_text: float = 1.0,
+) -> float:
+    """Role-plus-text node substitution cost from the paper's Eq. 6.
 
     ``build_digraph_with_tags`` stores the coarse node kind (problem, step, or
     external) in ``type`` and the IFD semantic role in ``macro_action_tag``.
-    Comparing only ``type`` would make every pair of reasoning-step nodes
-    interchangeable, regardless of whether they are Define, Derive, Conclude,
-    and so on.
+    Prepared graph caches additionally store a normalized sentence embedding
+    for the original CoT text associated with each compressed step node.
+
+    Legacy or hand-built graphs without embeddings retain role-only behavior;
+    the main GED pipeline always prepares embeddings before calling this cost.
     """
 
     kind1 = attrs1.get("type")
@@ -118,11 +128,22 @@ def node_subst_cost(attrs1: dict, attrs2: dict) -> float:
     if kind1 != kind2:
         return 1.0
     if kind1 == "step":
-        return (
-            0.0
-            if attrs1.get("macro_action_tag") == attrs2.get("macro_action_tag")
-            else 1.0
+        role_cost = lambda_role * float(
+            attrs1.get("macro_action_tag") != attrs2.get("macro_action_tag")
         )
+        embedding1 = attrs1.get("text_embedding")
+        embedding2 = attrs2.get("text_embedding")
+        if embedding1 is None or embedding2 is None or lambda_text == 0:
+            return role_cost
+
+        cosine = float(
+            np.dot(
+                np.asarray(embedding1, dtype=np.float32),
+                np.asarray(embedding2, dtype=np.float32),
+            )
+        )
+        text_similarity = max(0.0, min(1.0, cosine))
+        return role_cost + lambda_text * (1.0 - text_similarity)
     return 0.0
 
 def node_del_cost(attrs: dict) -> float:
@@ -141,15 +162,22 @@ def edge_ins_cost(attrs: dict) -> float:
     return 1.0
 
 
-def compute_ged_similarity(G1: nx.DiGraph, G2: nx.DiGraph, timeout: float = 30.0) -> Dict:
+def compute_ged_similarity(
+    G1: nx.DiGraph,
+    G2: nx.DiGraph,
+    timeout: float = 30.0,
+    *,
+    lambda_role: float = 1.0,
+    lambda_text: float = 1.0,
+) -> Dict:
     """Compute GED and normalized similarity between two DAGs.
 
     Exact GED can be expensive. Small graphs use optimize_graph_edit_distance;
     larger graphs use NetworkX's timeout-aware graph_edit_distance path.
 
-    With the unit edit costs used here, deleting every node/edge in ``G1`` and
+    With unit insertion/deletion costs, deleting every node/edge in ``G1`` and
     inserting every node/edge in ``G2`` is a valid upper bound on the edit
-    distance.  We therefore normalize by
+    distance regardless of the weighted substitution cost. We normalize by
     ``|V1| + |V2| + |E1| + |E2|``.  The previous ``max(|V|) + max(|E|)``
     denominator was not an upper bound when both graphs contained different
     edges and could produce misleading negative similarities.
@@ -163,7 +191,11 @@ def compute_ged_similarity(G1: nx.DiGraph, G2: nx.DiGraph, timeout: float = 30.0
     ged = None
 
     cost_args = dict(
-        node_subst_cost=node_subst_cost,
+        node_subst_cost=partial(
+            node_subst_cost,
+            lambda_role=lambda_role,
+            lambda_text=lambda_text,
+        ),
         node_del_cost=node_del_cost,
         node_ins_cost=node_ins_cost,
         edge_subst_cost=edge_subst_cost,

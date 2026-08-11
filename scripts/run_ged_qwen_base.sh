@@ -17,6 +17,7 @@ CORRECTNESS_FILE="${CORRECTNESS_FILE:-${ROOT_DIR}/output/qwen_legacy/all_records
 
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/output/qwen_legacy/ged_base_greedy_normalized}"
 GED_OUTPUT="${GED_OUTPUT:-${OUTPUT_DIR}/all_ged_results.jsonl}"
+GRAPH_CACHE="${GRAPH_CACHE:-${OUTPUT_DIR}/ged_graph_cache.pt}"
 
 for required_file in "${DAG_RECORDS}" "${CORRECTNESS_FILE}"; do
     if [[ ! -f "${required_file}" ]]; then
@@ -31,6 +32,7 @@ echo "========== Qwen base greedy GED =========="
 echo "DAG records: ${DAG_RECORDS}"
 echo "Correctness: ${CORRECTNESS_FILE}"
 echo "GED output:  ${GED_OUTPUT}"
+echo "Graph cache: ${GRAPH_CACHE}"
 echo "Samples per variant: 1"
 echo "==========================================="
 
@@ -38,6 +40,7 @@ PYTHONPATH="${ROOT_DIR}/src${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" "${ROOT_DIR}/src/data_analysis/ged_analysis.py" \
     --variant-records "${DAG_RECORDS}" \
     --correctness-file "${CORRECTNESS_FILE}" \
+    --graph-cache "${GRAPH_CACHE}" \
     --all-results-output "${GED_OUTPUT}" \
     --num-samples 1
 

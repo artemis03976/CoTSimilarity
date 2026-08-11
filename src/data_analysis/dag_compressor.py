@@ -13,6 +13,25 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _merge_text_attribute(
+    G: nx.DiGraph,
+    target,
+    source,
+    attribute: str,
+    separator: str,
+) -> None:
+    """Merge one textual node attribute without manufacturing empty markers."""
+    parts = [
+        str(value).strip()
+        for value in (
+            G.nodes[target].get(attribute, ""),
+            G.nodes[source].get(attribute, ""),
+        )
+        if value is not None and str(value).strip()
+    ]
+    G.nodes[target][attribute] = separator.join(parts)
+
+
 def _has_alternate_path(G: nx.DiGraph, u, v) -> bool:
     """Check if there exists a path from u to v after removing the direct edge u→v.
 
@@ -114,9 +133,8 @@ def contract_node(G: nx.DiGraph, u, v,
 
     # Merge metadata
     if merge_metadata:
-        analysis_u = G.nodes[u].get('analysis', '')
-        analysis_v = G.nodes[v].get('analysis', '')
-        G.nodes[u]['analysis'] = f"{analysis_u} | {analysis_v}"
+        _merge_text_attribute(G, u, v, 'analysis', ' | ')
+        _merge_text_attribute(G, u, v, 'text', '\n')
 
         absorbed = list(G.nodes[u].get('absorbed_nodes', []))
         absorbed.append(v)
@@ -193,9 +211,8 @@ def fold_parallel_node(G: nx.DiGraph, u, v,
     """
     # Merge metadata
     if merge_metadata:
-        analysis_u = G.nodes[u].get('analysis', '')
-        analysis_v = G.nodes[v].get('analysis', '')
-        G.nodes[u]['analysis'] = f"{analysis_u} | {analysis_v}"
+        _merge_text_attribute(G, u, v, 'analysis', ' | ')
+        _merge_text_attribute(G, u, v, 'text', '\n')
 
         absorbed = list(G.nodes[u].get('absorbed_nodes', []))
         absorbed.append(v)
@@ -434,9 +451,28 @@ def build_digraph_with_tags(dag_analysis: List[Dict],
         step_id = entry["step_id"]
         tag = entry.get("macro_action_tag")
         analysis = entry.get("analysis", "")
+        # ``text`` is the original segmented CoT span. Legacy DAG records do
+        # not contain it, so their annotator-written analysis remains a useful
+        # fallback for text-aware GED.
+        text = entry.get("text") or analysis
 
         if step_id not in G:
-            G.add_node(step_id, type="step", macro_action_tag=tag, analysis=analysis)
+            G.add_node(
+                step_id,
+                type="step",
+                macro_action_tag=tag,
+                analysis=analysis,
+                text=text,
+            )
+        else:
+            # A malformed/out-of-order annotation may have introduced this
+            # step as a dependency placeholder before its own entry appeared.
+            G.nodes[step_id].update(
+                type="step",
+                macro_action_tag=tag,
+                analysis=analysis,
+                text=text,
+            )
 
         for dep in entry["depends_on"]:
             if dep == "External":

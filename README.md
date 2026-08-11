@@ -190,10 +190,29 @@ python src/data_analysis/ged_analysis.py \
   --output-root "output/qwen-2.5" \
   --variant-records "output/qwen-2.5/dag_analysis_50/analyzed_records.jsonl" \
   --correctness-file "output/qwen-2.5/multiple_seed42/all_records.jsonl" \
+  --graph-cache "output/qwen-2.5/ged_graph_cache.pt" \
   --all-results-output "output/qwen-2.5/all_ged_results.jsonl"
 ```
 
 By default, `ged_analysis.py` uses each problem's `original_0` response as the GED reference graph. For older workflows where original and variant DAG records are stored separately, pass `--original-records` explicitly.
+
+The first run associates every DAG node with its original segmented CoT span,
+compresses the graph, and encodes compressed-node text with
+`sentence-transformers/all-MiniLM-L6-v2`. The compressed graphs and their shared
+embedding matrix are stored together in `ged_graph_cache.pt`. Later runs load
+this cache directly and skip graph compression, model initialization, and text
+encoding. Use `--rebuild-graph-cache` after changing DAG annotations,
+segmentation, compression, or the embedding model. To prepare the cache before
+starting the slower GED search, add `--prepare-graph-cache-only`.
+
+Node substitution follows the role-plus-text cost from the paper:
+`lambda_role * role_mismatch + lambda_text * (1 - clipped_cosine)`. Both
+weights default to `1.0` and can be changed with `--lambda-role` and
+`--lambda-text`. The embedding model, optional revision, device, batch size,
+and maximum token length are controlled by the corresponding
+`--text-similarity-*` and `--embedding-*` arguments. Each result JSONL is
+accompanied by an `all_ged_results.config.json` file recording these weights
+and the graph-cache metadata.
 
 Each GED record keeps the raw `ged` used by the existing within-problem
 selection protocol and also reports `ged_normalized` in `[0, 1]`. The latter
@@ -201,6 +220,9 @@ uses the conservative unit-cost upper bound
 `|V1| + |V2| + |E1| + |E2|`; `similarity_normalized` is its complement. This
 prevents graph size and edge-count differences from producing an invalid
 negative similarity while keeping the original raw GED available for audit.
+Because the text-aware metric produces fractional costs and changes the raw
+GED scale, thresholds calibrated on the earlier role-only GED should be
+re-estimated before dataset curation.
 
 ### 5. Build The DSPR Dataset
 

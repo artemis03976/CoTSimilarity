@@ -13,12 +13,19 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import sys
 
+import networkx as nx
+
 try:
     from data_analysis.dag_similarity import (
         compute_ged_similarity,
         extract_dag_from_batch_response
     )
     from data_analysis.dag_compressor import compress_dag_combined, build_digraph_with_tags
+    from data_analysis.graph_cache import build_graph_cache, load_graph_cache
+    from data_analysis.text_similarity import (
+        DEFAULT_TEXT_SIMILARITY_MODEL,
+        TextSimilarityEncoder,
+    )
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from data_analysis.dag_similarity import (
@@ -26,9 +33,32 @@ except ModuleNotFoundError:
         extract_dag_from_batch_response
     )
     from data_analysis.dag_compressor import compress_dag_combined, build_digraph_with_tags
+    from data_analysis.graph_cache import build_graph_cache, load_graph_cache
+    from data_analysis.text_similarity import (
+        DEFAULT_TEXT_SIMILARITY_MODEL,
+        TextSimilarityEncoder,
+    )
 
 
 VARIANTS = ("original", "simple", "hard")
+
+
+def _attach_original_step_text(dag: List[Dict], steps: List[Dict]) -> List[Dict]:
+    """Associate DAG nodes with their original segmented CoT spans."""
+    step_texts = {
+        str(step.get("index")): step.get("text", "")
+        for step in steps
+        if step.get("index") is not None
+    }
+    enriched = []
+    for entry in dag:
+        node = dict(entry)
+        original_text = step_texts.get(str(entry.get("step_id")), "")
+        # Legacy merged files may not preserve segmentation. In that case the
+        # annotator-written analysis is the only available textual span.
+        node["text"] = original_text or entry.get("text") or entry.get("analysis", "")
+        enriched.append(node)
+    return enriched
 
 
 def load_dag_records(path: str) -> Dict[str, List[Dict]]:
@@ -64,7 +94,9 @@ def load_dag_records(path: str) -> Dict[str, List[Dict]]:
             for sample_num, sample in enumerate(samples):
                 dag = sample.get('dag_analysis')
                 if isinstance(dag, list) and dag:
-                    dag_records[f"{problem_id}_{variant}_{sample_num}"] = dag
+                    dag_records[f"{problem_id}_{variant}_{sample_num}"] = (
+                        _attach_original_step_text(dag, sample.get("steps", []))
+                    )
 
     return dag_records
 
@@ -90,7 +122,7 @@ def load_correctness_data(path: str) -> Dict[int, Dict]:
     return correctness
 
 
-def get_original_graph(records: Dict[str, List[Dict]], problem_id: int):
+def get_original_graph(records: Dict, problem_id: int):
     """Find original problem graph.
 
     Supports both legacy custom_id (`<pid>_original`) and current batch style
@@ -98,28 +130,35 @@ def get_original_graph(records: Dict[str, List[Dict]], problem_id: int):
     """
     target_ids = {f"{problem_id}_original_0", f"{problem_id}_original"}
     for custom_id in target_ids:
-        dag = records.get(custom_id)
-        if dag:
-            return build_digraph_with_tags(dag)
+        record = records.get(custom_id)
+        if isinstance(record, nx.DiGraph):
+            return record
+        if record:
+            return build_digraph_with_tags(record)
     print(f"Warning: original graph not found for problem {problem_id} in {len(records)} DAG records")
     return None
 
 
 def get_variant_samples(
-    records: Dict[str, List[Dict]],
+    records: Dict,
     problem_id: int,
     variant: str,
     num_samples: int,
 ) -> List[Dict]:
     """Get DAG-analyzed samples for one variant from dag_analysis_50 output."""
     samples = []
-    for custom_id, dag in records.items():
+    for custom_id, record in records.items():
         if custom_id.startswith(f"{problem_id}_{variant}_"):
             try:
                 sample_num = int(custom_id.rsplit('_', 1)[-1])
             except ValueError:
                 continue
-            samples.append({'sample_num': sample_num, 'dag': dag, 'custom_id': custom_id})
+            sample = {'sample_num': sample_num, 'custom_id': custom_id}
+            if isinstance(record, nx.DiGraph):
+                sample['graph'] = record
+            else:
+                sample['dag'] = record
+            samples.append(sample)
     samples.sort(key=lambda x: x['sample_num'])
     return samples[:num_samples]
 
@@ -127,9 +166,12 @@ def get_variant_samples(
 def analyze_problem(
     problem_id: int,
     num_samples: int,
-    original_records: Optional[Dict[str, List[Dict]]],
-    variant_records: Dict[str, List[Dict]],
-    correctness_data: Dict
+    original_records: Optional[Dict],
+    variant_records: Dict,
+    correctness_data: Dict,
+    *,
+    lambda_role: float = 1.0,
+    lambda_text: float = 1.0,
 ) -> List[Dict]:
     """Analyze GED for one problem's simple/hard variants.
 
@@ -150,10 +192,11 @@ def analyze_problem(
         print(f"No original graph found for problem {problem_id}")
         return []
 
-    try:
-        original_graph, _ = compress_dag_combined(original_graph)
-    except Exception as exc:
-        print(f"Warning: Compression failed for {problem_id}_original, using uncompressed graph: {exc}")
+    if not original_graph.graph.get("ged_prepared", False):
+        try:
+            original_graph, _ = compress_dag_combined(original_graph)
+        except Exception as exc:
+            print(f"Warning: Compression failed for {problem_id}_original, using uncompressed graph: {exc}")
 
     problem_data = correctness_data.get(problem_id, {})
     variant_samples = {}
@@ -176,14 +219,21 @@ def analyze_problem(
                 f"({variant} {sample_idx}/{len(samples)})"
             )
             try:
-                sample_graph = build_digraph_with_tags(sample['dag'])
-                sample_graph_compressed, _ = compress_dag_combined(sample_graph)
+                sample_graph_compressed = sample.get('graph')
+                if sample_graph_compressed is None:
+                    sample_graph = build_digraph_with_tags(sample['dag'])
+                    sample_graph_compressed, _ = compress_dag_combined(sample_graph)
             except Exception as exc:
                 print(f"Warning: Skip {sample['custom_id']} due to graph build/compression error: {exc}")
                 continue
 
             try:
-                ged_result = compute_ged_similarity(original_graph, sample_graph_compressed)
+                ged_result = compute_ged_similarity(
+                    original_graph,
+                    sample_graph_compressed,
+                    lambda_role=lambda_role,
+                    lambda_text=lambda_text,
+                )
             except Exception as exc:
                 print(f"Warning: Skip {sample['custom_id']} due to GED computation error: {exc}")
                 continue
@@ -268,17 +318,53 @@ def main():
     parser.add_argument('--problem-id', type=int, help='Specific problem ID to analyze (default: all 279)')
     parser.add_argument('--num-samples', type=int, default=50, help='Number of samples per variant (max 50)')
     parser.add_argument('--save-csv', action='store_true', help='Save individual CSV files per problem')
+    parser.add_argument(
+        '--graph-cache',
+        type=str,
+        default=None,
+        help=(
+            'Compressed graph + text-embedding cache; default: '
+            '<output-root>/ged_graph_cache.pt (or a problem-specific cache)'
+        ),
+    )
+    parser.add_argument(
+        '--rebuild-graph-cache',
+        action='store_true',
+        help='Ignore and overwrite an existing graph cache',
+    )
+    parser.add_argument(
+        '--prepare-graph-cache-only',
+        action='store_true',
+        help='Build/load the prepared graph cache and exit before GED',
+    )
+    parser.add_argument(
+        '--text-similarity-model',
+        type=str,
+        default=DEFAULT_TEXT_SIMILARITY_MODEL,
+        help='Hugging Face encoder used for compressed-node text similarity',
+    )
+    parser.add_argument(
+        '--text-similarity-revision',
+        type=str,
+        default=None,
+        help='Optional pinned Hugging Face model revision',
+    )
+    parser.add_argument(
+        '--embedding-device',
+        type=str,
+        default='auto',
+        help='Embedding device, e.g. auto, cuda, cuda:0, or cpu',
+    )
+    parser.add_argument('--embedding-batch-size', type=int, default=64)
+    parser.add_argument('--embedding-max-length', type=int, default=256)
+    parser.add_argument('--lambda-role', type=float, default=1.0)
+    parser.add_argument('--lambda-text', type=float, default=1.0)
     args = parser.parse_args()
 
-    project_root = Path(__file__).resolve().parents[2]
-    output_root = Path(args.output_root) if args.output_root else None
+    if args.lambda_role < 0 or args.lambda_text < 0:
+        parser.error('--lambda-role and --lambda-text must be non-negative')
 
-    if args.variant_records:
-        variant_records_path = Path(args.variant_records)
-    else:
-        if output_root is None:
-            raise ValueError("Provide --output-root or --variant-records")
-        variant_records_path = output_root / "dag_analysis_50" / "analyzed_records.jsonl"
+    output_root = Path(args.output_root) if args.output_root else None
 
     if args.correctness_file:
         correctness_path = Path(args.correctness_file)
@@ -289,6 +375,11 @@ def main():
 
     if output_root is None:
         output_root = correctness_path.parent
+
+    if args.variant_records:
+        variant_records_path = Path(args.variant_records)
+    else:
+        variant_records_path = output_root / "dag_analysis_50" / "analyzed_records.jsonl"
 
     all_results_path = Path(args.all_results_output) if args.all_results_output else output_root / "all_ged_results.jsonl"
 
@@ -306,28 +397,109 @@ def main():
         elif candidate_b.exists():
             baseline_original_records_path = candidate_b
 
-    print("Loading data...")
-    variant_records = load_dag_records(str(variant_records_path))
-    print(f"Loaded {len(variant_records)} trajectory DAGs from {variant_records_path}")
+    explicit_original_records_path = None
     if args.original_records:
-        original_records = load_dag_records(str(Path(args.original_records)))
-        print(
-            f"Loaded {len(original_records)} optional reference DAGs "
-            f"from {args.original_records}"
-        )
+        explicit_original_records_path = Path(args.original_records)
     elif baseline_original_records_path:
-        original_records = load_dag_records(str(baseline_original_records_path))
+        explicit_original_records_path = baseline_original_records_path
+
+    correctness_data = load_correctness_data(str(correctness_path))
+
+    if args.graph_cache:
+        graph_cache_path = Path(args.graph_cache)
+    elif args.problem_id is not None:
+        graph_cache_path = output_root / f"ged_graph_cache_problem_{args.problem_id}.pt"
+    else:
+        graph_cache_path = output_root / "ged_graph_cache.pt"
+
+    if graph_cache_path.is_file() and not args.rebuild_graph_cache:
+        print(f"Loading prepared compressed graphs from: {graph_cache_path}")
+        variant_records, original_records, cache_metadata = load_graph_cache(
+            graph_cache_path
+        )
         print(
-            f"Using {len(original_records)} baseline DAG records as GED reference: "
-            f"{baseline_original_records_path}"
+            f"Loaded {len(variant_records)} trajectory graphs and "
+            f"{len(original_records)} explicit reference graphs without "
+            "initializing the embedding model."
+        )
+        embedding_metadata = cache_metadata.get("embedding", {})
+        print(
+            "Cached text similarity: "
+            f"{embedding_metadata.get('model_name')} @ "
+            f"{embedding_metadata.get('resolved_revision') or embedding_metadata.get('requested_revision') or 'default revision'}"
         )
     else:
-        original_records = None
+        print("Loading DAG annotations for graph-cache preparation...")
+        variant_dag_records = load_dag_records(str(variant_records_path))
         print(
-            "No explicit baseline original records provided; fallback to "
-            "original_0 from variant records as GED baseline."
+            f"Loaded {len(variant_dag_records)} trajectory DAGs from "
+            f"{variant_records_path}"
         )
-    correctness_data = load_correctness_data(str(correctness_path))
+        if explicit_original_records_path is not None:
+            original_dag_records = load_dag_records(
+                str(explicit_original_records_path)
+            )
+            print(
+                f"Loaded {len(original_dag_records)} optional reference DAGs "
+                f"from {explicit_original_records_path}"
+            )
+        else:
+            original_dag_records = None
+            print(
+                "No explicit baseline original records provided; fallback to "
+                "original_0 from variant records as GED baseline."
+            )
+
+        print(
+            f"Loading text-similarity encoder {args.text_similarity_model} "
+            f"on {args.embedding_device}..."
+        )
+        encoder = TextSimilarityEncoder(
+            args.text_similarity_model,
+            revision=args.text_similarity_revision,
+            device=args.embedding_device,
+            batch_size=args.embedding_batch_size,
+            max_length=args.embedding_max_length,
+        )
+        source_metadata = {
+            "variant_records": str(variant_records_path.resolve()),
+            "original_records": (
+                str(explicit_original_records_path.resolve())
+                if explicit_original_records_path is not None
+                else None
+            ),
+        }
+        selected_problem_ids = [args.problem_id] if args.problem_id is not None else None
+        variant_records, original_records, cache_metadata = build_graph_cache(
+            variant_dag_records,
+            original_dag_records,
+            graph_cache_path,
+            encoder,
+            problem_ids=selected_problem_ids,
+            source_metadata=source_metadata,
+        )
+        del encoder
+        del variant_dag_records
+        del original_dag_records
+
+    cached_problem_ids = cache_metadata.get("problem_ids")
+    if args.problem_id is None and cached_problem_ids is not None:
+        raise ValueError(
+            "The selected graph cache only covers specific problem IDs. "
+            "Use the matching --problem-id or rebuild the full cache."
+        )
+    if (
+        args.problem_id is not None
+        and cached_problem_ids is not None
+        and args.problem_id not in cached_problem_ids
+    ):
+        raise ValueError(
+            f"Graph cache does not contain requested problem {args.problem_id}"
+        )
+
+    if args.prepare_graph_cache_only:
+        print("Graph-cache preparation complete; skipping GED as requested.")
+        return
 
     if args.problem_id:
         problem_ids = [args.problem_id]
@@ -340,7 +512,15 @@ def main():
     for idx, problem_id in enumerate(problem_ids, 1):
         print(f"\n=== Problem {problem_id} ({idx}/{len(problem_ids)}) ===")
         try:
-            results = analyze_problem(problem_id, args.num_samples, original_records, variant_records, correctness_data)
+            results = analyze_problem(
+                problem_id,
+                args.num_samples,
+                original_records,
+                variant_records,
+                correctness_data,
+                lambda_role=args.lambda_role,
+                lambda_text=args.lambda_text,
+            )
         except Exception as exc:
             print(f"Warning: Skip problem {problem_id} due to unexpected error: {exc}")
             continue
@@ -354,7 +534,21 @@ def main():
         with open(all_results_path, 'w', encoding='utf-8') as f:
             for item in all_results:
                 f.write(json.dumps(item, ensure_ascii=False) + '\n')
+        results_config_path = all_results_path.with_suffix('.config.json')
+        with open(results_config_path, 'w', encoding='utf-8') as f:
+            json.dump(
+                {
+                    'graph_cache': str(graph_cache_path.resolve()),
+                    'lambda_role': args.lambda_role,
+                    'lambda_text': args.lambda_text,
+                    'graph_cache_metadata': cache_metadata,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
         print(f"\nAll GED results saved to {all_results_path}")
+        print(f"GED run configuration saved to {results_config_path}")
         print(f"Total samples processed: {len(all_results)}")
         print(f"\nTo generate DSPR dataset, run:")
         print(f"  python src/dspr_dataset/data_filter.py --input {all_results_path}")
