@@ -21,7 +21,8 @@ class BatchProcessor:
     def prepare_batch_requests(
         self,
         records: List[Dict],
-        variants: List[str] = None
+        variants: List[str] = None,
+        include_model: bool = False,
     ) -> str:
         """Prepare batch request file in JSONL format.
 
@@ -30,6 +31,9 @@ class BatchProcessor:
         Args:
             records: List of segmented records
             variants: Which variants to process (default: original/simple/hard)
+            include_model: Include ``model`` in each request body.  The
+                platform's recommended format selects the model outside the
+                JSONL file, so this is disabled by default.
 
         Returns:
             Path to batch request file
@@ -59,20 +63,25 @@ class BatchProcessor:
                             sample["steps"]
                         )
 
+                        body = {
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            "max_tokens": self.config.max_tokens,
+                            "top_p": self.config.top_p,
+                            "temperature": self.config.temperature,
+                        }
+                        if include_model:
+                            body["model"] = self.config.model
+
+                        # Keep this aligned with the provider's documented
+                        # JSONL shape: one custom_id and one request body per
+                        # line.  Endpoint/method metadata is selected by the
+                        # batch service and is intentionally omitted.
                         batch_request = {
                             "custom_id": f"{record['problem_id']}_{variant}_{sample_idx}",
-                            "method": "POST",
-                            "url": "/v1/chat/completions",
-                            "body": {
-                                "model": self.config.model,
-                                "messages": [
-                                    {"role": "system", "content": system_prompt},
-                                    {"role": "user", "content": user_prompt}
-                                ],
-                                "temperature": self.config.temperature,
-                                "top_p": self.config.top_p,
-                                "max_tokens": self.config.max_tokens
-                            }
+                            "body": body,
                         }
 
                         f.write(json.dumps(batch_request, ensure_ascii=False) + "\n")

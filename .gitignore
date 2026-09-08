@@ -8,6 +8,7 @@ output/qwen/*
 output/deepseek/*
 !output/qwen/all_records.jsonl
 !output/deepseek/all_records.jsonl
+tmp/
 
 *.html
 __pycache__

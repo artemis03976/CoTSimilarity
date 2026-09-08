@@ -208,7 +208,8 @@ def process_batch_mode(
     records: List[Dict],
     config: LLMConfig,
     output_dir: Path,
-    variants: List[str] = ["original", "simple", "hard"]
+    variants: List[str] = ["original", "simple", "hard"],
+    include_model: bool = False,
 ):
     """Create batch API requests for all requested variants.
 
@@ -220,7 +221,11 @@ def process_batch_mode(
 
     # Prepare a single batch file containing all variants
     logger.info("Preparing batch requests...")
-    batch_file = processor.prepare_batch_requests(records, variants)
+    batch_file = processor.prepare_batch_requests(
+        records,
+        variants,
+        include_model=include_model,
+    )
     logger.info(f"Created batch file: {batch_file}")
 
     logger.info("\n" + "="*60)
@@ -295,6 +300,11 @@ def main():
                        help="LLM provider (deepseek, openai, etc.)")
     parser.add_argument("--model", type=str, default="deepseek-chat",
                        help="Model name")
+    parser.add_argument(
+        "--include-model-in-batch",
+        action="store_true",
+        help="Include the configured model in each request body; omitted by default to match the provider format",
+    )
     parser.add_argument("--limit", type=int, default=None,
                        help="Limit number of records to process (for testing)")
     parser.add_argument("--variants", nargs="+",
@@ -329,7 +339,13 @@ def main():
     if args.mode == "normal":
         process_normal_mode(records, config, output_dir, args.variants)
     elif args.mode == "batch":
-        process_batch_mode(records, config, output_dir, args.variants)
+        process_batch_mode(
+            records,
+            config,
+            output_dir,
+            args.variants,
+            include_model=args.include_model_in_batch,
+        )
     elif args.mode == "merge-batch":
         if not args.batch_results_file:
             parser.error("--batch-results-file is required for --mode merge-batch")

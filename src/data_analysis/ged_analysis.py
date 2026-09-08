@@ -9,6 +9,7 @@ writes one flat GED record per sampled response.
 import json
 import argparse
 import csv
+import multiprocessing as mp
 from pathlib import Path
 from typing import Dict, List, Optional
 import sys
@@ -41,6 +42,74 @@ except ModuleNotFoundError:
 
 
 VARIANTS = ("original", "simple", "hard")
+
+_WORKER_STATE: Dict[str, object] = {}
+
+
+def _run_problem_in_worker(problem_id: int):
+    """Run one problem using inherited read-only graph-cache state."""
+    state = _WORKER_STATE
+    stats: Dict[str, int] = {}
+    try:
+        results = analyze_problem(
+            problem_id,
+            state["num_samples"],
+            state["original_records"],
+            state["variant_records"],
+            state["correctness_data"],
+            lambda_role=state["lambda_role"],
+            lambda_text=state["lambda_text"],
+            ged_timeout=state["ged_timeout"],
+            max_ged_nodes=state["max_ged_nodes"],
+            max_ged_edges=state["max_ged_edges"],
+            hard_timeout=state["hard_timeout"],
+            skip_timeouts=state["skip_timeouts"],
+            stats=stats,
+        )
+    except Exception as exc:
+        # Keep one malformed problem from aborting an otherwise independent
+        # pool run. The parent records the problem as completed with no rows.
+        stats["problem_error"] = 1
+        print(f"Warning: Skip problem {problem_id} in worker due to unexpected error: {exc}")
+        results = []
+    return problem_id, results, stats
+
+
+def _write_problem_checkpoint(
+    checkpoint_dir: Path,
+    problem_id: int,
+    results: List[Dict],
+) -> Path:
+    """Atomically mark one completed problem and retain its result rows."""
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    target = checkpoint_dir / f"problem_{problem_id}.jsonl"
+    temporary = checkpoint_dir / f".problem_{problem_id}.jsonl.tmp"
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        for result in results:
+            stream.write(json.dumps(result, ensure_ascii=False) + "\n")
+    temporary.replace(target)
+    return target
+
+
+def _load_problem_checkpoint(path: Path) -> List[Dict]:
+    results = []
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            if line.strip():
+                results.append(json.loads(line))
+    return results
+
+
+def _merge_problem_checkpoints(
+    checkpoint_dir: Path,
+    problem_ids: List[int],
+) -> List[Dict]:
+    merged = []
+    for problem_id in sorted(problem_ids):
+        path = checkpoint_dir / f"problem_{problem_id}.jsonl"
+        if path.is_file():
+            merged.extend(_load_problem_checkpoint(path))
+    return merged
 
 
 def _attach_original_step_text(dag: List[Dict], steps: List[Dict]) -> List[Dict]:
@@ -172,6 +241,12 @@ def analyze_problem(
     *,
     lambda_role: float = 1.0,
     lambda_text: float = 1.0,
+    ged_timeout: float = 10.0,
+    max_ged_nodes: Optional[int] = 32,
+    max_ged_edges: Optional[int] = 64,
+    hard_timeout: bool = True,
+    skip_timeouts: bool = True,
+    stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict]:
     """Analyze GED for one problem's simple/hard variants.
 
@@ -179,6 +254,9 @@ def analyze_problem(
     variant sample graph is also compressed before GED so comparisons focus on
     macro reasoning structure rather than repeated same-tag micro steps.
     """
+
+    if stats is None:
+        stats = {}
 
     original_graph = None
     if original_records:
@@ -189,6 +267,7 @@ def analyze_problem(
         original_graph = get_original_graph(variant_records, problem_id)
 
     if not original_graph:
+        stats["missing_original"] = stats.get("missing_original", 0) + 1
         print(f"No original graph found for problem {problem_id}")
         return []
 
@@ -196,6 +275,7 @@ def analyze_problem(
         try:
             original_graph, _ = compress_dag_combined(original_graph)
         except Exception as exc:
+            stats["original_compression_error"] = stats.get("original_compression_error", 0) + 1
             print(f"Warning: Compression failed for {problem_id}_original, using uncompressed graph: {exc}")
 
     problem_data = correctness_data.get(problem_id, {})
@@ -224,6 +304,7 @@ def analyze_problem(
                     sample_graph = build_digraph_with_tags(sample['dag'])
                     sample_graph_compressed, _ = compress_dag_combined(sample_graph)
             except Exception as exc:
+                stats["graph_error"] = stats.get("graph_error", 0) + 1
                 print(f"Warning: Skip {sample['custom_id']} due to graph build/compression error: {exc}")
                 continue
 
@@ -231,14 +312,29 @@ def analyze_problem(
                 ged_result = compute_ged_similarity(
                     original_graph,
                     sample_graph_compressed,
+                    timeout=ged_timeout,
                     lambda_role=lambda_role,
                     lambda_text=lambda_text,
+                    max_nodes=max_ged_nodes,
+                    max_edges=max_ged_edges,
+                    hard_timeout=hard_timeout,
                 )
             except Exception as exc:
+                stats["error"] = stats.get("error", 0) + 1
                 print(f"Warning: Skip {sample['custom_id']} due to GED computation error: {exc}")
                 continue
 
-            if ged_result.get('ged') is None and not ged_result.get('timed_out', False):
+            status = ged_result.get("status", "ok")
+            if status != "ok":
+                stats[status] = stats.get(status, 0) + 1
+                if status == "timeout" and not skip_timeouts and ged_result.get("ged") is not None:
+                    pass
+                else:
+                    print(f"Warning: Skip {sample['custom_id']} because GED status is {status}")
+                    continue
+
+            if ged_result.get('ged') is None:
+                stats["invalid"] = stats.get("invalid", 0) + 1
                 print(f"Warning: Skip {sample['custom_id']} because GED result is invalid")
                 continue
 
@@ -256,7 +352,12 @@ def analyze_problem(
                 'ged_normalized': ged_result['ged_normalized'],
                 'ged_normalizer': ged_result['ged_normalizer'],
                 'similarity_normalized': ged_result['similarity_normalized'],
-                'timed_out': ged_result['timed_out']
+                'timed_out': ged_result['timed_out'],
+                'status': status,
+                'approximate': ged_result.get('approximate', False),
+                'elapsed_seconds': ged_result.get('elapsed_seconds'),
+                'ged_max_nodes': ged_result.get('max_nodes'),
+                'ged_max_edges': ged_result.get('max_edges'),
             })
 
     return results
@@ -273,7 +374,8 @@ def write_results_to_csv(results: List[Dict], problem_id: int, output_dir: str):
             fieldnames=[
                 'problem_id', 'sample_id', 'variant', 'problem', 'response',
                 'correct', 'ged', 'ged_normalized', 'ged_normalizer',
-                'similarity_normalized', 'timed_out',
+                'similarity_normalized', 'timed_out', 'status', 'approximate',
+                'elapsed_seconds', 'ged_max_nodes', 'ged_max_edges',
             ],
         )
         writer.writeheader()
@@ -294,6 +396,22 @@ def write_results_to_csv(results: List[Dict], problem_id: int, output_dir: str):
 
     print(f"Results saved to {output_path}")
     return output_path
+
+
+def _write_results_jsonl(results: List[Dict], output_path: Path) -> None:
+    """Write the aggregate result file atomically, including an empty run."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_name(f".{output_path.name}.tmp")
+    with temporary.open('w', encoding='utf-8', newline='\n') as stream:
+        for item in results:
+            stream.write(json.dumps(item, ensure_ascii=False) + '\n')
+    temporary.replace(output_path)
+
+
+def _merge_run_stats(target: Dict[str, int], source: Dict[str, int]) -> None:
+    for key, value in source.items():
+        if isinstance(value, int):
+            target[key] = target.get(key, 0) + value
 
 
 def main():
@@ -359,10 +477,57 @@ def main():
     parser.add_argument('--embedding-max-length', type=int, default=256)
     parser.add_argument('--lambda-role', type=float, default=1.0)
     parser.add_argument('--lambda-text', type=float, default=1.0)
+    parser.add_argument(
+        '--ged-timeout', type=float, default=10.0,
+        help='Maximum wall-clock seconds for one GED pair (default: 10)',
+    )
+    parser.add_argument(
+        '--max-ged-nodes', type=int, default=32,
+        help='Skip a pair when either graph exceeds this node count; 0 disables',
+    )
+    parser.add_argument(
+        '--max-ged-edges', type=int, default=64,
+        help='Skip a pair when either graph exceeds this edge count; 0 disables',
+    )
+    parser.add_argument(
+        '--soft-timeout', action='store_true',
+        help='Use NetworkX cooperative timeout instead of POSIX hard wall-clock cutoff',
+    )
+    parser.add_argument(
+        '--keep-timeouts', action='store_true',
+        help='Keep timeout GED values when NetworkX returned a best-so-far value',
+    )
+    parser.add_argument(
+        '--workers', type=int, default=1,
+        help='Number of parallel problem workers on POSIX (default: 1)',
+    )
+    parser.add_argument(
+        '--checkpoint-dir', type=str, default=None,
+        help='Per-problem checkpoint directory; defaults beside the output JSONL',
+    )
+    parser.add_argument(
+        '--no-checkpoint', action='store_true',
+        help='Disable per-problem checkpoint files for this run',
+    )
+    parser.add_argument(
+        '--resume', action='store_true',
+        help='Reuse completed problem checkpoints and process only pending problems',
+    )
     args = parser.parse_args()
 
     if args.lambda_role < 0 or args.lambda_text < 0:
         parser.error('--lambda-role and --lambda-text must be non-negative')
+    if args.ged_timeout <= 0:
+        parser.error('--ged-timeout must be positive')
+    if args.max_ged_nodes < 0 or args.max_ged_edges < 0:
+        parser.error('--max-ged-nodes and --max-ged-edges must be non-negative')
+    if args.workers <= 0:
+        parser.error('--workers must be positive')
+    if args.no_checkpoint and args.resume:
+        parser.error('--resume cannot be combined with --no-checkpoint')
+    # A zero limit is a convenient CLI spelling for an unbounded limit.
+    args.max_ged_nodes = args.max_ged_nodes or None
+    args.max_ged_edges = args.max_ged_edges or None
 
     output_root = Path(args.output_root) if args.output_root else None
 
@@ -501,16 +666,45 @@ def main():
         print("Graph-cache preparation complete; skipping GED as requested.")
         return
 
-    if args.problem_id:
+    if args.problem_id is not None:
         problem_ids = [args.problem_id]
         print(f"Analyzing problem {args.problem_id}...")
     else:
         problem_ids = sorted(correctness_data.keys())
         print(f"Analyzing all {len(problem_ids)} problems...")
 
-    all_results = []
-    for idx, problem_id in enumerate(problem_ids, 1):
-        print(f"\n=== Problem {problem_id} ({idx}/{len(problem_ids)}) ===")
+    checkpoint_dir = (
+        Path(args.checkpoint_dir)
+        if args.checkpoint_dir
+        else all_results_path.parent / f"{all_results_path.stem}_checkpoints"
+    )
+    use_checkpoint = not args.no_checkpoint
+    completed_ids = set()
+    all_results: List[Dict] = []
+    if use_checkpoint and args.resume:
+        for problem_id in problem_ids:
+            checkpoint_path = checkpoint_dir / f"problem_{problem_id}.jsonl"
+            if checkpoint_path.is_file():
+                try:
+                    all_results.extend(_load_problem_checkpoint(checkpoint_path))
+                    completed_ids.add(problem_id)
+                except (OSError, json.JSONDecodeError) as exc:
+                    print(
+                        f"Warning: ignoring invalid checkpoint for problem "
+                        f"{problem_id}: {exc}"
+                    )
+        if completed_ids:
+            print(
+                f"Resuming from {len(completed_ids)} completed problem checkpoints; "
+                f"{len(problem_ids) - len(completed_ids)} remain."
+            )
+
+    pending_problem_ids = [problem_id for problem_id in problem_ids if problem_id not in completed_ids]
+    run_stats: Dict[str, int] = {}
+    effective_workers = 1
+
+    def process_one(problem_id: int):
+        stats: Dict[str, int] = {}
         try:
             results = analyze_problem(
                 problem_id,
@@ -520,40 +714,108 @@ def main():
                 correctness_data,
                 lambda_role=args.lambda_role,
                 lambda_text=args.lambda_text,
+                ged_timeout=args.ged_timeout,
+                max_ged_nodes=args.max_ged_nodes,
+                max_ged_edges=args.max_ged_edges,
+                hard_timeout=not args.soft_timeout,
+                skip_timeouts=not args.keep_timeouts,
+                stats=stats,
             )
+            return problem_id, results, stats
         except Exception as exc:
             print(f"Warning: Skip problem {problem_id} due to unexpected error: {exc}")
-            continue
-        all_results.extend(results)
+            stats["problem_error"] = 1
+            return problem_id, [], stats
 
+    def consume(problem_id: int, results: List[Dict], stats: Dict[str, int], completed_count: int):
+        all_results.extend(results)
+        completed_ids.add(problem_id)
+        _merge_run_stats(run_stats, stats)
+        if use_checkpoint:
+            _write_problem_checkpoint(checkpoint_dir, problem_id, results)
         if args.save_csv and results:
             write_results_to_csv(results, problem_id, output_dir=str(output_root / "similarity_check"))
+        print(
+            f"Completed problem {problem_id} ({completed_count}/{len(problem_ids)}); "
+            f"kept {len(results)} GED rows"
+        )
 
+    if pending_problem_ids:
+        effective_workers = args.workers
+        can_fork = 'fork' in mp.get_all_start_methods()
+        if effective_workers > 1 and not can_fork:
+            print("Warning: fork is unavailable on this platform; falling back to serial GED analysis.")
+            effective_workers = 1
+
+        if effective_workers == 1:
+            for offset, problem_id in enumerate(pending_problem_ids, 1):
+                print(f"\n=== Problem {problem_id} ({len(completed_ids) + offset}/{len(problem_ids)}) ===")
+                pid, results, stats = process_one(problem_id)
+                consume(pid, results, stats, len(completed_ids) + offset)
+        else:
+            print(f"Running GED analysis with {effective_workers} fork workers.")
+            global _WORKER_STATE
+            _WORKER_STATE = {
+                "num_samples": args.num_samples,
+                "original_records": original_records,
+                "variant_records": variant_records,
+                "correctness_data": correctness_data,
+                "lambda_role": args.lambda_role,
+                "lambda_text": args.lambda_text,
+                "ged_timeout": args.ged_timeout,
+                "max_ged_nodes": args.max_ged_nodes,
+                "max_ged_edges": args.max_ged_edges,
+                "hard_timeout": not args.soft_timeout,
+                "skip_timeouts": not args.keep_timeouts,
+            }
+            context = mp.get_context('fork')
+            with context.Pool(processes=effective_workers) as pool:
+                for offset, (pid, results, stats) in enumerate(
+                    pool.imap_unordered(_run_problem_in_worker, pending_problem_ids), 1
+                ):
+                    consume(pid, results, stats, len(completed_ids) + offset)
+            _WORKER_STATE = {}
+    else:
+        print("All requested problems are already present in checkpoints.")
+
+    # Checkpoint files are authoritative when enabled. Re-merge them in problem
+    # order so an unordered worker completion order does not affect the final file.
+    if use_checkpoint:
+        all_results = _merge_problem_checkpoints(checkpoint_dir, sorted(completed_ids))
+    all_results.sort(key=lambda item: (item.get('problem_id', 0), item.get('variant', ''), item.get('sample_id', '')))
+    _write_results_jsonl(all_results, all_results_path)
+
+    results_config_path = all_results_path.with_suffix('.config.json')
+    run_config = {
+        'graph_cache': str(graph_cache_path.resolve()),
+        'lambda_role': args.lambda_role,
+        'lambda_text': args.lambda_text,
+        'ged_timeout': args.ged_timeout,
+        'max_ged_nodes': args.max_ged_nodes,
+        'max_ged_edges': args.max_ged_edges,
+        'hard_timeout': not args.soft_timeout,
+        'skip_timeouts': not args.keep_timeouts,
+        'workers': args.workers,
+        'effective_workers': effective_workers,
+        'checkpoint_dir': str(checkpoint_dir.resolve()) if use_checkpoint else None,
+        'checkpoint_enabled': use_checkpoint,
+        'resumed': args.resume,
+        'problem_ids': problem_ids,
+        'completed_problem_ids': sorted(completed_ids),
+        'run_stats': run_stats,
+        'graph_cache_metadata': cache_metadata,
+    }
+    with results_config_path.open('w', encoding='utf-8') as stream:
+        json.dump(run_config, stream, ensure_ascii=False, indent=2)
+
+    print(f"\nAll GED results saved to {all_results_path}")
+    print(f"GED run configuration saved to {results_config_path}")
+    print(f"Total samples processed: {len(all_results)}")
+    if run_stats:
+        print(f"GED run statistics: {run_stats}")
     if all_results:
-        # Save all results to JSONL for post-processing
-        with open(all_results_path, 'w', encoding='utf-8') as f:
-            for item in all_results:
-                f.write(json.dumps(item, ensure_ascii=False) + '\n')
-        results_config_path = all_results_path.with_suffix('.config.json')
-        with open(results_config_path, 'w', encoding='utf-8') as f:
-            json.dump(
-                {
-                    'graph_cache': str(graph_cache_path.resolve()),
-                    'lambda_role': args.lambda_role,
-                    'lambda_text': args.lambda_text,
-                    'graph_cache_metadata': cache_metadata,
-                },
-                f,
-                ensure_ascii=False,
-                indent=2,
-            )
-        print(f"\nAll GED results saved to {all_results_path}")
-        print(f"GED run configuration saved to {results_config_path}")
-        print(f"Total samples processed: {len(all_results)}")
         print(f"\nTo generate DSPR dataset, run:")
         print(f"  python src/dspr_dataset/data_filter.py --input {all_results_path}")
-    else:
-        print("No results generated")
 
 
 if __name__ == '__main__':

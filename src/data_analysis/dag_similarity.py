@@ -9,6 +9,8 @@ import json
 import logging
 import time
 import re
+import signal
+import threading
 from functools import partial
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -162,18 +164,151 @@ def edge_ins_cost(attrs: dict) -> float:
     return 1.0
 
 
+def _greedy_upper_bound(
+    G1: nx.DiGraph,
+    G2: nx.DiGraph,
+    *,
+    lambda_role: float,
+    lambda_text: float,
+) -> float:
+    """Build a cheap valid edit-path upper bound for NetworkX pruning.
+
+    Nodes are paired by coarse type and then by macro-action role.  The
+    resulting one-to-one mapping is not intended to be optimal; it only gives
+    the branch-and-bound search a substantially tighter bound than deleting
+    and reinserting every node and edge.
+    """
+    mapping = {}
+    if 0 in G1 and 0 in G2:
+        mapping[0] = 0
+
+    def groups(graph: nx.DiGraph):
+        grouped = {}
+        for node, attrs in graph.nodes(data=True):
+            if node == 0:
+                continue
+            key = (attrs.get("type"), attrs.get("macro_action_tag"))
+            grouped.setdefault(key, []).append(node)
+        for nodes in grouped.values():
+            nodes.sort(key=lambda value: str(value))
+        return grouped
+
+    groups1 = groups(G1)
+    groups2 = groups(G2)
+    used2 = set(mapping.values())
+
+    # First match nodes with identical type/role, then pair remaining nodes of
+    # the same coarse type so role substitution remains cheaper than deletion
+    # plus insertion.
+    for key in sorted(set(groups1) | set(groups2), key=str):
+        left = groups1.get(key, [])
+        right = [node for node in groups2.get(key, []) if node not in used2]
+        for node1, node2 in zip(left, right):
+            mapping[node1] = node2
+            used2.add(node2)
+
+    by_type1 = {}
+    by_type2 = {}
+    for node, attrs in G1.nodes(data=True):
+        if node not in mapping:
+            by_type1.setdefault(attrs.get("type"), []).append(node)
+    for node, attrs in G2.nodes(data=True):
+        if node not in used2:
+            by_type2.setdefault(attrs.get("type"), []).append(node)
+    for values in by_type1.values():
+        values.sort(key=lambda value: str(value))
+    for values in by_type2.values():
+        values.sort(key=lambda value: str(value))
+    for node_type in sorted(set(by_type1) | set(by_type2), key=str):
+        for node1, node2 in zip(by_type1.get(node_type, []), by_type2.get(node_type, [])):
+            mapping[node1] = node2
+            used2.add(node2)
+
+    cost = 0.0
+    for node1, attrs1 in G1.nodes(data=True):
+        node2 = mapping.get(node1)
+        if node2 is None:
+            cost += node_del_cost(attrs1)
+        else:
+            cost += node_subst_cost(
+                attrs1,
+                G2.nodes[node2],
+                lambda_role=lambda_role,
+                lambda_text=lambda_text,
+            )
+    cost += sum(node_ins_cost(attrs) for node, attrs in G2.nodes(data=True) if node not in used2)
+
+    # Mapped edges that exist are retained; all other source edges are deleted
+    # and unmatched target edges inserted.
+    source_mapped_edges = {
+        (mapping[source], mapping[target])
+        for source, target in G1.edges
+        if source in mapping and target in mapping
+    }
+    retained = source_mapped_edges & set(G2.edges)
+    cost += G1.number_of_edges() - len(retained)
+    cost += G2.number_of_edges() - len(retained)
+    return max(0.0, cost)
+
+
+def _run_ged_with_timeout(callable_, timeout: float, hard_timeout: bool) -> tuple[Optional[float], bool, float]:
+    """Run a GED call and report elapsed time and timeout status.
+
+    On POSIX main processes, ``setitimer`` provides a real wall-clock cutoff,
+    including cases where NetworkX has not yielded its first candidate yet.
+    Other platforms fall back to NetworkX's cooperative timeout plus elapsed
+    time measurement.
+    """
+    start = time.perf_counter()
+    timed_out = False
+    value = None
+
+    use_alarm = (
+        hard_timeout
+        and hasattr(signal, "SIGALRM")
+        and threading.current_thread() is threading.main_thread()
+    )
+    previous_handler = None
+
+    try:
+        if use_alarm:
+            def _alarm_handler(_signum, _frame):
+                raise TimeoutError("GED wall-clock timeout")
+
+            previous_handler = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, _alarm_handler)
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+        value = callable_()
+    except TimeoutError:
+        timed_out = True
+        value = None
+    finally:
+        if use_alarm:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+
+    elapsed = time.perf_counter() - start
+    if elapsed >= timeout:
+        timed_out = True
+    return value, timed_out, elapsed
+
+
 def compute_ged_similarity(
     G1: nx.DiGraph,
     G2: nx.DiGraph,
-    timeout: float = 30.0,
+    timeout: float = 10.0,
     *,
     lambda_role: float = 1.0,
     lambda_text: float = 1.0,
+    max_nodes: Optional[int] = 32,
+    max_edges: Optional[int] = 64,
+    hard_timeout: bool = True,
 ) -> Dict:
     """Compute GED and normalized similarity between two DAGs.
 
-    Exact GED can be expensive. Small graphs use optimize_graph_edit_distance;
-    larger graphs use NetworkX's timeout-aware graph_edit_distance path.
+    Exact GED can be expensive. A root match, a greedy upper bound, and graph
+    size limits reduce pathological searches. The timeout is a hard wall-clock
+    cutoff on POSIX main processes and a cooperative cutoff elsewhere.
 
     With unit insertion/deletion costs, deleting every node/edge in ``G1`` and
     inserting every node/edge in ``G2`` is a valid upper bound on the edit
@@ -182,10 +317,34 @@ def compute_ged_similarity(
     denominator was not an upper bound when both graphs contained different
     edges and could produce misleading negative similarities.
     """
-    max_nodes = max(len(G1), len(G2))
+    if timeout <= 0:
+        raise ValueError("timeout must be positive")
+
+    graph_max_nodes = max(len(G1), len(G2))
+    graph_max_edges = max(G1.number_of_edges(), G2.number_of_edges())
     node_edit_budget = len(G1) + len(G2)
     edge_edit_budget = G1.number_of_edges() + G2.number_of_edges()
     normalizer = node_edit_budget + edge_edit_budget
+
+    if (max_nodes is not None and graph_max_nodes > max_nodes) or (
+        max_edges is not None and graph_max_edges > max_edges
+    ):
+        return {
+            "ged": None,
+            "timed_out": False,
+            "status": "skipped_size",
+            "approximate": False,
+            "elapsed_seconds": 0.0,
+            "ged_normalizer": normalizer,
+            "node_edit_budget": node_edit_budget,
+            "edge_edit_budget": edge_edit_budget,
+            "max_nodes": graph_max_nodes,
+            "max_edges": graph_max_edges,
+            "upper_bound": None,
+            "ged_normalized": None,
+            "similarity_normalized": None,
+            "similarity_inverse": None,
+        }
 
     timed_out = False
     ged = None
@@ -203,27 +362,54 @@ def compute_ged_similarity(
         edge_ins_cost=edge_ins_cost,
     )
 
+    upper_bound = min(
+        float(normalizer),
+        _greedy_upper_bound(
+            G1,
+            G2,
+            lambda_role=lambda_role,
+            lambda_text=lambda_text,
+        ),
+    )
+    roots = (0, 0) if 0 in G1 and 0 in G2 else None
+
+    computation_start = time.perf_counter()
     try:
-        if max_nodes <= 12:
-            start = time.time()
-            for v in nx.optimize_graph_edit_distance(G1, G2, **cost_args):
-                ged = v
-                if time.time() - start > timeout:
-                    timed_out = True
-                    break
-        else:
-            ged = nx.graph_edit_distance(G1, G2, timeout=timeout, **cost_args)
-            if ged is None:
-                timed_out = True
+        ged, timed_out, elapsed = _run_ged_with_timeout(
+            lambda: nx.graph_edit_distance(
+                G1,
+                G2,
+                roots=roots,
+                upper_bound=upper_bound,
+                timeout=timeout,
+                **cost_args,
+            ),
+            timeout,
+            hard_timeout,
+        )
     except Exception as e:
         logger.warning(f"GED computation error: {e}")
+        elapsed = time.perf_counter() - computation_start
+
+    if timed_out:
+        status = "timeout"
+    elif ged is None:
+        status = "error"
+    else:
+        status = "ok"
 
     result = {
         "ged": ged,
         "timed_out": timed_out,
+        "status": status,
+        "approximate": bool(timed_out and ged is not None),
+        "elapsed_seconds": round(elapsed, 4),
         "ged_normalizer": normalizer,
         "node_edit_budget": node_edit_budget,
         "edge_edit_budget": edge_edit_budget,
+        "max_nodes": graph_max_nodes,
+        "max_edges": graph_max_edges,
+        "upper_bound": upper_bound,
     }
     if ged is not None and normalizer > 0:
         ged_normalized = max(0.0, min(1.0, ged / normalizer))

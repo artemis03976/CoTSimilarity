@@ -3,12 +3,12 @@ export CUDA_VISIBLE_DEVICES=7
 python scripts/inference.py \
   --baseline base \
   --model-name Qwen/Qwen2.5-Math-7B-Instruct \
-  --output-dir output/qwen-2.5/greedy \
+  --output-dir output/qwen-2.5/base \
 
 python scripts/inference.py \
   --baseline base \
   --model-name deepseek-ai/deepseek-math-7b-instruct \
-  --output-dir output/deepseek/greedy \
+  --output-dir output/deepseek/base \
 
 python scripts/inference.py \
   --baseline dspr \
