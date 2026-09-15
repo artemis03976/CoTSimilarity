@@ -88,6 +88,8 @@ class DSPRTrainer(Trainer):
         lambda_router: float = 0.1,
         prefix_learning_rate: float | None = None,
         router_learning_rate: float | None = None,
+        prefix_weight_decay: float | None = None,
+        router_weight_decay: float | None = None,
         **kwargs,
     ):
         self._train_diagnostics = _empty_diagnostic_accumulator()
@@ -99,6 +101,12 @@ class DSPRTrainer(Trainer):
         )
         self.router_learning_rate = (
             self.args.learning_rate if router_learning_rate is None else router_learning_rate
+        )
+        self.prefix_weight_decay = (
+            self.args.weight_decay if prefix_weight_decay is None else prefix_weight_decay
+        )
+        self.router_weight_decay = (
+            self.args.weight_decay if router_weight_decay is None else router_weight_decay
         )
 
     def create_optimizer(self):
@@ -132,7 +140,13 @@ class DSPRTrainer(Trainer):
                         {
                             "params": parameters,
                             "lr": learning_rate,
-                            "weight_decay": self.args.weight_decay if use_decay else 0.0,
+                            "weight_decay": (
+                                self.prefix_weight_decay if use_decay else 0.0
+                            )
+                            if group_name == "prefix"
+                            else (
+                                self.router_weight_decay if use_decay else 0.0
+                            ),
                             "group_name": group_name,
                         }
                     )
@@ -231,6 +245,10 @@ class DSPRTrainer(Trainer):
                 "dspr_learning_rates": {
                     "prefix": self.prefix_learning_rate,
                     "router": self.router_learning_rate,
+                },
+                "dspr_weight_decays": {
+                    "prefix": self.prefix_weight_decay,
+                    "router": self.router_weight_decay,
                 },
             },
             os.path.join(output_dir, "dspr_trainable.pt"),

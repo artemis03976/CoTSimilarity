@@ -103,6 +103,43 @@ Some `output/*/all_records.jsonl` files are expensive experiment artifacts and a
 
 ## End-To-End DSPR Workflow
 
+### Staged DSPR training
+
+For the staged training variant, first train the prompt-only router on one
+deduplicated example per problem-variant, then train the dual prefix on all
+trajectory records while keeping the router fixed:
+
+```bash
+python scripts/train.py staged_dspr \
+  --math-paired-path data/math_paired.jsonl \
+  --kfold-root data/qwen/kfold \
+  --fold 0 \
+  --output-path checkpoints/qwen-2.5_staged_seed42 \
+  --router-learning-rate 1e-5 \
+  --prefix-learning-rate 4e-5 \
+  --router-weight-decay 1e-3 \
+  --router-target-smoothing 0.05 \
+  --router-epochs 20 \
+  --prefix-epochs 15
+```
+
+The router artifact is saved as
+`<output>/router/router_trainable.pt`; the prefix-stage artifact is saved as
+`<output>/prefix/dspr_trainable.pt`. To run the second stage separately, pass
+`--run-stage prefix --router-checkpoint <path-to-router_trainable.pt>`. An
+optional short joint calibration can be enabled with `--joint-epochs N`; it
+uses the small `--joint-router-learning-rate` rather than the main router rate.
+
+The staged pipeline treats `data/math_paired.jsonl` as the only canonical
+source of problem-variant prompts. K-fold `train_ids.json` and `val_ids.json`
+select the router examples from that source, while `fold_N/train.jsonl` and
+`fold_N/val.jsonl` provide the refined CoT trajectories used only by the prefix
+stage. Legacy `dcpr_train.jsonl` and `dcpr_val.jsonl` are not used by this
+pipeline. The router context encoder is run once and cached as
+`<output>/router_context_cache.pt`; subsequent router epochs use the cached
+vectors directly. To share one cache across several folds, pass the same path
+with `--router-context-cache-path` to each fold command.
+
 The example commands below use Qwen2.5-Math-7B-Instruct and write new artifacts under `output/qwen-2.5`, `data/qwen`, and `checkpoints/qwen`. Results from the earlier pipeline are archived under `output/qwen_legacy`.
 
 ### 1. Generate Base Model Responses

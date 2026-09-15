@@ -28,9 +28,3 @@ def check_jsonl_file(file_path):
                 )
             total += 1
     return total
-
-
-# 替换<YOUR_JSONL_FILE>为你的JSONL文件路径
-file_path = "tmp.jsonl"
-total_lines = check_jsonl_file(file_path)
-print(f"文件中有效JSON数据的行数为: {total_lines}")
