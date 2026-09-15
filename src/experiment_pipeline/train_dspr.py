@@ -5,6 +5,7 @@ Training script for DSPR model.
 import argparse
 import inspect
 import json
+import math
 import os
 import random
 import sys
@@ -20,7 +21,7 @@ from transformers import (
 
 from dspr.config import DSPRConfig
 from dspr.model import DSPRModel
-from dspr_training.dataset import DSPRDataset
+from dspr_training.dataset import DSPRDataset, ProblemResampledDSPRDataset
 from dspr_training.trainer import DSPRTrainer, compute_dspr_metrics
 
 
@@ -61,14 +62,17 @@ class ProgressEventCallback(TrainerCallback):
 class TrainingHistoryCallback(TrainerCallback):
     """Persist every Trainer log and expose it to the K-fold parent process."""
 
-    def __init__(self, write_train_log: bool):
+    def __init__(self, write_train_log: bool, resampled_dataset=None):
         self.write_train_log = write_train_log
+        self.resampled_dataset = resampled_dataset
         self.history_handle = None
         self.train_log_handle = None
 
     def on_train_begin(self, args, state, control, **kwargs):
         output_dir = args.output_dir
         os.makedirs(output_dir, exist_ok=True)
+        if self.resampled_dataset is not None:
+            self.resampled_dataset.set_epoch(0)
         self.history_handle = open(
             os.path.join(output_dir, "training_history.jsonl"),
             "w",
@@ -80,6 +84,11 @@ class TrainingHistoryCallback(TrainerCallback):
                 "w",
                 encoding="utf-8",
             )
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        if self.resampled_dataset is not None:
+            epoch = int(state.epoch) if state.epoch is not None else 0
+            self.resampled_dataset.set_epoch(epoch)
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if not logs:
@@ -118,6 +127,16 @@ def set_seed(seed: int):
     torch.backends.cudnn.benchmark = False
 
 
+def update_steps_per_epoch(dataset_size: int, batch_size: int, gradient_accumulation_steps: int) -> int:
+    """Match Trainer's update-step rounding for a finite map-style dataset."""
+    if dataset_size <= 0:
+        raise ValueError("Training dataset must contain at least one record")
+    if batch_size <= 0 or gradient_accumulation_steps <= 0:
+        raise ValueError("batch_size and gradient_accumulation_steps must be positive")
+    dataloader_batches = math.ceil(dataset_size / batch_size)
+    return max(math.ceil(dataloader_batches / gradient_accumulation_steps), 1)
+
+
 def parse_args():
     default_config = DSPRConfig()
 
@@ -128,6 +147,18 @@ def parse_args():
     parser.add_argument("--router_intermediate_dim", type=int, default=default_config.router_intermediate_dim)
     parser.add_argument("--router_dropout", type=float, default=default_config.router_dropout)
     parser.add_argument("--learning_rate", type=float, default=default_config.learning_rate)
+    parser.add_argument(
+        "--prefix_learning_rate",
+        type=float,
+        default=None,
+        help="Dual-prefix learning rate; defaults to --learning_rate.",
+    )
+    parser.add_argument(
+        "--router_learning_rate",
+        type=float,
+        default=None,
+        help="Router learning rate; defaults to --learning_rate.",
+    )
     parser.add_argument("--batch_size", type=int, default=default_config.batch_size)
     parser.add_argument("--num_epochs", type=int, default=default_config.num_epochs)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=default_config.gradient_accumulation_steps)
@@ -170,6 +201,12 @@ def parse_args():
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--trajectory_sampling",
+        choices=("flat", "random_one"),
+        default="flat",
+        help="Use all flattened trajectories or resample one trajectory per problem each sampling epoch.",
+    )
     parser.add_argument("--resume_trainable_checkpoint", type=str, default=None)
     return parser.parse_args()
 
@@ -179,6 +216,12 @@ def main():
 
     if args.warmup_steps < 0:
         raise ValueError("--warmup_steps must be non-negative")
+    if args.learning_rate <= 0.0:
+        raise ValueError("--learning_rate must be positive")
+    if args.prefix_learning_rate is not None and args.prefix_learning_rate <= 0.0:
+        raise ValueError("--prefix_learning_rate must be positive")
+    if args.router_learning_rate is not None and args.router_learning_rate <= 0.0:
+        raise ValueError("--router_learning_rate must be positive")
     if args.warmup_ratio is not None and not 0.0 <= args.warmup_ratio < 1.0:
         raise ValueError("--warmup_ratio must be in [0, 1)")
     if args.early_stopping_patience < 0:
@@ -189,6 +232,16 @@ def main():
     config_field_names = {f.name for f in fields(DSPRConfig)}
     config_kwargs = {k: v for k, v in vars(args).items() if k in config_field_names}
     config = DSPRConfig(**config_kwargs)
+    prefix_learning_rate = (
+        config.learning_rate
+        if args.prefix_learning_rate is None
+        else args.prefix_learning_rate
+    )
+    router_learning_rate = (
+        config.learning_rate
+        if args.router_learning_rate is None
+        else args.router_learning_rate
+    )
 
     # Set seed for reproducibility
     set_seed(config.seed)
@@ -199,7 +252,34 @@ def main():
 
     # Load datasets
     print("Loading datasets...")
-    train_dataset = DSPRDataset(config.train_data_path, model.tokenizer, config.max_seq_length)
+    flat_train_dataset = DSPRDataset(config.train_data_path, model.tokenizer, config.max_seq_length)
+    train_dataset = flat_train_dataset
+    resampled_dataset = None
+    flat_steps_per_epoch = update_steps_per_epoch(
+        len(flat_train_dataset),
+        config.batch_size,
+        config.gradient_accumulation_steps,
+    )
+    if args.trajectory_sampling == "random_one":
+        resampled_dataset = ProblemResampledDSPRDataset(
+            config.train_data_path,
+            model.tokenizer,
+            config.max_seq_length,
+            seed=config.seed,
+        )
+        train_dataset = resampled_dataset
+        print(
+            "Trajectory sampling: random_one "
+            f"({resampled_dataset.num_problems} problems, "
+            f"{resampled_dataset.num_trajectories} flat trajectories; "
+            "one trajectory per problem per sampling epoch)",
+            flush=True,
+        )
+    else:
+        print(
+            f"Trajectory sampling: flat ({len(flat_train_dataset)} trajectories)",
+            flush=True,
+        )
     val_dataset = DSPRDataset(config.val_data_path, model.tokenizer, config.max_seq_length)
 
     eval_strategy = "epoch" if len(val_dataset) > 0 else "no"
@@ -209,18 +289,35 @@ def main():
 
     warmup_ratio = args.warmup_ratio if args.warmup_ratio is not None else 0.0
     warmup_steps = 0 if args.warmup_ratio is not None else config.warmup_steps
+    max_steps = -1
+    if resampled_dataset is not None:
+        # The resampled dataloader has one item per problem, but the run keeps
+        # the same optimizer update budget as flat training.
+        max_steps = flat_steps_per_epoch * math.ceil(config.num_epochs)
+        if len(val_dataset) > 0:
+            # Evaluate/save at the same step cadence as one flat-data epoch.
+            eval_strategy = "steps"
+            save_strategy = "steps"
+        print(
+            f"Preserving flat training budget: {max_steps} optimizer steps "
+            f"({flat_steps_per_epoch} steps per flat-data epoch)",
+            flush=True,
+        )
     training_arg_kwargs = dict(
         output_dir=args.output_path,
-        learning_rate=config.learning_rate,
+        learning_rate=prefix_learning_rate,
         per_device_train_batch_size=config.batch_size,
         per_device_eval_batch_size=config.batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
         num_train_epochs=config.num_epochs,
+        max_steps=max_steps,
         warmup_steps=warmup_steps,
         warmup_ratio=warmup_ratio,
         max_grad_norm=config.max_grad_norm,
         logging_strategy="steps",
         logging_steps=args.logging_steps,
+        eval_steps=flat_steps_per_epoch if resampled_dataset is not None else None,
+        save_steps=flat_steps_per_epoch if resampled_dataset is not None else 500,
         save_strategy=save_strategy,
         save_total_limit=args.save_total_limit,
         load_best_model_at_end=(eval_strategy != "no"),
@@ -245,7 +342,12 @@ def main():
     training_arg_kwargs[strategy_argument] = eval_strategy
     training_args = TrainingArguments(**training_arg_kwargs)
 
-    callbacks = [TrainingHistoryCallback(write_train_log=not args.emit_progress_events)]
+    callbacks = [
+        TrainingHistoryCallback(
+            write_train_log=not args.emit_progress_events,
+            resampled_dataset=resampled_dataset,
+        )
+    ]
     if args.emit_progress_events:
         callbacks.append(ProgressEventCallback())
     if args.early_stopping_patience > 0:
@@ -265,7 +367,15 @@ def main():
         data_collator=default_data_collator,
         compute_metrics=compute_dspr_metrics if len(val_dataset) > 0 else None,
         lambda_router=config.lambda_router,
+        prefix_learning_rate=prefix_learning_rate,
+        router_learning_rate=router_learning_rate,
         callbacks=callbacks,
+    )
+
+    print(
+        "Learning rates: "
+        f"prefix={prefix_learning_rate:g}, router={router_learning_rate:g}",
+        flush=True,
     )
 
     if args.resume_trainable_checkpoint:

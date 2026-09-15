@@ -210,7 +210,13 @@ def build_train_command(
         str(args.save_total_limit),
         "--gradient_checkpointing",
         "--emit_progress_events",
+        "--trajectory_sampling",
+        args.trajectory_sampling,
     ]
+    if args.prefix_learning_rate is not None:
+        command.extend(["--prefix_learning_rate", str(args.prefix_learning_rate)])
+    if args.router_learning_rate is not None:
+        command.extend(["--router_learning_rate", str(args.router_learning_rate)])
     if args.warmup_ratio is None:
         command.extend(["--warmup_steps", str(args.warmup_steps)])
     else:
@@ -283,6 +289,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--router-intermediate-dim", type=int, default=256)
     parser.add_argument("--router-dropout", type=float, default=0.05)
     parser.add_argument("--learning-rate", type=float, default=4e-5)
+    parser.add_argument(
+        "--prefix-learning-rate",
+        type=float,
+        default=None,
+        help="Dual-prefix learning rate; defaults to --learning-rate.",
+    )
+    parser.add_argument(
+        "--router-learning-rate",
+        type=float,
+        default=None,
+        help="Router learning rate; defaults to --learning-rate.",
+    )
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-epochs", type=int, default=15)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
@@ -298,6 +316,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-seq-length", type=int, default=2048)
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--save-total-limit", type=int, default=3)
+    parser.add_argument(
+        "--trajectory-sampling",
+        choices=("flat", "random_one"),
+        default="flat",
+        help="Use all trajectories or resample one trajectory per problem each sampling epoch.",
+    )
     parser.add_argument(
         "--early-stopping-patience",
         type=int,
@@ -476,6 +500,12 @@ def main() -> int:
     args = parse_args()
     if args.warmup_steps < 0:
         raise ValueError("--warmup-steps must be non-negative")
+    if args.learning_rate <= 0.0:
+        raise ValueError("--learning-rate must be positive")
+    if args.prefix_learning_rate is not None and args.prefix_learning_rate <= 0.0:
+        raise ValueError("--prefix-learning-rate must be positive")
+    if args.router_learning_rate is not None and args.router_learning_rate <= 0.0:
+        raise ValueError("--router-learning-rate must be positive")
     if args.warmup_ratio is not None and not 0.0 <= args.warmup_ratio < 1.0:
         raise ValueError("--warmup-ratio must be in [0, 1)")
     if args.early_stopping_patience < 0:

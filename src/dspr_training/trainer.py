@@ -82,11 +82,81 @@ def _binary_router_metrics(alpha: np.ndarray, target_alpha: np.ndarray) -> dict[
 class DSPRTrainer(Trainer):
     """HuggingFace Trainer for DSPR model."""
 
-    def __init__(self, *args, lambda_router: float = 0.1, **kwargs):
+    def __init__(
+        self,
+        *args,
+        lambda_router: float = 0.1,
+        prefix_learning_rate: float | None = None,
+        router_learning_rate: float | None = None,
+        **kwargs,
+    ):
         self._train_diagnostics = _empty_diagnostic_accumulator()
         self._eval_diagnostics = _empty_diagnostic_accumulator()
         super().__init__(*args, **kwargs)
         self.loss_fn = DSPRLoss(lambda_router=lambda_router)
+        self.prefix_learning_rate = (
+            self.args.learning_rate if prefix_learning_rate is None else prefix_learning_rate
+        )
+        self.router_learning_rate = (
+            self.args.learning_rate if router_learning_rate is None else router_learning_rate
+        )
+
+    def create_optimizer(self):
+        """Build AdamW groups with independent prefix and router rates."""
+        if self.optimizer is not None:
+            return self.optimizer
+
+        opt_model = self.model
+        model_to_group = opt_model.module if hasattr(opt_model, "module") else opt_model
+        prefix_parameter_ids = {id(parameter) for parameter in model_to_group.dual_prefix.parameters()}
+        router_parameter_ids = {id(parameter) for parameter in model_to_group.router.parameters()}
+        decay_parameters = set(self.get_decay_parameter_names(opt_model))
+
+        grouped_parameters = []
+        group_specs = (
+            ("prefix", prefix_parameter_ids, self.prefix_learning_rate),
+            ("router", router_parameter_ids, self.router_learning_rate),
+        )
+        assigned_parameter_ids = prefix_parameter_ids | router_parameter_ids
+        for group_name, parameter_ids, learning_rate in group_specs:
+            for use_decay in (True, False):
+                parameters = [
+                    parameter
+                    for name, parameter in opt_model.named_parameters()
+                    if parameter.requires_grad
+                    and id(parameter) in parameter_ids
+                    and (name in decay_parameters) == use_decay
+                ]
+                if parameters:
+                    grouped_parameters.append(
+                        {
+                            "params": parameters,
+                            "lr": learning_rate,
+                            "weight_decay": self.args.weight_decay if use_decay else 0.0,
+                            "group_name": group_name,
+                        }
+                    )
+
+        other_parameters = [
+            parameter
+            for parameter in opt_model.parameters()
+            if parameter.requires_grad and id(parameter) not in assigned_parameter_ids
+        ]
+        if other_parameters:
+            grouped_parameters.append(
+                {
+                    "params": other_parameters,
+                    "lr": self.args.learning_rate,
+                    "weight_decay": self.args.weight_decay,
+                    "group_name": "other",
+                }
+            )
+
+        optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(self.args, opt_model)
+        optimizer_kwargs.pop("params", None)
+        optimizer_kwargs.pop("model", None)
+        self.optimizer = optimizer_cls(grouped_parameters, **optimizer_kwargs)
+        return self.optimizer
 
     @staticmethod
     def _accumulate_diagnostics(
@@ -158,6 +228,10 @@ class DSPRTrainer(Trainer):
                 "dual_prefix_state_dict": model_to_save.dual_prefix.state_dict(),
                 "router_state_dict": model_to_save.router.state_dict(),
                 "training_args": self.args.to_dict(),
+                "dspr_learning_rates": {
+                    "prefix": self.prefix_learning_rate,
+                    "router": self.router_learning_rate,
+                },
             },
             os.path.join(output_dir, "dspr_trainable.pt"),
         )
@@ -185,6 +259,15 @@ class DSPRTrainer(Trainer):
         if "loss" in logs or "train_loss" in logs:
             logs.update(self._summarize_diagnostics(self._train_diagnostics))
             self._train_diagnostics = _empty_diagnostic_accumulator()
+            if self.optimizer is not None:
+                group_rates = {
+                    group.get("group_name"): float(group["lr"])
+                    for group in self.optimizer.param_groups
+                }
+                if "prefix" in group_rates:
+                    logs["prefix_learning_rate"] = group_rates["prefix"]
+                if "router" in group_rates:
+                    logs["router_learning_rate"] = group_rates["router"]
 
         if start_time is None:
             super().log(logs)

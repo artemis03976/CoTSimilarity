@@ -9,9 +9,9 @@ class DSPRConfig:
     # Model architecture
     model_name: str = "Qwen/Qwen2.5-Math-7B-Instruct"
     context_layer_idx: int = 15
-    prefix_length: int = 50
-    router_intermediate_dim: int = 256
-    router_dropout: float = 0.05
+    prefix_length: int = 15
+    router_intermediate_dim: int = 64
+    router_dropout: float = 0.10
 
     # Training
     learning_rate: float = 4e-5

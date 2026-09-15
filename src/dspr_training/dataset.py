@@ -1,4 +1,5 @@
 ﻿import json
+import random
 import torch
 from torch.utils.data import Dataset
 
@@ -40,6 +41,11 @@ class DSPRDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
+
+        return self._encode_item(item)
+
+    def _encode_item(self, item):
+        """Tokenize and format one trajectory record."""
 
         # Format prompt — must match inference-time format exactly
         messages = [
@@ -89,3 +95,51 @@ class DSPRDataset(Dataset):
             'target_alpha': torch.tensor([item['target_alpha']], dtype=torch.float32),
             'variant_type': item['variant_type']
         }
+
+
+class ProblemResampledDSPRDataset(DSPRDataset):
+    """One randomly selected trajectory per problem for each sampling epoch.
+
+    The dataset length is the number of unique problems rather than the
+    number of flattened trajectories. The training entrypoint compensates for
+    this shorter sampling epoch with ``max_steps`` computed from the original
+    flat dataset, preserving the optimizer update budget.
+    """
+
+    def __init__(self, jsonl_path, tokenizer, max_length=2048, seed=42):
+        super().__init__(jsonl_path, tokenizer, max_length)
+        self.seed = int(seed)
+        self._groups = {}
+        for index, item in enumerate(self.data):
+            problem_id = str(item.get('problem_id'))
+            self._groups.setdefault(problem_id, []).append(index)
+        self._problem_ids = list(self._groups)
+        if not self._problem_ids:
+            raise ValueError('Cannot resample an empty DSPR dataset')
+        self._sampled_indices = []
+        self.set_epoch(0)
+
+    @property
+    def num_problems(self):
+        return len(self._problem_ids)
+
+    @property
+    def num_trajectories(self):
+        return len(self.data)
+
+    def __len__(self):
+        return self.num_problems
+
+    def set_epoch(self, epoch: int):
+        """Choose exactly one trajectory per problem deterministically."""
+        rng = random.Random(self.seed + int(epoch))
+        self._sampled_indices = [
+            rng.choice(self._groups[problem_id]) for problem_id in self._problem_ids
+        ]
+
+    def selected_indices(self):
+        """Return sampled flat-record indices for diagnostics and tests."""
+        return list(self._sampled_indices)
+
+    def __getitem__(self, idx):
+        return self._encode_item(self.data[self._sampled_indices[idx]])
