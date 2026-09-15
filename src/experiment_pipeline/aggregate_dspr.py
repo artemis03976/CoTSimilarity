@@ -179,6 +179,38 @@ def load_fold_expectations(id_root: Path) -> tuple[dict[int, set[int]], dict[str
     return fold_ids, eligible
 
 
+def resolve_eligible_count_expectations(
+    eligible: dict[str, set[int]],
+    requested: dict[str, int | None],
+) -> tuple[dict[str, int], dict[str, str]]:
+    """Infer eligibility counts from fold masks, with optional CLI assertions.
+
+    ``test_ids.json`` is the authoritative mask used by OOF evaluation.  The
+    command-line counts are therefore optional guards rather than a second
+    source of truth that callers must keep synchronized by hand.
+    """
+
+    resolved: dict[str, int] = {}
+    sources: dict[str, str] = {}
+    for variant in ("simple", "hard"):
+        actual_count = len(eligible[variant])
+        expected_count = requested.get(variant)
+        if expected_count is not None:
+            if expected_count < 0:
+                raise ValueError(f"Expected {variant} eligibility count cannot be negative")
+            if actual_count != expected_count:
+                raise ValueError(
+                    f"{variant} eligible count is {actual_count}; expected {expected_count}. "
+                    "Check the fold files or remove the explicit count to infer it "
+                    "from --id-root."
+                )
+            sources[variant] = "explicit_assertion_verified_against_id_root"
+        else:
+            sources[variant] = "inferred_from_id_root_test_ids"
+        resolved[variant] = actual_count
+    return resolved, sources
+
+
 def metric_for_variant(
     records: dict[int, dict[str, Any]], ids: Iterable[int], variant: str, source: str
 ) -> dict[str, Any]:
@@ -432,8 +464,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline", default=None, help="Optional matched baseline all_records.jsonl")
     parser.add_argument("--expected-samples", type=int, default=1, help="Use 0 to accept any positive sample count")
     parser.add_argument("--expected-problems", type=int, default=279)
-    parser.add_argument("--expected-simple-eligible", type=int, default=221)
-    parser.add_argument("--expected-hard-eligible", type=int, default=167)
+    parser.add_argument(
+        "--expected-simple-eligible",
+        type=int,
+        default=None,
+        help=(
+            "Optional consistency assertion. By default the count is inferred "
+            "from <id-root>/fold_*/test_ids.json."
+        ),
+    )
+    parser.add_argument(
+        "--expected-hard-eligible",
+        type=int,
+        default=None,
+        help=(
+            "Optional consistency assertion. By default the count is inferred "
+            "from <id-root>/fold_*/test_ids.json."
+        ),
+    )
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     parser.add_argument("--bootstrap-seed", type=int, default=42)
     return parser.parse_args()
@@ -465,16 +513,13 @@ def main() -> int:
         missing = sorted(all_ids - expected_all_ids)
         extra = sorted(expected_all_ids - all_ids)
         raise ValueError(f"Fold test universe differs from raw data: missing={missing}, extra={extra}")
-    expected_eligible_counts = {
-        "simple": args.expected_simple_eligible,
-        "hard": args.expected_hard_eligible,
-    }
-    for variant, expected_count in expected_eligible_counts.items():
-        if len(eligible[variant]) != expected_count:
-            raise ValueError(
-                f"{variant} eligible count is {len(eligible[variant])}; expected {expected_count}. "
-                "Check the fold files or override the expected count explicitly."
-            )
+    expected_eligible_counts, eligible_count_sources = resolve_eligible_count_expectations(
+        eligible,
+        {
+            "simple": args.expected_simple_eligible,
+            "hard": args.expected_hard_eligible,
+        },
+    )
 
     merged: dict[int, dict[str, Any]] = {}
     fold_counts: dict[str, int] = {}
@@ -563,6 +608,7 @@ def main() -> int:
             "expected_samples_per_variant": expected_sample_count,
             "expected_problem_count": args.expected_problems,
             "expected_eligible_counts": expected_eligible_counts,
+            "eligible_count_sources": eligible_count_sources,
         },
         "sources": {
             "result_root": str(result_root),

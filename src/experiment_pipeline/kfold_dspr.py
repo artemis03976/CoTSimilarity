@@ -39,9 +39,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from tqdm import tqdm
+
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-Math-7B-Instruct"
 DEFAULT_FOLDS = tuple(range(5))
+PROGRESS_EVENT_PREFIX = "__DSPR_TRAIN_PROGRESS__"
 
 
 def utc_now() -> str:
@@ -123,6 +126,19 @@ def resolve_path(repo_root: Path, value: str) -> Path:
     return path if path.is_absolute() else repo_root / path
 
 
+def parse_progress_event(line: str) -> dict[str, Any] | None:
+    stripped = line.strip()
+    if not stripped.startswith(PROGRESS_EVENT_PREFIX):
+        return None
+    try:
+        payload = json.loads(stripped[len(PROGRESS_EVENT_PREFIX) :])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
 @dataclass
 class FoldSpec:
     fold: int
@@ -137,6 +153,11 @@ class FoldSpec:
     finished_at: str | None = None
     return_code: int | None = None
     error: str | None = None
+    global_step: int | None = None
+    max_steps: int | None = None
+    termination: str | None = None
+    best_metric: float | None = None
+    best_model_checkpoint: str | None = None
 
 
 def build_train_command(
@@ -145,7 +166,7 @@ def build_train_command(
     args: argparse.Namespace,
 ) -> list[str]:
     """Build one structured subprocess argument list; no shell quoting needed."""
-    return [
+    command = [
         sys.executable,
         str(train_script),
         "dspr",
@@ -169,8 +190,6 @@ def build_train_command(
         str(args.gradient_accumulation_steps),
         "--max_grad_norm",
         str(args.max_grad_norm),
-        "--warmup_steps",
-        str(args.warmup_steps),
         "--lambda_router",
         str(args.lambda_router),
         "--train_data_path",
@@ -190,7 +209,22 @@ def build_train_command(
         "--save_total_limit",
         str(args.save_total_limit),
         "--gradient_checkpointing",
+        "--emit_progress_events",
     ]
+    if args.warmup_ratio is None:
+        command.extend(["--warmup_steps", str(args.warmup_steps)])
+    else:
+        command.extend(["--warmup_ratio", str(args.warmup_ratio)])
+    if args.early_stopping_patience > 0:
+        command.extend(
+            [
+                "--early_stopping_patience",
+                str(args.early_stopping_patience),
+                "--early_stopping_threshold",
+                str(args.early_stopping_threshold),
+            ]
+        )
+    return command
 
 
 def validate_inputs(
@@ -254,14 +288,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--warmup-steps", type=int, default=100)
+    parser.add_argument(
+        "--warmup-ratio",
+        type=float,
+        default=None,
+        help="Warmup fraction in [0, 1); replaces --warmup-steps when set.",
+    )
     parser.add_argument("--lambda-router", type=float, default=0.5)
     parser.add_argument("--max-seq-length", type=int, default=2048)
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--save-total-limit", type=int, default=3)
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=0,
+        help="Evaluations without improvement before stopping; 0 disables it.",
+    )
+    parser.add_argument("--early-stopping-threshold", type=float, default=0.0)
     return parser.parse_args()
 
 
-def run_fold(spec: FoldSpec, repo_root: Path, state_lock: threading.Lock) -> FoldSpec:
+def run_fold(
+    spec: FoldSpec,
+    repo_root: Path,
+    state_lock: threading.Lock,
+    progress_position: int,
+) -> FoldSpec:
     """Run one fold and persist a small status file alongside its log."""
     output_path = Path(spec.output_path)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -279,8 +331,10 @@ def run_fold(spec: FoldSpec, repo_root: Path, state_lock: threading.Lock) -> Fol
         spec.started_at = utc_now()
         write_json(output_path / "run_status.json", asdict(spec))
 
-    print(f"[fold {spec.fold}] starting on GPU {spec.gpu}", flush=True)
+    tqdm.write(f"[fold {spec.fold}] starting on GPU {spec.gpu}")
     started = time.monotonic()
+    progress_bar = None
+    last_progress_event: dict[str, Any] | None = None
     with log_path.open("w", encoding="utf-8", newline="") as log_handle:
         log_handle.write(f"Command: {json.dumps(spec.command, ensure_ascii=False)}\n")
         log_handle.write(f"CUDA_VISIBLE_DEVICES={spec.gpu}\n\n")
@@ -289,10 +343,71 @@ def run_fold(spec: FoldSpec, repo_root: Path, state_lock: threading.Lock) -> Fol
             spec.command,
             cwd=str(repo_root),
             env=env,
-            stdout=log_handle,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
         )
+        assert process.stdout is not None
+        for line in process.stdout:
+            event = parse_progress_event(line)
+            if event is None:
+                log_handle.write(line)
+                log_handle.flush()
+                continue
+
+            last_progress_event = event
+            spec.global_step = int(event.get("step", 0))
+            spec.max_steps = int(event.get("total_steps", 0))
+            spec.best_metric = event.get("best_metric")
+            spec.best_model_checkpoint = event.get("best_model_checkpoint")
+            if event.get("event") in {"early_stop", "complete"}:
+                spec.termination = (
+                    "early_stopping"
+                    if event.get("event") == "early_stop"
+                    else "completed"
+                )
+                log_handle.write(f"[progress] {line}")
+                log_handle.flush()
+
+            total_steps = max(int(event.get("total_steps", 0)), 0)
+            current_step = max(int(event.get("step", 0)), 0)
+            if progress_bar is None and total_steps > 0:
+                progress_bar = tqdm(
+                    total=total_steps,
+                    desc=f"fold {spec.fold} | GPU {spec.gpu}",
+                    unit="step",
+                    position=progress_position,
+                    leave=False,
+                    dynamic_ncols=True,
+                )
+            if progress_bar is not None:
+                progress_bar.update(max(0, min(current_step, progress_bar.total) - progress_bar.n))
+                epoch = event.get("epoch")
+                postfix = {}
+                if epoch is not None:
+                    postfix["epoch"] = f"{float(epoch):.2f}"
+                if event.get("event") == "early_stop":
+                    postfix["status"] = "early stop"
+                if postfix:
+                    progress_bar.set_postfix(postfix, refresh=False)
         return_code = process.wait()
+        log_handle.write(
+            "Child process exited: "
+            f"return_code={return_code}, "
+            f"termination={spec.termination or 'unknown'}, "
+            f"global_step={spec.global_step}, max_steps={spec.max_steps}\n"
+        )
+        if last_progress_event is not None:
+            log_handle.write(
+                "Final progress event: "
+                f"{json.dumps(last_progress_event, ensure_ascii=False)}\n"
+            )
+        log_handle.flush()
+    if progress_bar is not None:
+        progress_bar.close()
 
     with state_lock:
         spec.status = "succeeded" if return_code == 0 else "failed"
@@ -301,10 +416,10 @@ def run_fold(spec: FoldSpec, repo_root: Path, state_lock: threading.Lock) -> Fol
         write_json(output_path / "run_status.json", asdict(spec))
 
     elapsed = time.monotonic() - started
-    print(
+    tqdm.write(
         f"[fold {spec.fold}] {spec.status} on GPU {spec.gpu} "
-        f"(exit={return_code}, elapsed={elapsed / 3600:.2f}h)",
-        flush=True,
+        f"(exit={return_code}, termination={spec.termination or 'unknown'}, "
+        f"step={spec.global_step}/{spec.max_steps}, elapsed={elapsed / 3600:.2f}h)"
     )
     return spec
 
@@ -318,7 +433,7 @@ def run_dynamic_schedule(specs: list[FoldSpec], repo_root: Path, gpu_ids: list[s
     completed: list[FoldSpec] = []
     completed_lock = threading.Lock()
 
-    def worker(gpu: str) -> None:
+    def worker(gpu: str, progress_position: int) -> None:
         while True:
             try:
                 spec = pending.get_nowait()
@@ -330,7 +445,7 @@ def run_dynamic_schedule(specs: list[FoldSpec], repo_root: Path, gpu_ids: list[s
                 # is what prevents a fast worker from colliding with a slower
                 # worker on the same GPU.
                 spec.gpu = gpu
-                result = run_fold(spec, repo_root, state_lock)
+                result = run_fold(spec, repo_root, state_lock, progress_position)
             except Exception as exc:  # keep other GPUs/folds progressing
                 with state_lock:
                     spec.status = "failed"
@@ -338,7 +453,7 @@ def run_dynamic_schedule(specs: list[FoldSpec], repo_root: Path, gpu_ids: list[s
                     spec.error = repr(exc)
                     spec.finished_at = utc_now()
                     write_json(Path(spec.output_path) / "run_status.json", asdict(spec))
-                print(f"[fold {spec.fold}] failed before/during launch: {exc}", file=sys.stderr, flush=True)
+                tqdm.write(f"[fold {spec.fold}] failed before/during launch: {exc}", file=sys.stderr)
                 result = spec
             finally:
                 with completed_lock:
@@ -347,8 +462,8 @@ def run_dynamic_schedule(specs: list[FoldSpec], repo_root: Path, gpu_ids: list[s
 
     worker_count = min(len(gpu_ids), len(specs))
     threads = [
-        threading.Thread(target=worker, args=(gpu,), name=f"dSPR-gpu-{gpu}")
-        for gpu in gpu_ids[:worker_count]
+        threading.Thread(target=worker, args=(gpu, position), name=f"dSPR-gpu-{gpu}")
+        for position, gpu in enumerate(gpu_ids[:worker_count])
     ]
     for thread in threads:
         thread.start()
@@ -359,6 +474,14 @@ def run_dynamic_schedule(specs: list[FoldSpec], repo_root: Path, gpu_ids: list[s
 
 def main() -> int:
     args = parse_args()
+    if args.warmup_steps < 0:
+        raise ValueError("--warmup-steps must be non-negative")
+    if args.warmup_ratio is not None and not 0.0 <= args.warmup_ratio < 1.0:
+        raise ValueError("--warmup-ratio must be in [0, 1)")
+    if args.early_stopping_patience < 0:
+        raise ValueError("--early-stopping-patience must be non-negative")
+    if args.early_stopping_threshold < 0.0:
+        raise ValueError("--early-stopping-threshold must be non-negative")
     repo_root = Path(__file__).resolve().parents[2]
     folds = parse_fold_list(args.folds)
     gpu_ids = parse_gpu_list(args.gpus)

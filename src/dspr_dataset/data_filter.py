@@ -23,14 +23,17 @@ def load_ged_results(input_path: str) -> List[Dict]:
     return results
 
 
-def valid_correct_samples(samples: List[Dict]) -> List[Dict]:
-    """Return samples admitted by the shared GED curation protocol."""
+def valid_correct_samples(
+    samples: List[Dict],
+    score_field: str = 'ged',
+) -> List[Dict]:
+    """Return correct, non-timeout samples with a usable selection score."""
 
     return [
         sample
         for sample in samples
         if sample.get('correct')
-        and sample.get('ged') is not None
+        and sample.get(score_field) is not None
         and not sample.get('timed_out', False)
     ]
 
@@ -42,6 +45,8 @@ def build_eligibility_payload(
     min_ged_range: float,
     model_name: str | None = None,
     source_file: str | None = None,
+    score_field: str = 'ged',
+    min_correct_samples: int = 1,
 ) -> Dict:
     """Build the eligibility manifest consumed by k-fold construction."""
 
@@ -51,10 +56,12 @@ def build_eligibility_payload(
     intersection = simple & hard
     payload = {
         'ged_range_threshold': min_ged_range,
+        'score_field': score_field,
+        'min_correct_samples': min_correct_samples,
         'top_k': top_k,
         'comparison': (
-            'max(correct non-timeout GEDs) - min(correct non-timeout GEDs) '
-            '>= threshold'
+            f'max(correct non-timeout {score_field}) - '
+            f'min(correct non-timeout {score_field}) >= threshold'
         ),
         'total_problem_ids': len({result['problem_id'] for result in all_results}),
         'counts': {
@@ -89,6 +96,8 @@ def filter_trajectories_by_ged(
     eligibility_output_path: str | None = None,
     model_name: str | None = None,
     source_file: str | None = None,
+    score_field: str = 'ged',
+    min_correct_samples: int = 1,
 ) -> Dict:
     """
     Filter trajectories using GED to create D_reuse and D_adapt datasets.
@@ -98,12 +107,20 @@ def filter_trajectories_by_ged(
         output_path: Path to output filtered dataset
         top_k: Number of top samples to select per problem-variant (default: 5)
         min_ged_range: Minimum within-group GED range (default: 3.0)
+        score_field: Field used for range computation and ranking. The legacy
+            default is ``ged``; use ``ged_normalized`` for scale-free curation.
+        min_correct_samples: Minimum number of correct, non-timeout samples
+            required before applying the range test.
         eligibility_output_path: Optional k-fold eligibility manifest output
     """
     if top_k < 1:
         raise ValueError('top_k must be positive')
     if min_ged_range < 0:
         raise ValueError('min_ged_range must be non-negative')
+    if not score_field:
+        raise ValueError('score_field must be non-empty')
+    if min_correct_samples < 1:
+        raise ValueError('min_correct_samples must be positive')
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -119,6 +136,7 @@ def filter_trajectories_by_ged(
     stats = {
         'total_problem_variants': 0,
         'skipped_no_correct': 0,
+        'skipped_insufficient_correct': 0,
         'skipped_low_ged_range': 0,
         'selected': 0,
     }
@@ -130,16 +148,25 @@ def filter_trajectories_by_ged(
         stats['total_problem_variants'] += 1
 
         # Step 1: keep correct, non-timeout trajectories with a GED value.
-        correct_samples = valid_correct_samples(samples)
+        correct_samples = valid_correct_samples(samples, score_field=score_field)
 
         if not correct_samples:
             stats['skipped_no_correct'] += 1
             print(f"  Problem {problem_id} {variant}: No correct samples, skipped")
             continue
 
+        if len(correct_samples) < min_correct_samples:
+            stats['skipped_insufficient_correct'] += 1
+            print(
+                f"  Problem {problem_id} {variant}: Only "
+                f"{len(correct_samples)} correct samples "
+                f"(< {min_correct_samples}), skipped"
+            )
+            continue
+
         # Step 2: require the shared within-group GED range threshold.
-        geds = [s['ged'] for s in correct_samples]
-        ged_range = max(geds) - min(geds)
+        scores = [s[score_field] for s in correct_samples]
+        ged_range = max(scores) - min(scores)
 
         if ged_range < min_ged_range:
             stats['skipped_low_ged_range'] += 1
@@ -155,12 +182,12 @@ def filter_trajectories_by_ged(
         if variant == 'simple':
             sorted_samples = sorted(
                 correct_samples,
-                key=lambda x: (x['ged'], str(x.get('sample_id', ''))),
+                key=lambda x: (x[score_field], str(x.get('sample_id', ''))),
             )
         else:
             sorted_samples = sorted(
                 correct_samples,
-                key=lambda x: (-x['ged'], str(x.get('sample_id', ''))),
+                key=lambda x: (-x[score_field], str(x.get('sample_id', ''))),
             )
 
         selected = sorted_samples[:top_k]
@@ -173,6 +200,8 @@ def filter_trajectories_by_ged(
                 'variant_type': variant,
                 'target_alpha': 0.0 if variant == 'simple' else 1.0,
                 'ged_score': sample['ged'],
+                'selection_score': sample[score_field],
+                'selection_score_field': score_field,
                 'ged_normalized': sample.get('ged_normalized'),
                 'similarity_normalized': sample.get('similarity_normalized'),
                 'sample_id': sample['sample_id']
@@ -188,6 +217,8 @@ def filter_trajectories_by_ged(
         eligible,
         top_k,
         min_ged_range,
+        score_field=score_field,
+        min_correct_samples=min_correct_samples,
         model_name=model_name,
         source_file=source_file,
     )
@@ -202,7 +233,14 @@ def filter_trajectories_by_ged(
     print(f"\n=== DSPR Dataset Statistics ===")
     print(f"Total problem variants: {stats['total_problem_variants']}")
     print(f"Skipped (no correct): {stats['skipped_no_correct']}")
-    print(f"Skipped (GED range < {min_ged_range:g}): {stats['skipped_low_ged_range']}")
+    print(
+        f"Skipped (fewer than {min_correct_samples} correct): "
+        f"{stats['skipped_insufficient_correct']}"
+    )
+    print(
+        f"Skipped ({score_field} range < {min_ged_range:g}): "
+        f"{stats['skipped_low_ged_range']}"
+    )
     print(f"Selected samples: {stats['selected']}")
     print(f"Output: {output_path}")
     if eligibility_output_path:
@@ -237,6 +275,24 @@ def main():
         ),
     )
     parser.add_argument(
+        '--score-field',
+        choices=('ged', 'ged_normalized'),
+        default='ged',
+        help=(
+            'Field used for within-problem range and ranking. Use '
+            'ged_normalized for scale-free curation (default: ged).'
+        ),
+    )
+    parser.add_argument(
+        '--min-correct-samples',
+        type=int,
+        default=1,
+        help=(
+            'Minimum correct, non-timeout trajectories per problem-variant '
+            'before the range test (default: 1).'
+        ),
+    )
+    parser.add_argument(
         '--eligibility-output',
         help='Optional eligibility JSON used by k-fold construction',
     )
@@ -251,13 +307,17 @@ def main():
 
     print(
         f"\nFiltering with top_k={args.top_k}, "
-        f"min_ged_range={args.min_ged_range}..."
+        f"score_field={args.score_field}, "
+        f"min_range={args.min_ged_range}, "
+        f"min_correct_samples={args.min_correct_samples}..."
     )
     filter_trajectories_by_ged(
         all_results,
         output_path,
         top_k=args.top_k,
         min_ged_range=args.min_ged_range,
+        score_field=args.score_field,
+        min_correct_samples=args.min_correct_samples,
         eligibility_output_path=args.eligibility_output,
         model_name=args.model_name,
         source_file=args.input,

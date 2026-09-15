@@ -218,8 +218,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--expected-samples", type=int, default=1)
     parser.add_argument("--expected-problems", type=int, default=279)
-    parser.add_argument("--expected-simple-eligible", type=int, default=221)
-    parser.add_argument("--expected-hard-eligible", type=int, default=167)
+    parser.add_argument(
+        "--expected-simple-eligible",
+        type=int,
+        default=None,
+        help=(
+            "Optional consistency assertion. By default the count is inferred "
+            "from <id-root>/fold_*/test_ids.json."
+        ),
+    )
+    parser.add_argument(
+        "--expected-hard-eligible",
+        type=int,
+        default=None,
+        help=(
+            "Optional consistency assertion. By default the count is inferred "
+            "from <id-root>/fold_*/test_ids.json."
+        ),
+    )
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     parser.add_argument("--bootstrap-seed", type=int, default=42)
     return parser.parse_args()
@@ -242,15 +258,13 @@ def main() -> int:
         )
     if set().union(*fold_ids.values()) != all_ids:
         raise ValueError("Fold test universe differs from raw data")
-    expected_eligible = {
-        "simple": args.expected_simple_eligible,
-        "hard": args.expected_hard_eligible,
-    }
-    for variant, count in expected_eligible.items():
-        if len(eligible[variant]) != count:
-            raise ValueError(
-                f"{variant} eligible count is {len(eligible[variant])}; expected {count}"
-            )
+    expected_eligible, eligible_count_sources = common.resolve_eligible_count_expectations(
+        eligible,
+        {
+            "simple": args.expected_simple_eligible,
+            "hard": args.expected_hard_eligible,
+        },
+    )
 
     merged: dict[int, dict[str, Any]] = {}
     fold_counts: dict[str, int] = {}
@@ -323,6 +337,8 @@ def main() -> int:
                 variant: len(all_ids - ids) for variant, ids in eligible.items()
             },
             "expected_samples_per_variant": expected_samples,
+            "expected_eligible_counts": expected_eligible,
+            "eligible_count_sources": eligible_count_sources,
         },
         "sources": {
             "result_root": str(result_root),

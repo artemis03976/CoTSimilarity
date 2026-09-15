@@ -99,6 +99,17 @@ def load_eligibility(path: Path, raw_ids: set[int]) -> dict[str, set[int]]:
     return result
 
 
+def load_eligibility_payload(path: Path) -> dict[str, Any]:
+    """Load the full manifest so the fold manifest records its protocol."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid eligibility JSON {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Eligibility manifest must be an object: {path}")
+    return payload
+
+
 def build_labels(
     raw_ids: Iterable[int],
     metadata: dict[int, dict[str, Any]],
@@ -393,9 +404,25 @@ def main() -> None:
     }
     metadata = load_raw_metadata(raw_records)
     raw_ids = sorted(metadata)
+    eligibility_paths = {
+        "qwen": Path(args.qwen_eligibility),
+        "deepseek": Path(args.deepseek_eligibility),
+    }
+    eligibility_payloads = {
+        model: load_eligibility_payload(path)
+        for model, path in eligibility_paths.items()
+    }
+    protocol_keys = ("score_field", "ged_range_threshold", "min_correct_samples", "top_k")
+    qwen_protocol = tuple(eligibility_payloads["qwen"].get(key) for key in protocol_keys)
+    deepseek_protocol = tuple(eligibility_payloads["deepseek"].get(key) for key in protocol_keys)
+    if qwen_protocol != deepseek_protocol:
+        raise ValueError(
+            "Qwen and DeepSeek eligibility manifests use different protocols: "
+            f"qwen={qwen_protocol}, deepseek={deepseek_protocol}"
+        )
     eligibility = {
-        "qwen": load_eligibility(Path(args.qwen_eligibility), set(raw_ids)),
-        "deepseek": load_eligibility(Path(args.deepseek_eligibility), set(raw_ids)),
+        model: load_eligibility(path, set(raw_ids))
+        for model, path in eligibility_paths.items()
     }
     labels = build_labels(raw_ids, metadata, eligibility)
     outer_assignment = balanced_assign(raw_ids, labels, args.k, args.seed)
@@ -462,11 +489,24 @@ def main() -> None:
             "val": (1 - 1 / args.k) / args.validation_buckets,
             "test": 1 / args.k,
         },
-        "eligibility_threshold": 3.0,
-        "eligibility_definition": "max(correct valid GEDs) - min(correct valid GEDs) >= 3",
+        # Keep the selected protocol explicit.  This is read from the
+        # manifests rather than hard-coded so normalized-GED and legacy raw-GED
+        # runs cannot be mislabeled in the fold metadata.
+        "eligibility_protocols": {
+            model: {
+                "score_field": payload.get("score_field", "ged"),
+                "range_threshold": payload.get("ged_range_threshold"),
+                "min_correct_samples": payload.get("min_correct_samples", 1),
+                "top_k": payload.get("top_k"),
+                "comparison": payload.get("comparison"),
+            }
+            for model, payload in eligibility_payloads.items()
+        },
+        "eligibility_threshold": eligibility_payloads["qwen"].get("ged_range_threshold"),
+        "eligibility_definition": eligibility_payloads["qwen"].get("comparison"),
         "eligibility_sources": {
-            "qwen": str(Path(args.qwen_eligibility)),
-            "deepseek": str(Path(args.deepseek_eligibility)),
+            "qwen": str(eligibility_paths["qwen"]),
+            "deepseek": str(eligibility_paths["deepseek"]),
         },
         "refined_sources": {
             "qwen": str(Path(args.qwen_refined)),
