@@ -42,6 +42,14 @@ in `utils/visualization/dag_records.py` and use the same annotation validator.
 
 ## Entry Points
 
+- `MODEL=ep-xxxxxxxx bash scripts/run_dag_analysis.sh`: run normal annotation
+  with Volcengine, the 51-chain subset, eight workers, and one retry per chain.
+  Override `PYTHON`, `PROVIDER`, `MODEL`, `RAW_INPUT`, `OUTPUT_DIR`, `CONCURRENCY`,
+  or `MAX_RETRIES` as environment variables; additional CLI arguments such as
+  `--resume` are forwarded to the Python entrypoint. Exported `LLM_MODEL` is also
+  accepted when `MODEL` is unset. Credentials and base URL use the existing
+  `.env` configuration (`VOLCENGINE_API_KEY` / `VOLCENGINE_BASE_URL`, or the
+  generic `LLM_API_KEY` / `LLM_BASE_URL`).
 - `python scripts/run_dag_analysis.py --mode normal ...`: annotate normally;
   add `--resume` to reuse successful sample checkpoints and retry failed samples.
 - `python scripts/run_dag_analysis.py --mode batch ...`: prepare requests.
