@@ -50,11 +50,17 @@ Most workflows are driven by scripts under `scripts/`, with reusable implementat
 
 - `cot_segmenter.py`: segments chain-of-thought responses into reasoning units.
 - `scripts/run_dag_analysis.py`: shared input resolution and CLI for DAG extraction.
-- `dag_normal.py` / `dag_batch.py`: normal and batch DAG modes.
-- `dag_compressor.py`: normalizes and compresses DAG representations.
-- `dag_similarity.py`: computes graph-level similarity and GED.
-- `ged_analysis.py`: joins DAG similarity with answer correctness to produce records for DSPR dataset construction.
-- `llm/`: provider-agnostic API and batch-processing helpers used by DAG analysis.
+- `scripts/run_ged_analysis.py`: GED CLI, graph preparation, and worker execution.
+- `annotation/`: shared prompts and validation, normal requests, and batch preparation/merging.
+- `graph/`: graph construction, compression, and prepared graph/embedding caches.
+- `metrics/`: graph edit distance and node-text encoding.
+- `measurement/`: joins GED with correctness, saves checkpoints, and exports results.
+- `records.py`, `schemas.py`, and `config.py`: record adaptation, sample identities, and configuration.
+- `src/utils/io.py`, `artifacts.py`, and `env.py`: common file I/O, content fingerprints, and environment loading.
+
+The processing order remains segmentation, DAG annotation, graph compression and
+text encoding, GED comparison, then DSPR dataset filtering. See
+[`src/data_analysis/README.md`](src/data_analysis/README.md) for module boundaries.
 
 `src/spt/` and `src/spt_training/` implement the Static Prompt Tuning baseline, which uses the same frozen LLM and DSPR dataset format but replaces dynamic routing with one static learned prefix.
 
@@ -233,8 +239,9 @@ python scripts/run_dag_analysis.py \
 
 This single command segments every CoT, saves the reusable cache at
 `output/qwen-2.5/dag_analysis_50/segmented_records.jsonl`, and then creates the
-provider-ready file under `dag_analysis_50/batch/`. A cache newer than the raw
-input is reused automatically. Pass `--refresh-segment-cache` to regenerate it,
+provider-ready file under `dag_analysis_50/batch/`. A cache matching the input
+content and segmentation settings is reused automatically.
+Pass `--refresh-segment-cache` to regenerate it,
 or `--segmented-cache <path>` to choose another cache location.
 
 The standalone `cot_segmenter.py` entrypoint remains available when only
@@ -262,7 +269,7 @@ output/qwen-2.5/dag_analysis_50/analyzed_records.jsonl
 ### 4. Compute GED Records
 
 ```bash
-python src/data_analysis/ged_analysis.py \
+python scripts/run_ged_analysis.py \
   --output-root "output/qwen-2.5" \
   --variant-records "output/qwen-2.5/dag_analysis_50/analyzed_records.jsonl" \
   --correctness-file "output/qwen-2.5/multiple_seed42/all_records.jsonl" \
@@ -270,7 +277,7 @@ python src/data_analysis/ged_analysis.py \
   --all-results-output "output/qwen-2.5/all_ged_results.jsonl"
 ```
 
-By default, `ged_analysis.py` uses each problem's `original_0` response as the GED reference graph. For older workflows where original and variant DAG records are stored separately, pass `--original-records` explicitly.
+By default, `run_ged_analysis.py` uses each problem's `original_0` response as the GED reference graph. For older workflows where original and variant DAG records are stored separately, pass `--original-records` explicitly.
 
 The first run associates every DAG node with its original segmented CoT span,
 compresses the graph, and encodes compressed-node text with
@@ -514,5 +521,5 @@ For new contributors, the fastest way to understand the code is:
 1. `scripts/run_dspr_pipeline.sh` for the high-level workflow.
 2. `src/dspr/config.py` and `src/dspr/model.py` for the model interface.
 3. `src/dspr_training/dataset.py`, `loss.py`, and `trainer.py` for training behavior.
-4. `src/data_analysis/ged_analysis.py` and `src/dspr_dataset/data_filter.py` for dataset construction.
+4. `src/data_analysis/measurement/` and `src/dspr_dataset/data_filter.py` for dataset construction.
 5. `scripts/inference.py`, `scripts/evaluate.py`, and `src/utils/calculate_accuracy.py` for evaluation.

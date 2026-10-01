@@ -4,11 +4,11 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
+from itertools import islice
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -19,13 +19,15 @@ from data_analysis.cot_segmenter import (  # noqa: E402
     MIN_STEP_LENGTH,
     segment_jsonl_file,
 )
-from data_analysis.dag_batch import merge_batch_results, process_batch_mode  # noqa: E402
-from data_analysis.dag_normal import (  # noqa: E402
+from data_analysis.annotation.batch import merge_batch_results, process_batch_mode  # noqa: E402
+from data_analysis.annotation.normal import (  # noqa: E402
     DEFAULT_CONCURRENCY,
     DEFAULT_MAX_RETRIES,
     process_normal_mode,
 )
-from data_analysis.llm.config import LLMConfig  # noqa: E402
+from data_analysis.config import LLMConfig  # noqa: E402
+from utils.artifacts import file_identity, fingerprint  # noqa: E402
+from utils.io import read_jsonl, read_manifest, write_json  # noqa: E402
 
 
 logging.basicConfig(
@@ -36,18 +38,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_DIR = "output/dag_analysis"
 DEFAULT_VARIANTS = ["original", "simple", "hard"]
-
-
-def load_records(input_path: str, limit: Optional[int] = None) -> List[Dict]:
-    """Load segmented records from a JSONL file."""
-    records = []
-    with open(input_path, "r", encoding="utf-8") as input_file:
-        for line in input_file:
-            records.append(json.loads(line))
-            if limit and len(records) >= limit:
-                break
-    logger.info("Loaded %s records from %s", len(records), input_path)
-    return records
 
 
 def resolve_segmented_input(
@@ -84,10 +74,18 @@ def resolve_segmented_input(
     if raw_path.resolve() == cache_path.resolve():
         raise ValueError("Segmented cache must not overwrite the raw input")
 
+    manifest_path = cache_path.with_suffix(".config.json")
+    signature = fingerprint({
+        "input": file_identity(raw_path),
+        "threshold": segment_threshold,
+        "min_step": segment_min_step,
+        "segmenter": file_identity(REPO_ROOT / "src/data_analysis/cot_segmenter.py")["sha256"],
+    })
+    manifest = read_manifest(manifest_path)
     cache_is_fresh = (
         cache_path.is_file()
-        and cache_path.stat().st_size > 0
-        and cache_path.stat().st_mtime_ns >= raw_path.stat().st_mtime_ns
+        and manifest.get("signature") == signature
+        and manifest.get("output") == file_identity(cache_path)
     )
     if refresh_cache or not cache_is_fresh:
         reason = "explicit refresh" if refresh_cache else "missing or stale cache"
@@ -98,6 +96,7 @@ def resolve_segmented_input(
             threshold=segment_threshold,
             min_step=segment_min_step,
         )
+        write_json(manifest_path, {"signature": signature, "output": file_identity(cache_path)})
         logger.info(
             "Segmented %s responses into %s steps (%.1f per response)",
             summary["samples"],
@@ -173,6 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--batch-results-file",
         help="Downloaded batch results JSONL file (for --mode merge-batch)",
     )
+    parser.add_argument("--resume", action="store_true", help="Reuse successful normal-mode sample checkpoints")
     parser.add_argument(
         "--provider",
         default="deepseek",
@@ -205,6 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--variants",
         nargs="+",
+        choices=DEFAULT_VARIANTS,
         default=DEFAULT_VARIANTS,
         help="Which variants to process",
     )
@@ -214,6 +215,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.resume and args.mode != "normal":
+        parser.error("--resume is only supported in normal mode")
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit must be positive")
     output_dir = Path(args.output_dir)
     try:
         segmented_input = resolve_segmented_input(
@@ -228,7 +233,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
 
-    records = load_records(str(segmented_input), args.limit)
+    records = list(islice(read_jsonl(segmented_input), args.limit))
+    logger.info("Loaded %s records from %s", len(records), segmented_input)
     config = LLMConfig(provider=args.provider, model=args.model)
 
     if args.mode == "normal":
@@ -239,6 +245,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             args.variants,
             concurrency=args.concurrency,
             max_retries=args.max_retries,
+            resume=args.resume,
         )
     elif args.mode == "batch":
         process_batch_mode(

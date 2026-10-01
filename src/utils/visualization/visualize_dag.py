@@ -6,11 +6,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import html
 import sys
-import re
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from data_analysis.dag_compressor import build_digraph_with_tags, compress_dag_combined
-from utils import extract_numeric_id, sort_records
+from utils import sort_records
+from utils.io import atomic_text
 from utils.web_report import (
     build_common_css,
     build_navigation_html,
@@ -22,234 +21,7 @@ from utils.web_report import (
 )
 
 
-def compress_dag_analysis(dag_analysis: List[Dict], exclude_external: bool = False) -> List[Dict]:
-    """Compress dag_analysis using serial absorption and return simplified structure.
-
-    Args:
-        dag_analysis: Original list of dependency objects
-        exclude_external: Whether to exclude External nodes
-
-    Returns:
-        Compressed dag_analysis list with merged step IDs in labels
-    """
-    if not dag_analysis or len(dag_analysis) == 0:
-        return dag_analysis
-
-    try:
-        G = build_digraph_with_tags(dag_analysis, exclude_external=exclude_external)
-        G_compressed, stats = compress_dag_combined(G, merge_metadata=True)
-    except Exception as e:
-        print(f"Warning: Compression failed, using original: {e}")
-        return dag_analysis
-
-    # Build compressed dag_analysis from the compressed graph
-    compressed = []
-    for node in sorted(n for n in G_compressed.nodes if isinstance(n, int) and n > 0):
-        attrs = G_compressed.nodes[node]
-        tag = attrs.get('macro_action_tag', '')
-        absorbed = attrs.get('absorbed_nodes', [])
-
-        # Build merged ID label: e.g. "1,2,3" if node 1 absorbed 2 and 3
-        all_ids = sorted([node] + absorbed)
-        merged_label = ",".join(str(i) for i in all_ids)
-
-        # Collect dependencies from compressed graph predecessors
-        depends_on = []
-        for pred in G_compressed.predecessors(node):
-            if pred == "External":
-                depends_on.append("External")
-            else:
-                depends_on.append(pred)
-
-        compressed.append({
-            "step_id": node,
-            "merged_ids": all_ids,
-            "merged_label": merged_label,
-            "macro_action_tag": tag or "N/A",
-            "depends_on": depends_on,
-            "analysis": attrs.get('analysis', ''),
-        })
-
-    # Check if External node exists in compressed graph
-    has_external = "External" in G_compressed.nodes
-
-    return compressed
-
-
-def extract_dag_from_batch_response(response_data: Dict) -> Optional[List[Dict]]:
-    """Extract DAG analysis from batch inference response format.
-
-    Args:
-        response_data: Raw response data that may be in batch format
-
-    Returns:
-        Parsed DAG analysis list, or None if extraction fails
-    """
-    try:
-        # Check if this is batch inference format
-        if "response" in response_data and "body" in response_data["response"]:
-            # Extract content from batch response
-            content = response_data["response"]["body"]["choices"][0]["message"]["content"]
-
-            # Parse the JSON content (it's a string containing JSON)
-            # Remove markdown code blocks if present
-            content = content.strip()
-            if content.startswith("```json"):
-                content = content[7:]  # Remove ```json
-            if content.startswith("```"):
-                content = content[3:]  # Remove ```
-
-            # Find the end of the JSON array
-            # Look for the closing bracket followed by optional whitespace and ```
-            import re
-            # Match JSON array and stop at the first complete array
-            match = re.search(r'(\[[\s\S]*?\])\s*```?', content)
-            if match:
-                content = match.group(1)
-            else:
-                # Try without the ``` at the end
-                match = re.search(r'(\[[\s\S]*?\])', content)
-                if match:
-                    content = match.group(1)
-                else:
-                    # Check if the array is incomplete (truncated response)
-                    if content.strip().startswith('[') and not content.strip().endswith(']'):
-                        # Try to fix by adding closing bracket
-                        content = content.strip()
-                        # Remove any incomplete object at the end
-                        last_complete = content.rfind('},')
-                        if last_complete > 0:
-                            content = content[:last_complete + 1] + '\n]'
-                        else:
-                            # No complete objects found
-                            return None
-                    else:
-                        # Just try to find the end of array
-                        if content.endswith("```"):
-                            content = content[:-3]
-                        content = content.strip()
-
-            # Parse the JSON using a more robust approach
-            # Try to find the JSON array boundaries
-            decoder = json.JSONDecoder()
-            try:
-                dag_analysis, _ = decoder.raw_decode(content)
-                return dag_analysis
-            except json.JSONDecodeError:
-                # Fallback to simple parse
-                dag_analysis = json.loads(content)
-                return dag_analysis
-        else:
-            # Already in the correct format
-            return response_data
-    except (KeyError, json.JSONDecodeError, IndexError):
-        # Silently return None for unparseable responses
-        return None
-
-
-def compress_dag_analysis(dag_analysis: List[Dict], exclude_external: bool = False) -> List[Dict]:
-    """Compress dag_analysis using serial absorption and return simplified structure.
-
-    Args:
-        dag_analysis: Original list of dependency objects
-        exclude_external: Whether to exclude External nodes
-
-    Returns:
-        Compressed dag_analysis list with merged step IDs in labels
-    """
-    if not dag_analysis or len(dag_analysis) == 0:
-        return dag_analysis
-
-    try:
-        G = build_digraph_with_tags(dag_analysis, exclude_external=exclude_external)
-        G_compressed, stats = compress_dag_combined(G, merge_metadata=True)
-    except Exception as e:
-        print(f"Warning: Compression failed, using original: {e}")
-        return dag_analysis
-
-    compressed = []
-    for node in sorted(n for n in G_compressed.nodes if isinstance(n, int) and n > 0):
-        attrs = G_compressed.nodes[node]
-        tag = attrs.get('macro_action_tag', '')
-        absorbed = attrs.get('absorbed_nodes', [])
-
-        all_ids = sorted([node] + absorbed)
-        merged_label = ",".join(str(i) for i in all_ids)
-
-        depends_on = []
-        for pred in G_compressed.predecessors(node):
-            if pred == "External":
-                depends_on.append("External")
-            else:
-                depends_on.append(pred)
-
-        compressed.append({
-            "step_id": node,
-            "merged_ids": all_ids,
-            "merged_label": merged_label,
-            "macro_action_tag": tag or "N/A",
-            "depends_on": depends_on,
-            "analysis": attrs.get('analysis', ''),
-        })
-
-    return compressed
-
-
-def load_analyzed_records(input_path: str) -> List[Dict]:
-    """Load analyzed records from JSONL file and clean batch inference format."""
-    records = []
-    with open(input_path, "r", encoding="utf-8") as f:
-        for line_num, line in enumerate(f, 1):
-            try:
-                raw_record = json.loads(line)
-
-                if "custom_id" in raw_record and "response" in raw_record:
-                    custom_id = raw_record["custom_id"]
-                    # Support both "problem_variant" and "problem_variant_sampleIdx".
-                    match = re.match(r"^(?P<problem_id>.+?)_(?P<variant>original|simple|hard)(?:_(?P<sample_idx>\d+))?$", custom_id)
-                    if not match:
-                        print(f"Warning: Invalid custom_id format at line {line_num}: {custom_id}")
-                        continue
-                    problem_id = match.group("problem_id")
-                    variant = match.group("variant")
-
-                    dag_analysis = extract_dag_from_batch_response(raw_record)
-
-                    if dag_analysis is None:
-                        print(f"Warning: Failed to extract DAG for {custom_id} at line {line_num}")
-                        continue
-
-                    record = None
-                    for r in records:
-                        if r.get("problem_id") == problem_id:
-                            record = r
-                            break
-
-                    if record is None:
-                        record = {
-                            "problem_id": problem_id,
-                            "type": "Unknown",
-                            "level": "Unknown"
-                        }
-                        records.append(record)
-
-                    record[variant] = {
-                        "dag_analysis": dag_analysis,
-                        "problem": f"Problem {problem_id} ({variant} variant)",
-                        "steps": [],
-                        "num_steps": len(dag_analysis) if dag_analysis else 0
-                    }
-                else:
-                    records.append(raw_record)
-
-            except json.JSONDecodeError as e:
-                print(f"Warning: Failed to parse JSON at line {line_num}: {e}")
-                continue
-            except Exception as e:
-                print(f"Warning: Error processing line {line_num}: {e}")
-                continue
-
-    return records
+from utils.visualization.dag_records import compress_dag_analysis, load_analyzed_records
 
 
 def generate_dag_graph(dag_analysis: List[Dict]) -> str:
@@ -466,6 +238,9 @@ def generate_html_with_js(stats: Dict, records_json: str) -> str:
         async function renderRecord(index) {{
             const record = allRecords[index];
             const problemId = record.problem_id;
+            const sampleIndex = record.sample_index ?? 0;
+            const variants = ['original', 'simple', 'hard'].filter(name => record[name]);
+            const firstVariant = variants[0];
             const problemType = escapeHtml(record.type || 'Unknown');
             const level = escapeHtml(record.level || 'Unknown');
 
@@ -474,22 +249,20 @@ def generate_html_with_js(stats: Dict, records_json: str) -> str:
                 <div class="record">
                     <div class="record-header">
                         <div>
-                            <span class="record-title">Problem ${{problemId}}</span>
+                            <span class="record-title">Problem ${{problemId}} / Sample ${{sampleIndex}}</span>
                             <span class="badge variant">${{problemType}}</span>
                             <span class="badge variant">${{level}}</span>
                         </div>
                     </div>
                     <div class="tabs">
-                        <button class="tab active" onclick="showTab(event, 'original')">Original</button>
-                        <button class="tab" onclick="showTab(event, 'simple')">Simple</button>
-                        <button class="tab" onclick="showTab(event, 'hard')">Hard</button>
+                        ${{variants.map(name => `<button class="tab ${{name === firstVariant ? 'active' : ''}}" onclick="showTab(event, '${{name}}')">${{name[0].toUpperCase() + name.slice(1)}}</button>`).join('')}}
                     </div>
             `;
 
-            ['original', 'simple', 'hard'].forEach((variantName, idx) => {{
+            variants.forEach(variantName => {{
                 if (record[variantName]) {{
                     const entry = record[variantName];
-                    const isActive = idx === 0 ? 'active' : '';
+                    const isActive = variantName === firstVariant ? 'active' : '';
 
                     html += `<div id="${{variantName}}" class="tab-content ${{isActive}}">`;
 
@@ -647,7 +420,7 @@ def generate_html_report(
     # Use string concatenation to avoid f-string escaping issues with JavaScript
     html_content = generate_html_with_js(stats, records_json)
 
-    with open(output_path, "w", encoding="utf-8") as f:
+    with atomic_text(output_path) as f:
         f.write(html_content)
 
     print(f"HTML report generated: {output_path}")

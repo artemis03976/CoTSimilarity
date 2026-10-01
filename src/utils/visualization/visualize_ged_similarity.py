@@ -4,13 +4,13 @@ import json
 import argparse
 import csv
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-import html
+from typing import Dict, List, Optional
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from data_analysis.dag_compressor import build_digraph_with_tags, compress_dag_combined
 from utils import extract_numeric_id
+from utils.io import atomic_text
+from utils.visualization.dag_records import compress_dag_analysis, load_segmented_records, load_dag_analysis
 from utils.web_report import (
     build_common_css,
     build_navigation_html,
@@ -93,117 +93,6 @@ def build_output_path(base_output: str, comparison: str, category: str) -> str:
     return str(output_path.with_name(filename))
 
 
-def load_segmented_records(jsonl_path: str, problem_ids: List[str]) -> Dict[str, Dict]:
-    """Load segmented records for specific problem IDs."""
-    records = {}
-    problem_id_set = set(problem_ids)
-
-    with open(jsonl_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            if not line.strip():
-                continue
-            record = json.loads(line)
-            pid = str(record.get('problem_id', ''))
-            if pid in problem_id_set:
-                records[pid] = record
-
-    return records
-
-
-def extract_dag_from_batch_response(response_data: Dict) -> Optional[List[Dict]]:
-    """Extract DAG analysis from batch inference response format."""
-    try:
-        content = response_data.get("response", {}).get("body", {}).get("choices", [{}])[0].get("message", {}).get("content", "")
-
-        if not content:
-            return None
-
-        import re
-        content = re.sub(r'^```json\s*', '', content, flags=re.MULTILINE)
-        content = re.sub(r'\s*```$', '', content, flags=re.MULTILINE)
-        content = content.strip()
-
-        if not content:
-            return None
-
-        dag_analysis = json.loads(content)
-        if isinstance(dag_analysis, list):
-            return dag_analysis
-
-        return None
-    except Exception:
-        return None
-
-
-def load_dag_analysis(jsonl_path: str, problem_ids: List[str]) -> Dict[str, Dict]:
-    """Load DAG analysis from batch format analyzed_records.jsonl."""
-    dag_data = {}
-    problem_id_set = set(problem_ids)
-
-    with open(jsonl_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            if not line.strip():
-                continue
-            record = json.loads(line)
-
-            custom_id = record.get('custom_id', '')
-            parts = custom_id.rsplit('_', 1)
-            if len(parts) != 2:
-                continue
-
-            problem_id, variant = parts
-            if problem_id not in problem_id_set:
-                continue
-
-            dag_analysis = extract_dag_from_batch_response(record)
-            if dag_analysis:
-                if problem_id not in dag_data:
-                    dag_data[problem_id] = {}
-                dag_data[problem_id][variant] = dag_analysis
-
-    return dag_data
-
-
-def compress_dag_analysis(dag_analysis: List[Dict]) -> List[Dict]:
-    """Compress DAG and return simplified structure for visualization."""
-    if not dag_analysis:
-        return dag_analysis
-
-    try:
-        G = build_digraph_with_tags(dag_analysis, exclude_external=False)
-        G_compressed, stats = compress_dag_combined(G, merge_metadata=True)
-    except Exception as e:
-        print(f"Warning: Compression failed: {e}")
-        return dag_analysis
-
-    compressed = []
-    for node in sorted(n for n in G_compressed.nodes if isinstance(n, int) and n > 0):
-        attrs = G_compressed.nodes[node]
-        tag = attrs.get('macro_action_tag', '')
-        absorbed = attrs.get('absorbed_nodes', [])
-
-        all_ids = sorted([node] + absorbed)
-        merged_label = ",".join(str(i) for i in all_ids)
-
-        depends_on = []
-        for pred in G_compressed.predecessors(node):
-            if pred == "External":
-                depends_on.append("External")
-            else:
-                depends_on.append(pred)
-
-        compressed.append({
-            "step_id": node,
-            "merged_ids": all_ids,
-            "merged_label": merged_label,
-            "macro_action_tag": tag or "N/A",
-            "depends_on": depends_on,
-            "analysis": attrs.get('analysis', ''),
-        })
-
-    return compressed
-
-
 def generate_html_report(records: List[Dict], output_path: str, comparison: str, category: str):
     """Generate HTML report for GED similarity examples."""
 
@@ -270,7 +159,7 @@ def generate_html_report(records: List[Dict], output_path: str, comparison: str,
         {shared_escape_html_js}
         {shared_dag_js}"""
 
-    with open(output_path, 'w', encoding='utf-8') as f:
+    with atomic_text(output_path) as f:
         f.write(html_content)
         f.write("""
 

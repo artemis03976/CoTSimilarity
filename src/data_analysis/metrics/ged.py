@@ -5,82 +5,17 @@ graphs are structurally closer. Insertions/deletions use unit costs, while node
 substitution combines semantic-role mismatch and compressed-node text cosine.
 """
 
-import json
 import logging
 import time
-import re
 import signal
 import threading
 from functools import partial
-from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Dict, Optional
 
 import networkx as nx
 import numpy as np
 
 logger = logging.getLogger(__name__)
-
-
-def extract_dag_from_batch_response(response_data: Dict) -> Optional[List[Dict]]:
-    """Extract DAG analysis from a provider batch-response object.
-
-    LLM batch outputs often wrap the actual JSON in markdown fences or may be
-    truncated. This helper performs conservative cleanup before parsing.
-    """
-    try:
-        content = response_data.get("response", {}).get("body", {}).get("choices", [{}])[0].get("message", {}).get("content", "")
-        if not content:
-            return None
-
-        content = re.sub(r'^```json\s*', '', content, flags=re.MULTILINE)
-        content = re.sub(r'\s*```$', '', content, flags=re.MULTILINE)
-        content = content.strip()
-
-        if not content:
-            return None
-
-        try:
-            dag_analysis = json.loads(content)
-            if isinstance(dag_analysis, list):
-                return dag_analysis
-        except json.JSONDecodeError:
-            try:
-                if content.startswith('['):
-                    last_complete_idx = content.rfind('}')
-                    if last_complete_idx != -1:
-                        fixed_content = content[:last_complete_idx + 1] + ']'
-                        dag_analysis = json.loads(fixed_content)
-                        if isinstance(dag_analysis, list):
-                            logger.warning("Fixed truncated JSON response")
-                            return dag_analysis
-            except:
-                pass
-            logger.warning(f"Failed to parse DAG analysis from batch response")
-            return None
-        return None
-    except Exception as e:
-        logger.error(f"Error extracting DAG: {e}")
-        return None
-
-
-def build_digraph(dag_analysis: List[Dict], exclude_external: bool = False) -> nx.DiGraph:
-    """Build a NetworkX DiGraph from step dependency annotations.
-
-    Each reasoning step becomes a node. Dependencies point into the dependent
-    step, so an edge A -> B means B depends on A.
-    """
-    G = nx.DiGraph()
-    for step in dag_analysis:
-        node_id = step["id"]
-        node_type = step.get("type", "Unknown")
-        if exclude_external and node_id == "External":
-            continue
-        G.add_node(node_id, type=node_type)
-        for dep in step.get("dependencies", []):
-            if exclude_external and dep == "External":
-                continue
-            G.add_edge(dep, node_id)
-    return G
 
 
 def compute_dag_depth(G: nx.DiGraph) -> int:
@@ -319,6 +254,8 @@ def compute_ged_similarity(
     """
     if timeout <= 0:
         raise ValueError("timeout must be positive")
+    if not nx.is_directed_acyclic_graph(G1) or not nx.is_directed_acyclic_graph(G2):
+        raise ValueError("GED inputs must be directed acyclic graphs")
 
     graph_max_nodes = max(len(G1), len(G2))
     graph_max_edges = max(G1.number_of_edges(), G2.number_of_edges())

@@ -10,7 +10,9 @@ import networkx as nx
 import numpy as np
 import torch
 
-from .dag_compressor import build_digraph_with_tags, compress_dag_combined
+from .builder import build_digraph_with_tags
+from .compression import compress_dag_combined
+from utils.artifacts import fingerprint
 
 
 logger = logging.getLogger(__name__)
@@ -183,6 +185,7 @@ def build_graph_cache(
     *,
     problem_ids: Optional[Sequence[int]] = None,
     source_metadata: Optional[Mapping[str, object]] = None,
+    signature: Optional[str] = None,
 ) -> Tuple[GraphRecords, GraphRecords, dict]:
     """Compress graphs, batch-encode node text, and write one reusable cache."""
     selected_problem_ids = set(problem_ids) if problem_ids is not None else None
@@ -220,6 +223,9 @@ def build_graph_cache(
         "original_graphs": len(original_graphs),
         "problem_ids": sorted(selected_problem_ids) if selected_problem_ids else None,
         "sources": dict(source_metadata or {}),
+        "signature": signature,
+        "dag_fingerprint": fingerprint({"variants": selected_variants, "originals": selected_originals}),
+        "failed_graph_ids": sorted((set(selected_variants) - set(variant_graphs)) | (set(selected_originals) - set(original_graphs))),
     }
     payload = {
         "metadata": metadata,
@@ -237,11 +243,13 @@ def build_graph_cache(
     return variant_graphs, original_graphs, metadata
 
 
-def load_graph_cache(cache_path: Path) -> Tuple[GraphRecords, GraphRecords, dict]:
+def load_graph_cache(cache_path: Path, *, expected_signature: Optional[str] = None) -> Tuple[GraphRecords, GraphRecords, dict]:
     """Load prepared graphs without initializing the embedding model."""
     cache_path = Path(cache_path)
     payload = torch.load(cache_path, map_location="cpu", weights_only=True)
     metadata = dict(payload["metadata"])
+    if expected_signature is not None and metadata.get("signature") != expected_signature:
+        raise ValueError("Graph cache inputs or preprocessing settings changed; use --rebuild-graph-cache")
     if metadata.get("format") != CACHE_FORMAT:
         raise ValueError(f"Unsupported graph cache format: {metadata.get('format')}")
     if metadata.get("schema_version") != CACHE_SCHEMA_VERSION:

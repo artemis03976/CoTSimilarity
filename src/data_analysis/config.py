@@ -5,42 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-try:
-    from dotenv import load_dotenv
-except ImportError:  # pragma: no cover - exercised only without dependencies installed
-    load_dotenv = None
+from utils.env import load_project_dotenv
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DOTENV_PATH = PROJECT_ROOT / ".env"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-
-
-def _load_project_dotenv() -> None:
-    """Load the project .env without overwriting already-exported variables."""
-    if load_dotenv is not None:
-        load_dotenv(dotenv_path=DOTENV_PATH, override=False)
-        return
-
-    # Keep config imports usable in minimal environments before requirements are
-    # installed. This handles the simple KEY=value form used by the project.
-    if not DOTENV_PATH.is_file():
-        return
-    for raw_line in DOTENV_PATH.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
-            value = value[1:-1]
-        if key and key not in os.environ:
-            os.environ[key] = value
 
 
 @dataclass
@@ -71,7 +41,7 @@ class LLMConfig:
 
     def __post_init__(self):
         """Load provider credentials from the environment if not provided."""
-        _load_project_dotenv()
+        load_project_dotenv(DOTENV_PATH)
         provider_prefix = self.provider.upper()
         env_key = f"{provider_prefix}_API_KEY"
         env_url = f"{provider_prefix}_BASE_URL"
@@ -88,15 +58,10 @@ class LLMConfig:
             if self.base_url is None and self.provider.lower() == "deepseek":
                 self.base_url = DEFAULT_BASE_URL
 
-        if not self.api_key:
-            raise ValueError(
-                f"API key not found. Set {env_key} in the environment or .env file."
-            )
-
     @classmethod
     def from_env(cls, provider: str = "deepseek"):
         """Create config from environment variables."""
-        _load_project_dotenv()
+        load_project_dotenv(DOTENV_PATH)
         return cls(
             provider=provider,
             model=os.getenv("LLM_MODEL", "deepseek-chat"),

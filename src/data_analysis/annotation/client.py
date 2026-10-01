@@ -1,23 +1,49 @@
 """LLM API client with retry logic and error handling."""
 
-import json
 import time
 import logging
+import threading
+from collections import deque
 from typing import Dict, List, Optional, Tuple
 import litellm
-from .config import LLMConfig
-from .prompt_template import build_prompt
+from ..config import LLMConfig
+from .prompts import build_prompt
+from .parsing import parse_dag_response
 
 logger = logging.getLogger(__name__)
+
+
+class RateLimiter:
+    """Reserve provider calls across all threads in one normal-mode run."""
+
+    def __init__(self, requests_per_minute: int):
+        if requests_per_minute < 1:
+            raise ValueError("requests_per_minute must be positive")
+        self.limit = requests_per_minute
+        self.calls = deque()
+        self.lock = threading.Lock()
+
+    def acquire(self):
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                while self.calls and now - self.calls[0] >= 60:
+                    self.calls.popleft()
+                if len(self.calls) < self.limit:
+                    self.calls.append(now)
+                    return
+                delay = 60 - (now - self.calls[0])
+            time.sleep(delay)
 
 
 class LLMClient:
     """Wrapper for LiteLLM API calls with retry logic."""
 
-    def __init__(self, config: LLMConfig):
+    def __init__(self, config: LLMConfig, rate_limiter: RateLimiter | None = None):
+        if not config.api_key:
+            raise ValueError("API key is required for normal-mode LLM requests")
         self.config = config
-        self.request_count = 0
-        self.last_request_time = time.time()
+        self.rate_limiter = rate_limiter or RateLimiter(config.requests_per_minute)
 
         # Build full model name with provider prefix for LiteLLM
         if '/' not in config.model:
@@ -26,47 +52,17 @@ class LLMClient:
             self.model_name = config.model
 
     def _rate_limit(self):
-        """Implement rate limiting."""
-        current_time = time.time()
-        elapsed = current_time - self.last_request_time
-
-        if elapsed < 60:
-            if self.request_count >= self.config.requests_per_minute:
-                sleep_time = 60 - elapsed
-                logger.info(f"Rate limit reached, sleeping {sleep_time:.1f}s")
-                time.sleep(sleep_time)
-                self.request_count = 0
-                self.last_request_time = time.time()
-        else:
-            self.request_count = 0
-            self.last_request_time = current_time
+        self.rate_limiter.acquire()
 
     def _parse_json_response(self, response_text: str) -> Optional[List[Dict]]:
         """Extract and parse JSON from LLM response.
 
         Handles cases where LLM wraps JSON in markdown code blocks.
         """
-        text = response_text.strip()
-
-        # Remove markdown code blocks if present
-        if text.startswith("```json"):
-            text = text[7:]
-        elif text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-
-        text = text.strip()
-
         try:
-            result = json.loads(text)
-            if isinstance(result, list):
-                return result
-            else:
-                logger.error(f"Response is not a list: {type(result)}")
-                return None
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON parse error: {e}\nResponse: {text[:200]}")
+            return parse_dag_response(response_text)
+        except ValueError as e:
+            logger.error("Invalid DAG response: %s", e)
             return None
 
     def analyze_reasoning_chain(
@@ -105,29 +101,11 @@ class LLMClient:
                     base_url=self.config.base_url
                 )
 
-                self.request_count += 1
-
                 response_text = response.choices[0].message.content
-                parsed_dag = self._parse_json_response(response_text)
-
-                if parsed_dag is None:
-                    return None, "Failed to parse JSON response"
-
-                # Validate response structure
-                if len(parsed_dag) != len(steps):
-                    return None, f"Expected {len(steps)} steps, got {len(parsed_dag)}"
-
-                # Validate macro_action_tag field
-                VALID_TAGS = {"Define", "Recall", "Derive", "Calculate", "Verify", "Conclude"}
-                for i, step_dag in enumerate(parsed_dag):
-                    if "macro_action_tag" not in step_dag:
-                        return None, f"Step {i+1} missing 'macro_action_tag' field"
-
-                    tag = step_dag["macro_action_tag"]
-                    if tag not in VALID_TAGS:
-                        return None, f"Step {i+1} has invalid tag '{tag}'. Must be one of {VALID_TAGS}"
-
-                return parsed_dag, None
+                try:
+                    return parse_dag_response(response_text, steps), None
+                except ValueError as exc:
+                    return None, str(exc)
 
             except litellm.exceptions.RateLimitError as e:
                 logger.warning(f"Rate limit hit (attempt {attempt+1}): {e}")

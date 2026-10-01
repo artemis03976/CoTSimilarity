@@ -12,6 +12,13 @@ import argparse
 from itertools import chain
 from pathlib import Path
 
+if __package__ in (None, ""):
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from utils.io import atomic_text, read_jsonl
+from data_analysis.records import iter_samples
+
 LONG_PARAGRAPH_THRESHOLD = 300
 MIN_STEP_LENGTH = 20
 
@@ -296,16 +303,13 @@ VARIANTS = ["original", "simple", "hard"]
 
 def process_record(record, threshold=LONG_PARAGRAPH_THRESHOLD, min_step=MIN_STEP_LENGTH):
     """Segment the response field of each sample in each variant."""
-    for variant in VARIANTS:
-        entry = record.get(variant)
-        if not entry or "samples" not in entry:
+    for key, _, sample in iter_samples([record]):
+        if "response" not in sample:
             continue
-        for sample in entry["samples"]:
-            if "response" not in sample:
-                continue
-            steps = segment_response(sample["response"], threshold, min_step)
-            sample["steps"] = [{"index": i + 1, "text": s} for i, s in enumerate(steps)]
-            sample["num_steps"] = len(steps)
+        sample["sample_id"] = str(key)
+        steps = segment_response(sample["response"], threshold, min_step)
+        sample["steps"] = [{"index": i + 1, "text": s} for i, s in enumerate(steps)]
+        sample["num_steps"] = len(steps)
     return record
 
 
@@ -343,19 +347,8 @@ def segment_jsonl_file(
     total_records = 0
     total_steps = 0
     total_samples = 0
-    with input_path.open("r", encoding="utf-8") as source, output_path.open(
-        "w", encoding="utf-8", newline="\n"
-    ) as destination:
-        for line_number, line in enumerate(source, start=1):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"Invalid JSON in {input_path} line {line_number}: {exc}"
-                ) from exc
-
+    with atomic_text(output_path) as destination:
+        for record in read_jsonl(input_path):
             process_record(record, threshold, min_step)
             for variant in VARIANTS:
                 for sample in record.get(variant, {}).get("samples", []):
