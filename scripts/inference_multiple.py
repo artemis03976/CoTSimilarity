@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate a validated multi-path CoT pool with batched vLLM inference.
 
-By default, simple and hard perturbations receive 50 sampled trajectories;
+By default, simple and hard perturbations receive 8 sampled trajectories;
 the original problem receives one greedy reference trajectory.  Use
 ``--sampled-variants`` to change this contract.  Invalid sampled trajectories
 remain in ``raw_generations.jsonl`` and are replaced with bounded resampling.
@@ -28,8 +28,16 @@ DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-Math-7B-Instruct"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", "--model-name", default=DEFAULT_MODEL_NAME)
-    parser.add_argument("--data-path", "--data_path", default="data/math_paired.jsonl")
-    parser.add_argument("--output-dir", "--output_dir", default="output/multiple")
+    parser.add_argument(
+        "--data-path",
+        "--data_path",
+        default="data/canonical_splits_seed42/development.jsonl",
+    )
+    parser.add_argument(
+        "--output-dir",
+        "--output_dir",
+        default="output/qwen-2.5/multiple_seed42/development",
+    )
     parser.add_argument("--problem-id", "--id", type=int, default=None)
     parser.add_argument("--num", type=int, default=None)
     parser.add_argument(
@@ -38,7 +46,7 @@ def parse_args() -> argparse.Namespace:
         choices=VARIANTS,
         default=["simple", "hard"],
     )
-    parser.add_argument("--samples-per-problem", "--n", type=int, default=50)
+    parser.add_argument("--samples-per-problem", "--n", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-p", "--top_p", type=float, default=0.8)
     parser.add_argument("--top-k", type=int, default=20)

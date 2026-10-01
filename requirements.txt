@@ -24,4 +24,5 @@ scikit-learn==1.8.0
 
 # LLM API / serving
 litellm==1.80.11
+python-dotenv==1.1.1
 vllm==0.7.0

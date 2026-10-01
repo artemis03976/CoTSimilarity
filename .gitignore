@@ -1,4 +1,5 @@
 .claude
+.env
 docs/
 output/*
 !output/filter_errors.py

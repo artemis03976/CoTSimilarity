@@ -49,7 +49,8 @@ Most workflows are driven by scripts under `scripts/`, with reusable implementat
 `src/data_analysis/` turns raw generated responses into structural features:
 
 - `cot_segmenter.py`: segments chain-of-thought responses into reasoning units.
-- `dag_analyzer.py`: builds prompts or merges batch outputs for DAG extraction.
+- `scripts/run_dag_analysis.py`: shared input resolution and CLI for DAG extraction.
+- `dag_normal.py` / `dag_batch.py`: normal and batch DAG modes.
 - `dag_compressor.py`: normalizes and compresses DAG representations.
 - `dag_similarity.py`: computes graph-level similarity and GED.
 - `ged_analysis.py`: joins DAG similarity with answer correctness to produce records for DSPR dataset construction.
@@ -140,6 +141,27 @@ pipeline. The router context encoder is run once and cached as
 vectors directly. To share one cache across several folds, pass the same path
 with `--router-context-cache-path` to each fold command.
 
+To run a router-only context-layer ablation, use:
+
+```bash
+bash scripts/run_router_layer_ablation.sh
+```
+
+The script discovers `num_hidden_layers` from the model configuration and
+sweeps hidden-state indices `0..L` (including the embedding output at index
+0). Set `LAYERS="8 12 15 20"` for a smaller sweep, or override `MODEL_NAME`,
+`MATH_PAIRED`, `KFOLD_ROOT`, `FOLD`, and `OUTPUT_ROOT` for another setup. Each
+run writes its own router history under `layer_<idx>/router/`. After training,
+plot the curves and layer summary with:
+
+```bash
+python scripts/plot_router_layer_ablation.py \
+  --root checkpoints/qwen-2.5_router_layer_ablation_seed42
+```
+
+This produces `router_layer_curves.png`, `router_layer_summary.png`, and CSV/
+JSON summaries under `<root>/plots`.
+
 The example commands below use Qwen2.5-Math-7B-Instruct and write new artifacts under `output/qwen-2.5`, `data/qwen`, and `checkpoints/qwen`. Results from the earlier pipeline are archived under `output/qwen_legacy`.
 
 ### 1. Generate Base Model Responses
@@ -181,10 +203,27 @@ python scripts/revalidate_multiple.py \
   --output-dir output/qwen-2.5/multiple_seed42_revalidated
 ```
 
-### 2. Segment CoTs and Prepare DAG Batch Requests
+### 2. Segment CoTs and Run DAG Analysis
+
+Use the unified launcher for either mode. Normal mode supports concurrent
+requests; `--concurrency` controls the worker count and `--max-retries` sets
+the per-chain retry budget (default 5 retries after the initial request).
 
 ```bash
-python src/data_analysis/dag_analyzer.py \
+python scripts/run_dag_analysis.py \
+  --mode normal \
+  --raw-input "output/qwen-2.5/multiple_seed42/all_records.jsonl" \
+  --output-dir "output/qwen-2.5/dag_analysis_50" \
+  --provider deepseek \
+  --model deepseek-chat \
+  --concurrency 8 \
+  --max-retries 5
+```
+
+Batch mode prepares provider-ready requests:
+
+```bash
+python scripts/run_dag_analysis.py \
   --mode batch \
   --raw-input "output/qwen-2.5/multiple_seed42/all_records.jsonl" \
   --output-dir "output/qwen-2.5/dag_analysis_50" \
@@ -207,7 +246,7 @@ After the batch inference service returns results, merge them with the same
 segmented cache:
 
 ```bash
-python src/data_analysis/dag_analyzer.py \
+python scripts/run_dag_analysis.py \
   --mode merge-batch \
   --input "output/qwen-2.5/dag_analysis_50/segmented_records.jsonl" \
   --batch-results-file "path/to/batch_results.jsonl" \
