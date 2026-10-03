@@ -58,11 +58,21 @@ in `utils/visualization/dag_records.py` and use the same annotation validator.
   sample. Preparing and merging batch files requires no API credentials.
 - `python scripts/run_ged_analysis.py ...`: compute GED with the existing flags.
 
+Known provider expansions of the `Conclude` tag, such as `Draw` and `Draw
+intermediate and final conclusions`, are normalized to `Conclude` by the shared
+parser. Existing normal-mode failures can be recovered without new API calls
+with `scripts/recover_dag_raw_responses.py`; the recovery script keeps the
+original analyzed file unchanged and validates recovered DAGs against their
+segmented steps.
+
 Both annotation modes write `<output-dir>/analyzed_records.jsonl`. Normal mode
 also retains its historical `<output-dir>/normal/analyzed_records.jsonl` path.
 Normal checkpoints are flushed as samples finish; the final records retain input
-order. Records keep stable sample IDs; GED joins verify response content when it
-is available in the analyzed source.
+order. Each normal-mode provider attempt is recorded separately in
+`<output-dir>/normal/raw_responses.jsonl`, including the sample ID, retry
+indices, response content, and parse/provider error fields. API credentials are
+never written to this file. Records keep stable sample IDs; GED joins verify
+response content when it is available in the analyzed source.
 
 ## Cache And Recovery
 
@@ -78,4 +88,5 @@ Changed parameters require a separate result/checkpoint path or a run without
 
 The prompt, segmentation rules, compression order, encoder behavior, edit costs,
 normalization, default `original_0` reference, and downstream filtering defaults
-remain unchanged. Invalid annotations are rejected rather than silently repaired.
+remain unchanged. Unknown invalid annotations are still rejected; only the
+explicitly listed provider aliases are normalized.

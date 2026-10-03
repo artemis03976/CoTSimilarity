@@ -264,7 +264,7 @@ def validate_inputs(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fold-root", default="data/qwen/kfold", help="Prepared Qwen K-fold data directory")
+    parser.add_argument("--fold-root", default="output/qwen-2.5/kfold", help="Prepared Qwen K-fold data directory")
     parser.add_argument(
         "--output-root",
         default="checkpoints/qwen_kfold_seed42",

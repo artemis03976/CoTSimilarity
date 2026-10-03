@@ -9,6 +9,35 @@ from ..schemas import DAGNode, Step, VALID_TAGS
 logger = logging.getLogger(__name__)
 
 
+# Some provider responses expanded the description of ``Conclude`` into the
+# tag value.  Keep the accepted aliases explicit so unrelated invalid tags are
+# still rejected by the validator.
+CONCLUDE_TAG_ALIASES = frozenset({
+    "Draw",
+    "Draw conclusion",
+    "Draw final conclusion",
+    "Draw intermediate conclusions",
+    "Draw intermediate final conclusion",
+    "Draw intermediate final conclusions",
+    "Draw intermediate and final conclusions",
+    "Draw intermediate or final conclusions",
+})
+
+
+def normalize_macro_action_tags(dag):
+    """Map known provider aliases to the canonical ``Conclude`` tag."""
+    if not isinstance(dag, list):
+        return dag
+    normalized = []
+    for node in dag:
+        tag = node.get("macro_action_tag") if isinstance(node, dict) else None
+        if isinstance(tag, str) and tag in CONCLUDE_TAG_ALIASES:
+            node = dict(node)
+            node["macro_action_tag"] = "Conclude"
+        normalized.append(node)
+    return normalized
+
+
 def validate_dag(dag, steps: list[Step] | None = None) -> list[DAGNode]:
     if not isinstance(dag, list) or not dag:
         raise ValueError("DAG must be a non-empty JSON array")
@@ -50,7 +79,7 @@ def parse_dag_response(text: str, steps: list[Step] | None = None) -> list[DAGNo
         if not separator or opening.strip() not in {"```", "```json"} or not text.rstrip().endswith("```"):
             raise ValueError("Invalid fenced DAG response")
         text = text.rstrip()[:-3].strip()
-    return validate_dag(json.loads(text), steps)
+    return validate_dag(normalize_macro_action_tags(json.loads(text)), steps)
 
 
 def batch_response_content(record: dict) -> str:

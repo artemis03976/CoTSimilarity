@@ -87,7 +87,7 @@ def build_train_command(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fold-root", default="data/qwen/kfold")
+    parser.add_argument("--fold-root", default="output/qwen-2.5/kfold")
     parser.add_argument(
         "--output-root",
         default="checkpoints/qwen_lora_qv_r3_seed42",

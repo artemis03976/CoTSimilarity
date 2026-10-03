@@ -4,19 +4,12 @@
 The screen only uses information already available in ``all_records.jsonl``:
 quality validity, answer correctness, and the validity of the greedy original
 anchor.  It deliberately does not inspect DAGs or compute GED.  A problem is
-eligible for the strict candidate output when its original anchor is valid and
-both perturbation variants have at least ``--min-correct`` valid correct
-trajectories.  The default of five matches the current downstream GED
-eligibility contract.
+pre-eligible when its original anchor is valid and both perturbation variants
+have at least ``--min-correct`` valid correct trajectories (default: three).
+Thresholds below three are not supported.
 
-The script writes three files:
-
-``candidate_records.jsonl``
-    Strict pair candidates to pass to DAG analysis.
-``pair_candidates.jsonl``
-    A wider audit pool requiring only one correct trajectory per variant.
-``screening_summary.jsonl``
-    One compact diagnostic row per input problem group.
+The only screened dataset is ``pre_eligible_set.jsonl``. Diagnostic rows and
+counts are saved in ``screening_summary.jsonl`` and ``screening_manifest.json``.
 
 The input records are never modified.
 """
@@ -25,32 +18,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
 
-VARIANTS = ("simple", "hard")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            if not isinstance(row, dict):
-                raise ValueError(f"{path}:{line_number}: expected a JSON object")
-            rows.append(row)
-    return rows
-
-
-def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+from utils.io import read_jsonl, write_json, write_jsonl  # noqa: E402
 
 
 def problem_id(row: dict[str, Any]) -> int:
@@ -99,23 +76,23 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input",
-        default="output/qwen-2.5/multiple_n16/development/all_records.jsonl",
+        default="output/qwen-2.5/multiple_n16/all_records.jsonl",
         help="Completed multi-path all_records JSONL",
     )
     parser.add_argument(
         "--canonical",
-        default="data/canonical_splits_seed42/development.jsonl",
-        help="Canonical development file used only for source metadata",
+        default="data/canonical_math_paired.jsonl",
+        help="Canonical data used only for source metadata",
     )
     parser.add_argument(
         "--output-dir",
-        default="output/qwen-2.5/cheap_screen_n16/development",
+        default="output/qwen-2.5/multiple_n16/pre_eligible",
     )
     parser.add_argument(
         "--min-correct",
         type=int,
-        default=5,
-        help="Correct valid trajectories required on each variant (default: 5)",
+        default=3,
+        help="Correct valid trajectories required on each variant (minimum/default: 3)",
     )
     return parser.parse_args()
 
@@ -125,10 +102,10 @@ def main() -> int:
     input_path = Path(args.input)
     canonical_path = Path(args.canonical)
     output_dir = Path(args.output_dir)
-    if args.min_correct < 1:
-        raise ValueError("--min-correct must be positive")
+    if args.min_correct < 3:
+        raise ValueError("--min-correct must be at least 3")
 
-    records = read_jsonl(input_path)
+    records = list(read_jsonl(input_path))
     if not records:
         raise ValueError(f"No records found in {input_path}")
 
@@ -139,8 +116,7 @@ def main() -> int:
 
     seen: set[int] = set()
     summaries: list[dict[str, Any]] = []
-    strict_candidates: list[dict[str, Any]] = []
-    wide_candidates: list[dict[str, Any]] = []
+    pre_eligible: list[dict[str, Any]] = []
     categories: Counter[str] = Counter()
     source_categories: dict[str, Counter[str]] = defaultdict(Counter)
     correct_histogram: Counter[str] = Counter()
@@ -187,21 +163,15 @@ def main() -> int:
             "original_valid": original_valid,
             "simple": simple_stats,
             "hard": hard_stats,
-            "pair_candidate_min1": bool(
-                original_valid and simple_correct >= 1 and hard_correct >= 1
-            ),
-            "pair_candidate_min_correct": category == "pair_candidate",
+            "pre_eligible": category == "pair_candidate",
         }
         summaries.append(summary)
 
-        if original_valid and simple_correct >= 1 and hard_correct >= 1:
-            wide_candidates.append(row)
         if category == "pair_candidate":
-            strict_candidates.append(row)
+            pre_eligible.append(row)
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    write_jsonl(output_dir / "candidate_records.jsonl", strict_candidates)
-    write_jsonl(output_dir / "pair_candidates.jsonl", wide_candidates)
+    write_jsonl(output_dir / "pre_eligible_set.jsonl", pre_eligible)
     write_jsonl(output_dir / "screening_summary.jsonl", summaries)
 
     manifest = {
@@ -214,17 +184,12 @@ def main() -> int:
             "original has at least one valid anchor and both simple and hard "
             f"have at least {args.min_correct} valid correct trajectories"
         ),
-        "wide_pair_definition": (
-            "original has at least one valid anchor and both simple and hard "
-            "have at least one valid correct trajectory"
-        ),
         "counts": {
             "input_groups": len(records),
             "original_valid": aggregate["original_valid"],
             "original_invalid": len(records) - aggregate["original_valid"],
-            "wide_pair_candidates_min1": len(wide_candidates),
-            "strict_pair_candidates": len(strict_candidates),
-            "strict_candidate_records_written": len(strict_candidates),
+            "pre_eligible_groups": len(pre_eligible),
+            "pre_eligible_records_written": len(pre_eligible),
             "answer_unknown_samples": aggregate["answer_unknown_samples"],
         },
         "categories": dict(sorted(categories.items())),
@@ -237,8 +202,7 @@ def main() -> int:
             sorted(correct_histogram.items(), key=lambda item: item[0])
         ),
         "outputs": {
-            "candidate_records": str(output_dir / "candidate_records.jsonl"),
-            "pair_candidates": str(output_dir / "pair_candidates.jsonl"),
+            "pre_eligible_set": str(output_dir / "pre_eligible_set.jsonl"),
             "screening_summary": str(output_dir / "screening_summary.jsonl"),
         },
         "notes": [
@@ -247,14 +211,10 @@ def main() -> int:
             "Input all_records.jsonl was not modified.",
         ],
     }
-    (output_dir / "screening_manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    write_json(output_dir / "screening_manifest.json", manifest)
 
     print(json.dumps({"counts": manifest["counts"], "categories": manifest["categories"]}, ensure_ascii=False))
-    print(f"Strict candidates: {output_dir / 'candidate_records.jsonl'}")
-    print(f"Wide candidates:   {output_dir / 'pair_candidates.jsonl'}")
+    print(f"Pre-eligible set: {output_dir / 'pre_eligible_set.jsonl'}")
     print(f"Manifest:          {output_dir / 'screening_manifest.json'}")
     return 0
 

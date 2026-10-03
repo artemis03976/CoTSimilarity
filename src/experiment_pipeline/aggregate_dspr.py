@@ -459,7 +459,7 @@ def write_alpha_csv(path: Path, summaries: dict[str, dict[str, Any]]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-root", default="output/qwen_kfold_seed42")
-    parser.add_argument("--id-root", default="data/qwen/kfold")
+    parser.add_argument("--id-root", default="output/qwen-2.5/kfold")
     parser.add_argument("--raw-data", default="data/math_paired.jsonl")
     parser.add_argument("--baseline", default=None, help="Optional matched baseline all_records.jsonl")
     parser.add_argument("--expected-samples", type=int, default=1, help="Use 0 to accept any positive sample count")

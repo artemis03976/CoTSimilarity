@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Normal-mode DAG annotation; defaults to the 51-chain concurrency subset.
+# Normal-mode DAG annotation
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,15 +9,11 @@ cd "${REPO_ROOT}"
 PYTHON="${PYTHON:-python}"
 PROVIDER="${PROVIDER:-volcengine}"
 MODEL="${MODEL:-${LLM_MODEL:-ep-20261001103240-d9m5m}}"
-RAW_INPUT="${RAW_INPUT:-output/qwen-2.5/multiple_n16/normal_smoke_51/all_records.jsonl}"
-OUTPUT_DIR="${OUTPUT_DIR:-output/qwen-2.5/multiple_n16/normal_smoke_51/dag_analysis_new}"
+RAW_INPUT="${RAW_INPUT:-output/qwen-2.5/multiple_n16/pre_eligible/pre_eligible_set.jsonl}"
+OUTPUT_DIR="${OUTPUT_DIR:-output/qwen-2.5/multiple_n16/dag_analysis}"
 CONCURRENCY="${CONCURRENCY:-8}"
-MAX_RETRIES="${MAX_RETRIES:-1}"
+MAX_RETRIES="${MAX_RETRIES:-3}"
 
-if [[ -z "${MODEL}" ]]; then
-  echo "Set MODEL to the Ark model or endpoint ID, e.g. MODEL=ep-xxxxxxxx." >&2
-  exit 1
-fi
 if [[ ! -f "${RAW_INPUT}" ]]; then
   echo "Input JSONL does not exist: ${RAW_INPUT}" >&2
   exit 1
@@ -38,4 +34,5 @@ exec "${PYTHON}" "${SCRIPT_DIR}/run_dag_analysis.py" \
   --model "${MODEL}" \
   --concurrency "${CONCURRENCY}" \
   --max-retries "${MAX_RETRIES}" \
+  --resume \
   "$@"

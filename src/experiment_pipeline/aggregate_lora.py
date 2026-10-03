@@ -204,7 +204,7 @@ def write_metrics_csv(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-root", default="output/qwen_lora_qv_r3_seed42")
-    parser.add_argument("--id-root", default="data/qwen/kfold")
+    parser.add_argument("--id-root", default="output/qwen-2.5/kfold")
     parser.add_argument("--raw-data", default="data/math_paired.jsonl")
     parser.add_argument(
         "--base",

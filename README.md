@@ -119,7 +119,7 @@ trajectory records while keeping the router fixed:
 ```bash
 python scripts/train.py staged_dspr \
   --math-paired-path data/math_paired.jsonl \
-  --kfold-root data/qwen/kfold \
+  --kfold-root output/qwen-2.5/kfold \
   --fold 0 \
   --output-path checkpoints/qwen-2.5_staged_seed42 \
   --router-learning-rate 1e-5 \
@@ -266,6 +266,14 @@ The merged DAG records are written to:
 output/qwen-2.5/dag_analysis_50/analyzed_records.jsonl
 ```
 
+Normal-mode runs additionally write each provider attempt (including the raw
+response and any parse/provider error) to
+`output/qwen-2.5/dag_analysis_50/normal/raw_responses.jsonl`.
+
+Known provider variants of the `Conclude` tag are normalized during parsing.
+To recover an existing normal-mode run from its saved raw responses without
+calling the provider again, use `scripts/recover_dag_raw_responses.py`.
+
 ### 4. Compute GED Records
 
 ```bash
@@ -297,8 +305,8 @@ and maximum token length are controlled by the corresponding
 accompanied by an `all_ged_results.config.json` file recording these weights
 and the graph-cache metadata.
 
-Each GED record keeps the raw `ged` used by the existing within-problem
-selection protocol and also reports `ged_normalized` in `[0, 1]`. The latter
+Each GED record keeps the raw `ged` and also reports `ged_normalized` in
+`[0, 1]`, used by the current within-problem selection protocol. The latter
 uses the conservative unit-cost upper bound
 `|V1| + |V2| + |E1| + |E2|`; `similarity_normalized` is its complement. This
 prevents graph size and edge-count differences from producing an invalid
@@ -310,55 +318,54 @@ re-estimated before dataset curation.
 ### 5. Build The DSPR Dataset
 
 ```bash
-python src/dspr_dataset/data_filter.py \
-  --input "output/qwen-2.5/all_ged_results.jsonl" \
-  --output "data/qwen/dspr_dataset.jsonl" \
-  --top-k 5 \
-  --min-ged-range 3 \
-  --eligibility-output "output/qwen-2.5/eligible_problem_ids_ged_range_ge_3.json" \
-  --model-name qwen
+bash scripts/prepare_qwen_dspr_data.sh
 ```
 
-Dataset curation and k-fold eligibility use the same protocol: only correct,
-non-timeout trajectories with a valid GED are considered; a problem-variant is
-eligible when its within-group GED range is at least 3; Simple selects the five
-lowest-GED trajectories and Hard selects the five highest-GED trajectories.
-The eligibility JSON written above is consumed directly by
-`scripts/build_kfold_splits.py`.
+This reads `output/qwen-2.5/multiple_n16/ged/all_ged_results.jsonl` and writes
+`data/qwen/dspr_dataset.jsonl`, `data/qwen/eligibility.json`, and the five folds
+under `output/qwen-2.5/kfold/`. Set `PYTHON`, `GED_RESULTS`, or `DATA_ROOT` to override
+the interpreter, input, or output root.
 
-### 6. Split Train/Validation/Test Sets
+Only correct, non-timeout trajectories with a valid normalized GED are
+considered. A problem-variant needs at least three such trajectories and a
+normalized GED range of at least 0.10. Simple selects the five lowest values;
+Hard selects the five highest when five are available. Eligibility is per
+variant, so a single-sided group contributes prefix trajectories only for its
+eligible variant.
 
-```bash
-python src/dspr_dataset/split_dataset.py \
-  --input "data/qwen/dspr_dataset.jsonl" \
-  --train-ratio 0.8 \
-  --val-ratio 0.1 \
-  --test-ratio 0.1 \
-  --seed 42
-```
+### 6. Development K-fold Splits
 
-Default outputs are written next to the input file:
+The preparation script uses eligible groups from
+`data/canonical_splits_seed42/development.jsonl` for group-level five-fold
+cross-validation with seed 42: four folds train and one validates. All variants
+and trajectories of a problem stay together. Source, type, level, and variant
+eligibility are balanced across folds. The separate 109-group canonical test
+set remains reserved for final evaluation.
 
-- `data/qwen/dspr_train.jsonl`
-- `data/qwen/dspr_val.jsonl`
-- `data/qwen/dspr_test.jsonl`
+Each `output/qwen-2.5/kfold/fold_N/` contains `train.jsonl`, `val.jsonl`,
+`train_ids.json`, `val_ids.json`, and `val_raw.jsonl` (canonical validation
+triplets). `manifest.json`, `coverage.json`, `fold_assignments.jsonl`, and
+`fold_balance.csv` record the protocol and coverage at the K-fold root.
 
 ### 7. Train DSPR
 
 ```bash
 python scripts/train.py dspr \
   --model_name "Qwen/Qwen2.5-Math-7B-Instruct" \
-  --train_data_path "data/qwen/dspr_train.jsonl" \
-  --val_data_path "data/qwen/dspr_val.jsonl" \
-  --output_path "checkpoints/qwen/dspr" \
+  --train_data_path "output/qwen-2.5/kfold/fold_0/train.jsonl" \
+  --val_data_path "output/qwen-2.5/kfold/fold_0/val.jsonl" \
+  --output_path "checkpoints/qwen/dspr/fold_0" \
   --batch_size 4 \
   --num_epochs 10
 ```
 
+For router-then-prefix training, use `FOLD=0 bash scripts/run_staged_dspr.sh`.
+Repeat with folds 1-4; each fold has its own output directory.
+
 The trainer saves the trainable DSPR parameters as:
 
 ```text
-checkpoints/qwen/dspr/dspr_trainable.pt
+checkpoints/qwen/dspr/fold_0/dspr_trainable.pt
 ```
 
 ### 8. Train Qwen DSPR with the Prepared K-Folds

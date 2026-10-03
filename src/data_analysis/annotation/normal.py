@@ -50,6 +50,7 @@ class _AnalysisResult:
     dag: Optional[List[Dict]]
     error: Optional[str]
     processing_time_ms: int
+    raw_responses: List[Dict]
 
 
 def _build_tasks(records: List[Dict], variants: List[str]) -> List[_AnalysisTask]:
@@ -86,6 +87,7 @@ def _analyze_task(
     """
     client = LLMClient(replace(config, max_retries=1), rate_limiter=rate_limiter)
     last_error: Optional[str] = None
+    raw_responses: List[Dict] = []
     started = time.perf_counter()
 
     for retry_index in range(max_retries + 1):
@@ -93,6 +95,16 @@ def _analyze_task(
             dag, error = client.analyze_reasoning_chain(task.problem, task.steps)
         except Exception as exc:  # pragma: no cover - defensive for providers
             dag, error = None, f"Unexpected error: {exc}"
+        for api_attempt, record in enumerate(client.take_raw_response_records()):
+            raw_responses.append({
+                "sample_id": task.sample_id,
+                "outer_retry": retry_index,
+                "api_attempt": record.get("api_attempt", api_attempt),
+                "timestamp": record.get("timestamp", datetime.now().isoformat()),
+                "response": record.get("response"),
+                "parse_error": record.get("parse_error"),
+                "provider_error": record.get("provider_error"),
+            })
 
         if error is None and dag is not None:
             return _AnalysisResult(
@@ -100,6 +112,7 @@ def _analyze_task(
                 dag,
                 None,
                 int((time.perf_counter() - started) * 1000),
+                raw_responses,
             )
 
         last_error = error or "LLM returned no DAG analysis"
@@ -119,6 +132,7 @@ def _analyze_task(
         None,
         last_error,
         int((time.perf_counter() - started) * 1000),
+        raw_responses,
     )
 
 
@@ -151,6 +165,7 @@ def process_normal_mode(
     selected_variants = list(variants or DEFAULT_VARIANTS)
     output_file = output_dir / "normal" / "analyzed_records.jsonl"
     output_file.parent.mkdir(parents=True, exist_ok=True)
+    raw_response_file = output_file.parent / "raw_responses.jsonl"
     error_log = output_dir / "logs" / f"errors_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
     error_log.parent.mkdir(parents=True, exist_ok=True)
 
@@ -218,7 +233,12 @@ def process_normal_mode(
         max_retries,
     )
     limiter = RateLimiter(config.requests_per_minute)
-    with checkpoint_file.open("a" if resume else "w", encoding="utf-8") as checkpoint, error_log.open("w", encoding="utf-8") as ferr, ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="dag") as executor:
+    with (
+        checkpoint_file.open("a" if resume else "w", encoding="utf-8") as checkpoint,
+        raw_response_file.open("a" if resume else "w", encoding="utf-8") as raw_responses,
+        error_log.open("w", encoding="utf-8") as ferr,
+        ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="dag") as executor,
+    ):
         futures = [executor.submit(_analyze_task, task, config, max_retries, limiter) for task in pending]
         for future in as_completed(futures):
             result = future.result()
@@ -233,6 +253,9 @@ def process_normal_mode(
                     "processing_time_ms": result.processing_time_ms,
                 },
             }
+            for record in result.raw_responses:
+                raw_responses.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+            raw_responses.flush()
             checkpoint.write(json.dumps(value, ensure_ascii=False) + "\n")
             checkpoint.flush()
             apply_result(task, value)
@@ -260,6 +283,7 @@ def process_normal_mode(
 
     logger.info("Processing complete: %s succeeded, %s failed", total_processed, total_failed)
     logger.info("Results saved to: %s", output_file)
+    logger.info("Raw LLM responses: %s", raw_response_file)
     logger.info("Error log: %s", error_log)
     return output_file
 

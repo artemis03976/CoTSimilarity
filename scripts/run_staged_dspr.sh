@@ -4,9 +4,9 @@ set -euo pipefail
 
 MODEL_NAME="Qwen/Qwen2.5-Math-7B-Instruct"
 MATH_PAIRED="data/math_paired.jsonl"
-KFOLD_ROOT="data/qwen/kfold"
-FOLD=0
-OUTPUT_PATH="checkpoints/qwen-2.5_staged_seed42"
+KFOLD_ROOT="output/qwen-2.5/kfold"
+FOLD="${FOLD:-0}"
+OUTPUT_PATH="${OUTPUT_PATH:-checkpoints/qwen-2.5_staged/fold_${FOLD}}"
 
 python scripts/train.py staged_dspr \
   --model-name "${MODEL_NAME}" \

@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""Build shared group-level K-fold splits for the DSPR experiments.
+"""Build Qwen DSPR K-fold data from one raw dataset and one eligibility file.
 
-The outer folds are defined over all raw problem groups.  Model-specific
-eligibility masks are only used when constructing training supervision and
-when reporting eligible/non-eligible evaluation slices; they never change
-the raw outer test universe.
-
-For each outer fold, an internal validation subset is selected from the
-remaining development groups.  With the default K=5 and validation fraction
-1/8 of development, the resulting proportions are approximately 70/10/20
-for train/validation/test.
+The outer folds cover every raw problem group.  The eligibility manifest only
+controls which raw trajectories become prefix-training examples; it never
+removes a problem from the outer test universe.
 """
 
 from __future__ import annotations
@@ -18,39 +12,19 @@ import argparse
 import csv
 import json
 import random
-from collections import Counter, defaultdict
+import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Iterable
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from utils.io import read_jsonl, read_manifest, write_json, write_jsonl  # noqa: E402
+
+
 VARIANTS = ("simple", "hard")
-MODELS = ("qwen", "deepseek")
-
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    records = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid JSON in {path} line {line_number}: {exc}") from exc
-    return records
-
-
-def write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def normalise_id(value: Any) -> int:
@@ -61,8 +35,8 @@ def normalise_id(value: Any) -> int:
 
 
 def load_raw_records(path: Path) -> list[dict[str, Any]]:
-    records = read_jsonl(path)
-    seen = set()
+    records = list(read_jsonl(path))
+    seen: set[int] = set()
     for record in records:
         pid = normalise_id(record.get("problem_id"))
         if pid in seen:
@@ -73,60 +47,54 @@ def load_raw_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def load_raw_metadata(records: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
-    metadata: dict[int, dict[str, Any]] = {}
-    for record in records:
-        pid = normalise_id(record.get("problem_id"))
-        if pid in metadata:
-            raise ValueError(f"Duplicate problem_id in raw dataset: {pid}")
-        metadata[pid] = {
+def load_raw_metadata(records: list[dict[str, Any]]) -> dict[int, dict[str, str]]:
+    return {
+        normalise_id(record["problem_id"]): {
             "type": str(record.get("type", "unknown")),
             "level": str(record.get("level", "unknown")),
         }
-    return metadata
+        for record in records
+    }
 
 
-def load_eligibility(path: Path, raw_ids: set[int]) -> dict[str, set[int]]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    problem_ids = payload.get("problem_ids", {})
-    result = {}
+def load_eligibility(path: Path, raw_ids: set[int]) -> tuple[dict[str, set[int]], dict[str, Any]]:
+    payload = read_manifest(path)
+    if not payload:
+        raise ValueError(f"Eligibility manifest must be a non-empty JSON object: {path}")
+
+    problem_ids = payload.get("problem_ids")
+    if not isinstance(problem_ids, dict):
+        raise ValueError(f"Eligibility manifest has no problem_ids object: {path}")
+
+    eligibility: dict[str, set[int]] = {}
     for variant in VARIANTS:
-        ids = {normalise_id(value) for value in problem_ids.get(variant, [])}
+        values = problem_ids.get(variant, [])
+        if not isinstance(values, list):
+            raise ValueError(f"Eligibility IDs for {variant} must be a list: {path}")
+        ids = {normalise_id(value) for value in values}
         unknown = ids - raw_ids
         if unknown:
-            raise ValueError(f"{path}: {variant} contains IDs absent from raw dataset: {sorted(unknown)[:10]}")
-        result[variant] = ids
-    return result
-
-
-def load_eligibility_payload(path: Path) -> dict[str, Any]:
-    """Load the full manifest so the fold manifest records its protocol."""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid eligibility JSON {path}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"Eligibility manifest must be an object: {path}")
-    return payload
+            raise ValueError(
+                f"{path}: {variant} contains IDs absent from raw dataset: {sorted(unknown)[:10]}"
+            )
+        eligibility[variant] = ids
+    return eligibility, payload
 
 
 def build_labels(
     raw_ids: Iterable[int],
-    metadata: dict[int, dict[str, Any]],
-    eligibility: dict[str, dict[str, set[int]]],
+    metadata: dict[int, dict[str, str]],
+    eligibility: dict[str, set[int]],
 ) -> dict[int, frozenset[str]]:
-    labels = {}
+    labels: dict[int, frozenset[str]] = {}
     for pid in raw_ids:
         current = {
             f"type={metadata[pid]['type']}",
             f"level={metadata[pid]['level']}",
         }
-        for model in MODELS:
-            for variant in VARIANTS:
-                if pid in eligibility[model][variant]:
-                    current.add(f"{model}_{variant}_eligible")
-                else:
-                    current.add(f"{model}_{variant}_ineligible")
+        for variant in VARIANTS:
+            state = "eligible" if pid in eligibility[variant] else "ineligible"
+            current.add(f"{variant}_{state}")
         labels[pid] = frozenset(current)
     return labels
 
@@ -137,12 +105,7 @@ def balanced_assign(
     n_buckets: int,
     seed: int,
 ) -> dict[int, int]:
-    """Deterministically assign IDs while balancing multi-label counts.
-
-    This is a lightweight iterative/greedy stratifier.  It avoids an extra
-    dependency while balancing type, level, and the four model/variant
-    eligibility indicators.
-    """
+    """Deterministically assign groups while balancing metadata labels."""
     if n_buckets < 2:
         raise ValueError("n_buckets must be at least 2")
     if len(problem_ids) < n_buckets:
@@ -151,10 +114,8 @@ def balanced_assign(
     rng = random.Random(seed)
     shuffled = list(problem_ids)
     rng.shuffle(shuffled)
-
     label_frequency = Counter(label for pid in shuffled for label in labels[pid])
     tie_break = {pid: rng.random() for pid in shuffled}
-    # Place rare and information-rich label combinations first.
     shuffled.sort(
         key=lambda pid: (
             min(label_frequency[label] for label in labels[pid]),
@@ -164,9 +125,7 @@ def balanced_assign(
     )
 
     target_size = len(shuffled) / n_buckets
-    target_label = {
-        label: frequency / n_buckets for label, frequency in label_frequency.items()
-    }
+    target_label = {label: count / n_buckets for label, count in label_frequency.items()}
     bucket_sizes = [0] * n_buckets
     bucket_label_counts = [Counter() for _ in range(n_buckets)]
     assignment: dict[int, int] = {}
@@ -180,13 +139,11 @@ def balanced_assign(
                 for label in pid_labels
             )
             size_score = (bucket_sizes[bucket] + 1) / max(target_size, 1.0)
-            # Label balance is primary; size keeps buckets close when labels tie.
             scores.append((label_score + 0.15 * size_score, bucket_sizes[bucket], bucket))
         _, _, selected_bucket = min(scores)
         assignment[pid] = selected_bucket
         bucket_sizes[selected_bucket] += 1
         bucket_label_counts[selected_bucket].update(pid_labels)
-
     return assignment
 
 
@@ -198,7 +155,7 @@ def make_fold_splits(
     seed: int,
     validation_buckets: int,
 ) -> dict[int, dict[str, list[int]]]:
-    splits = {}
+    splits: dict[int, dict[str, list[int]]] = {}
     for outer_fold in range(n_folds):
         test_ids = sorted(pid for pid in raw_ids if outer_assignment[pid] == outer_fold)
         development_ids = sorted(pid for pid in raw_ids if outer_assignment[pid] != outer_fold)
@@ -208,7 +165,6 @@ def make_fold_splits(
             validation_buckets,
             seed=seed + 1009 * (outer_fold + 1),
         )
-        # One of 8 internal buckets gives roughly 10% of the full raw data.
         val_ids = sorted(pid for pid in development_ids if internal_assignment[pid] == 0)
         train_ids = sorted(set(development_ids) - set(val_ids))
         if set(train_ids) & set(val_ids) or set(train_ids) & set(test_ids) or set(val_ids) & set(test_ids):
@@ -220,7 +176,7 @@ def make_fold_splits(
 
 
 def split_status(splits: dict[int, dict[str, list[int]]], fold: int) -> dict[int, str]:
-    status = {}
+    status: dict[int, str] = {}
     for split_name, ids in splits[fold].items():
         for pid in ids:
             if pid in status:
@@ -233,197 +189,194 @@ def eligible_slices(ids: Iterable[int], eligibility: dict[str, set[int]]) -> dic
     ids = set(ids)
     simple = sorted(ids & eligibility["simple"])
     hard = sorted(ids & eligibility["hard"])
-    union = sorted(set(simple) | set(hard))
-    intersection = sorted(set(simple) & set(hard))
+    simple_set, hard_set = set(simple), set(hard)
     return {
         "all": sorted(ids),
         "simple": simple,
         "hard": hard,
-        "union": union,
-        "intersection": intersection,
-        "simple_only": sorted(set(simple) - set(hard)),
-        "hard_only": sorted(set(hard) - set(simple)),
+        "union": sorted(simple_set | hard_set),
+        "intersection": sorted(simple_set & hard_set),
+        "simple_only": sorted(simple_set - hard_set),
+        "hard_only": sorted(hard_set - simple_set),
     }
 
 
-def build_model_fold_data(
-    model: str,
-    refined_path: Path,
-    model_eligibility: dict[str, set[int]],
-    raw_ids: set[int],
-    splits: dict[int, dict[str, list[int]]],
-    output_root: Path,
-) -> dict[str, Any]:
-    refined_records = read_jsonl(refined_path)
-    eligible_pairs = {(pid, variant) for variant in VARIANTS for pid in model_eligibility[variant]}
-    available_pairs = set()
-    for record in refined_records:
-        pid = normalise_id(record.get("problem_id"))
-        variant = str(record.get("variant_type", ""))
-        if pid not in raw_ids or variant not in VARIANTS:
-            continue
-        if pid in model_eligibility[variant]:
-            available_pairs.add((pid, variant))
-    missing_pairs = sorted(eligible_pairs - available_pairs)
-
-    model_root = output_root / model / "kfold"
-    model_root.mkdir(parents=True, exist_ok=True)
-    fold_summaries = []
-
-    for fold, fold_split in splits.items():
-        status = split_status(splits, fold)
-        fold_root = model_root / f"fold_{fold}"
-        fold_root.mkdir(parents=True, exist_ok=True)
-
-        write_json(fold_root / "train_ids.json", eligible_slices(fold_split["train"], model_eligibility))
-        write_json(fold_root / "val_ids.json", eligible_slices(fold_split["val"], model_eligibility))
-        write_json(fold_root / "test_ids.json", eligible_slices(fold_split["test"], model_eligibility))
-
-        train_records = []
-        val_records = []
-        skipped_unknown = 0
-        skipped_ineligible = 0
-        for record in refined_records:
-            pid = normalise_id(record.get("problem_id"))
-            variant = str(record.get("variant_type", ""))
-            if pid not in raw_ids:
-                skipped_unknown += 1
+def flatten_training_records(
+    raw_records: list[dict[str, Any]],
+    eligibility: dict[str, set[int]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Convert nested raw samples into the DSPR trajectory format."""
+    rows: list[dict[str, Any]] = []
+    skipped = Counter()
+    seen_sample_ids: set[str] = set()
+    for record in raw_records:
+        pid = normalise_id(record["problem_id"])
+        for variant in VARIANTS:
+            if pid not in eligibility[variant]:
                 continue
-            if variant not in VARIANTS or pid not in model_eligibility[variant]:
-                skipped_ineligible += 1
+            variant_data = record.get(variant)
+            if not isinstance(variant_data, dict):
+                skipped["missing_variant"] += 1
                 continue
-            if status[pid] == "train":
-                train_records.append(record)
-            elif status[pid] == "val":
-                val_records.append(record)
-
-        write_jsonl(fold_root / "train.jsonl", train_records)
-        write_jsonl(fold_root / "val.jsonl", val_records)
-
-        train_pairs = {(normalise_id(row["problem_id"]), row["variant_type"]) for row in train_records}
-        val_pairs = {(normalise_id(row["problem_id"]), row["variant_type"]) for row in val_records}
-        test_slices = eligible_slices(fold_split["test"], model_eligibility)
-        fold_summaries.append(
-            {
-                "fold": fold,
-                "raw_train": len(fold_split["train"]),
-                "raw_val": len(fold_split["val"]),
-                "raw_test": len(fold_split["test"]),
-                "eligible_train_union": len(eligible_slices(fold_split["train"], model_eligibility)["union"]),
-                "eligible_val_union": len(eligible_slices(fold_split["val"], model_eligibility)["union"]),
-                "eligible_test_union": len(test_slices["union"]),
-                "simple_train_pairs": sum(1 for _, variant in train_pairs if variant == "simple"),
-                "hard_train_pairs": sum(1 for _, variant in train_pairs if variant == "hard"),
-                "simple_val_pairs": sum(1 for _, variant in val_pairs if variant == "simple"),
-                "hard_val_pairs": sum(1 for _, variant in val_pairs if variant == "hard"),
-                "train_records": len(train_records),
-                "val_records": len(val_records),
-                "missing_eligible_pairs_total": len(missing_pairs),
-                "skipped_unknown_records": skipped_unknown,
-                "skipped_ineligible_records": skipped_ineligible,
-            }
-        )
-
-    write_json(model_root / "coverage.json", {
-        "model": model,
-        "refined_source": str(refined_path),
-        "eligible_pairs": len(eligible_pairs),
-        "available_eligible_pairs": len(available_pairs),
-        "missing_eligible_pairs": missing_pairs,
-        "folds": fold_summaries,
-    })
-    return {"model": model, "folds": fold_summaries, "missing_pairs": missing_pairs}
+            problem = variant_data.get("problem")
+            samples = variant_data.get("samples", [])
+            if not isinstance(problem, str) or not isinstance(samples, list):
+                skipped["invalid_variant"] += 1
+                continue
+            for index, sample in enumerate(samples):
+                if not isinstance(sample, dict):
+                    skipped["invalid_sample"] += 1
+                    continue
+                if not sample.get("correct") or sample.get("valid", True) is False:
+                    skipped["not_correct_or_invalid"] += 1
+                    continue
+                if sample.get("timed_out", False):
+                    skipped["timed_out"] += 1
+                    continue
+                response = sample.get("response")
+                if not isinstance(response, str) or not response.strip():
+                    skipped["empty_response"] += 1
+                    continue
+                sample_id = str(sample.get("sample_id") or f"{pid}_{variant}_{index}")
+                if sample_id in seen_sample_ids:
+                    raise ValueError(f"Duplicate sample_id in raw dataset: {sample_id}")
+                seen_sample_ids.add(sample_id)
+                rows.append(
+                    {
+                        "problem_id": pid,
+                        "problem": problem,
+                        "response": response,
+                        "variant_type": variant,
+                        "target_alpha": 0.0 if variant == "simple" else 1.0,
+                        "sample_id": sample_id,
+                    }
+                )
+    return rows, dict(skipped)
 
 
 def write_balance_csv(
     path: Path,
     splits: dict[int, dict[str, list[int]]],
-    metadata: dict[int, dict[str, Any]],
-    eligibility: dict[str, dict[str, set[int]]],
+    metadata: dict[int, dict[str, str]],
+    eligibility: dict[str, set[int]],
 ) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "outer_fold",
         "split",
         "raw_count",
         "type_counts",
         "level_counts",
-        "qwen_simple_eligible",
-        "qwen_hard_eligible",
-        "deepseek_simple_eligible",
-        "deepseek_hard_eligible",
+        "simple_eligible",
+        "hard_eligible",
     ]
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for fold, fold_split in splits.items():
             for split_name, ids in fold_split.items():
-                type_counts = Counter(metadata[pid]["type"] for pid in ids)
-                level_counts = Counter(metadata[pid]["level"] for pid in ids)
                 writer.writerow(
                     {
                         "outer_fold": fold,
                         "split": split_name,
                         "raw_count": len(ids),
-                        "type_counts": json.dumps(dict(sorted(type_counts.items())), ensure_ascii=False),
-                        "level_counts": json.dumps(dict(sorted(level_counts.items())), ensure_ascii=False),
-                        **{
-                            f"{model}_{variant}_eligible": sum(
-                                pid in eligibility[model][variant] for pid in ids
-                            )
-                            for model in MODELS
-                            for variant in VARIANTS
-                        },
+                        "type_counts": json.dumps(
+                            dict(sorted(Counter(metadata[pid]["type"] for pid in ids).items())),
+                            ensure_ascii=False,
+                        ),
+                        "level_counts": json.dumps(
+                            dict(sorted(Counter(metadata[pid]["level"] for pid in ids).items())),
+                            ensure_ascii=False,
+                        ),
+                        "simple_eligible": sum(pid in eligibility["simple"] for pid in ids),
+                        "hard_eligible": sum(pid in eligibility["hard"] for pid in ids),
                     }
                 )
 
 
+def build_qwen_folds(
+    raw_records: list[dict[str, Any]],
+    eligibility: dict[str, set[int]],
+    splits: dict[int, dict[str, list[int]]],
+    qwen_root: Path,
+) -> dict[str, Any]:
+    raw_by_id = {normalise_id(record["problem_id"]): record for record in raw_records}
+    training_rows, skipped = flatten_training_records(raw_records, eligibility)
+    fold_summaries = []
+
+    for fold, fold_split in splits.items():
+        fold_root = qwen_root / f"fold_{fold}"
+        status = split_status(splits, fold)
+        for split_name, ids in fold_split.items():
+            write_json(fold_root / f"{split_name}_ids.json", eligible_slices(ids, eligibility))
+        write_jsonl(
+            fold_root / "test.jsonl",
+            (raw_by_id[pid] for pid in fold_split["test"]),
+        )
+
+        train_records = [row for row in training_rows if status[row["problem_id"]] == "train"]
+        val_records = [row for row in training_rows if status[row["problem_id"]] == "val"]
+        write_jsonl(fold_root / "train.jsonl", train_records)
+        write_jsonl(fold_root / "val.jsonl", val_records)
+
+        train_pairs = {(row["problem_id"], row["variant_type"]) for row in train_records}
+        val_pairs = {(row["problem_id"], row["variant_type"]) for row in val_records}
+        fold_summaries.append(
+            {
+                "fold": fold,
+                "raw_train": len(fold_split["train"]),
+                "raw_val": len(fold_split["val"]),
+                "raw_test": len(fold_split["test"]),
+                "eligible_train_union": len(eligible_slices(fold_split["train"], eligibility)["union"]),
+                "eligible_val_union": len(eligible_slices(fold_split["val"], eligibility)["union"]),
+                "eligible_test_union": len(eligible_slices(fold_split["test"], eligibility)["union"]),
+                "simple_train_pairs": sum(variant == "simple" for _, variant in train_pairs),
+                "hard_train_pairs": sum(variant == "hard" for _, variant in train_pairs),
+                "simple_val_pairs": sum(variant == "simple" for _, variant in val_pairs),
+                "hard_val_pairs": sum(variant == "hard" for _, variant in val_pairs),
+                "train_records": len(train_records),
+                "val_records": len(val_records),
+            }
+        )
+
+    return {
+        "model": "qwen-2.5",
+        "training_records": len(training_rows),
+        "training_pairs": len({(row["problem_id"], row["variant_type"]) for row in training_rows}),
+        "skipped_raw_samples": skipped,
+        "folds": fold_summaries,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--raw-data", default="data/math_paired.jsonl")
-    parser.add_argument("--qwen-eligibility", default="output/qwen-2.5/eligible_problem_ids_ged_range_ge_3.json")
-    parser.add_argument("--deepseek-eligibility", default="output/deepseek/eligible_problem_ids_ged_range_ge_3.json")
-    parser.add_argument("--qwen-refined", default="data/qwen/dcpr_dataset.jsonl")
-    parser.add_argument("--deepseek-refined", default="data/deepseek/dcpr_dataset.jsonl")
-    parser.add_argument("--output-root", default="data")
+    parser.add_argument("--raw-data", required=True, help="Nested raw all_records.jsonl")
+    parser.add_argument("--eligible", required=True, help="Single Qwen eligibility JSON manifest")
+    parser.add_argument(
+        "--output-root",
+        default="output/qwen-2.5",
+        help="Qwen output directory; folds are written under <output-root>/kfold",
+    )
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--validation-buckets",
         type=int,
         default=8,
-        help="Internal development buckets; selecting one gives approximately 10%% of all raw groups.",
+        help="Internal development buckets; one bucket is used for validation.",
     )
     args = parser.parse_args()
+    if args.k < 2:
+        raise ValueError("--k must be at least 2")
 
     raw_path = Path(args.raw_data)
+    eligibility_path = Path(args.eligible)
     output_root = Path(args.output_root)
     raw_records = load_raw_records(raw_path)
-    raw_records_by_id = {
-        normalise_id(record["problem_id"]): record for record in raw_records
-    }
     metadata = load_raw_metadata(raw_records)
     raw_ids = sorted(metadata)
-    eligibility_paths = {
-        "qwen": Path(args.qwen_eligibility),
-        "deepseek": Path(args.deepseek_eligibility),
-    }
-    eligibility_payloads = {
-        model: load_eligibility_payload(path)
-        for model, path in eligibility_paths.items()
-    }
-    protocol_keys = ("score_field", "ged_range_threshold", "min_correct_samples", "top_k")
-    qwen_protocol = tuple(eligibility_payloads["qwen"].get(key) for key in protocol_keys)
-    deepseek_protocol = tuple(eligibility_payloads["deepseek"].get(key) for key in protocol_keys)
-    if qwen_protocol != deepseek_protocol:
-        raise ValueError(
-            "Qwen and DeepSeek eligibility manifests use different protocols: "
-            f"qwen={qwen_protocol}, deepseek={deepseek_protocol}"
-        )
-    eligibility = {
-        model: load_eligibility(path, set(raw_ids))
-        for model, path in eligibility_paths.items()
-    }
+    eligibility, eligibility_payload = load_eligibility(eligibility_path, set(raw_ids))
+
     labels = build_labels(raw_ids, metadata, eligibility)
     outer_assignment = balanced_assign(raw_ids, labels, args.k, args.seed)
     splits = make_fold_splits(
@@ -435,50 +388,37 @@ def main() -> None:
         args.validation_buckets,
     )
 
-    kfold_root = output_root / "kfold"
-    kfold_root.mkdir(parents=True, exist_ok=True)
+    qwen_root = output_root / "kfold"
+    qwen_summary = build_qwen_folds(
+        raw_records,
+        eligibility,
+        splits,
+        qwen_root,
+    )
 
-    # Shared raw test triplets are useful for later inference.  Training
-    # supervision remains model-specific and is written below under each
-    # model's kfold directory.
-    for fold in range(args.k):
-        test_ids = splits[fold]["test"]
-        write_jsonl(
-            kfold_root / f"fold_{fold}" / "test_raw.jsonl",
-            [raw_records_by_id[pid] for pid in test_ids],
-        )
-
-    assignment_records = []
+    assignments = []
     for pid in raw_ids:
-        fold_status = {str(fold): split_status(splits, fold)[pid] for fold in range(args.k)}
-        assignment_records.append(
+        assignments.append(
             {
                 "problem_id": pid,
                 **metadata[pid],
-                "qwen_simple_eligible": pid in eligibility["qwen"]["simple"],
-                "qwen_hard_eligible": pid in eligibility["qwen"]["hard"],
-                "deepseek_simple_eligible": pid in eligibility["deepseek"]["simple"],
-                "deepseek_hard_eligible": pid in eligibility["deepseek"]["hard"],
+                "simple_eligible": pid in eligibility["simple"],
+                "hard_eligible": pid in eligibility["hard"],
                 "outer_fold": outer_assignment[pid],
-                "fold_status": fold_status,
+                "fold_status": {
+                    str(fold): split_status(splits, fold)[pid] for fold in range(args.k)
+                },
             }
         )
-    write_jsonl(kfold_root / "fold_assignments.jsonl", assignment_records)
-    write_balance_csv(kfold_root / "fold_balance.csv", splits, metadata, eligibility)
-
-    model_summaries = {}
-    for model, refined_arg in (("qwen", args.qwen_refined), ("deepseek", args.deepseek_refined)):
-        model_summaries[model] = build_model_fold_data(
-            model,
-            Path(refined_arg),
-            eligibility[model],
-            set(raw_ids),
-            splits,
-            output_root,
-        )
+    write_jsonl(qwen_root / "fold_assignments.jsonl", assignments)
+    write_balance_csv(qwen_root / "fold_balance.csv", splits, metadata, eligibility)
+    write_json(qwen_root / "coverage.json", qwen_summary)
 
     manifest = {
+        "model": "qwen-2.5",
         "raw_data": str(raw_path),
+        "eligibility": str(eligibility_path),
+        "kfold_root": str(qwen_root),
         "num_raw_problem_groups": len(raw_ids),
         "k": args.k,
         "seed": args.seed,
@@ -489,47 +429,32 @@ def main() -> None:
             "val": (1 - 1 / args.k) / args.validation_buckets,
             "test": 1 / args.k,
         },
-        # Keep the selected protocol explicit.  This is read from the
-        # manifests rather than hard-coded so normalized-GED and legacy raw-GED
-        # runs cannot be mislabeled in the fold metadata.
-        "eligibility_protocols": {
-            model: {
-                "score_field": payload.get("score_field", "ged"),
-                "range_threshold": payload.get("ged_range_threshold"),
-                "min_correct_samples": payload.get("min_correct_samples", 1),
-                "top_k": payload.get("top_k"),
-                "comparison": payload.get("comparison"),
-            }
-            for model, payload in eligibility_payloads.items()
+        "eligibility_protocol": {
+            key: eligibility_payload.get(key)
+            for key in ("score_field", "ged_range_threshold", "min_correct_samples", "top_k", "comparison")
+            if key in eligibility_payload
         },
-        "eligibility_threshold": eligibility_payloads["qwen"].get("ged_range_threshold"),
-        "eligibility_definition": eligibility_payloads["qwen"].get("comparison"),
-        "eligibility_sources": {
-            "qwen": str(eligibility_paths["qwen"]),
-            "deepseek": str(eligibility_paths["deepseek"]),
+        "eligibility_counts": eligibility_payload.get("counts", {
+            "simple": len(eligibility["simple"]),
+            "hard": len(eligibility["hard"]),
+            "union": len(eligibility["simple"] | eligibility["hard"]),
+        }),
+        "training": {
+            "source": "raw-data nested simple/hard samples",
+            "filter": "eligible variant, correct, valid, non-timeout, non-empty response",
+            "target_alpha": {"simple": 0.0, "hard": 1.0},
         },
-        "refined_sources": {
-            "qwen": str(Path(args.qwen_refined)),
-            "deepseek": str(Path(args.deepseek_refined)),
-        },
-        "model_summaries": model_summaries,
+        "coverage": qwen_summary,
         "notes": [
-            "Outer folds are shared across Qwen and DeepSeek and cover all raw problem groups.",
-            "Model-specific eligibility is used as a training-supervision/evaluation mask, not to change the outer test universe.",
-            "Each outer fold has an internal validation subset selected only from its development groups.",
-            "Refined records unavailable for an eligible problem-variant pair are reported in each model coverage.json and are not fabricated.",
+            "Outer test folds cover all raw problem groups exactly once.",
+            "Eligibility masks prefix supervision and reporting slices; they do not change the raw fold universe.",
         ],
     }
-    write_json(kfold_root / "manifest.json", manifest)
+    write_json(qwen_root / "manifest.json", manifest)
 
-    print(f"Built {args.k}-fold shared assignment for {len(raw_ids)} raw problem groups")
-    for model in MODELS:
-        summary = model_summaries[model]
-        print(
-            f"{model}: missing eligible pairs in refined source="
-            f"{len(summary['missing_pairs'])}"
-        )
-    print(f"Manifest: {kfold_root / 'manifest.json'}")
+    print(f"Built {args.k}-fold Qwen assignment for {len(raw_ids)} raw problem groups")
+    print(f"Training records: {qwen_summary['training_records']}")
+    print(f"Manifest: {qwen_root / 'manifest.json'}")
 
 
 if __name__ == "__main__":

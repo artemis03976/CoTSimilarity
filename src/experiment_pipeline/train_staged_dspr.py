@@ -254,10 +254,12 @@ def resolve_data_paths(args: argparse.Namespace) -> dict[str, Path | set[int] | 
     prefix_val = Path(args.prefix_val_data_path) if args.prefix_val_data_path else None
     train_ids_explicit = bool(args.router_train_ids)
     val_ids_explicit = bool(args.router_val_ids)
-    eval_ids_explicit = bool(args.router_eval_ids)
+    router_eval_ids = getattr(args, 'router_eval_ids', None)
+    router_train_sources = getattr(args, 'router_train_sources', None)
+    eval_ids_explicit = bool(router_eval_ids)
     train_ids = Path(args.router_train_ids) if args.router_train_ids else None
     val_ids = Path(args.router_val_ids) if args.router_val_ids else None
-    eval_ids = Path(args.router_eval_ids) if args.router_eval_ids else None
+    eval_ids = Path(router_eval_ids) if router_eval_ids else None
 
     if args.fold is not None:
         fold_dir = Path(args.kfold_root) / f'fold_{args.fold}'
@@ -322,7 +324,7 @@ def resolve_data_paths(args: argparse.Namespace) -> dict[str, Path | set[int] | 
         if router_eval_ids is not None and router_val_ids is not None and router_val_ids & router_eval_ids:
             raise ValueError('Router validation/evaluation ID manifests overlap')
 
-        train_sources = parse_source_filter(args.router_train_sources)
+        train_sources = parse_source_filter(router_train_sources)
         if train_sources is not None:
             source_map = read_source_map(math_paired)
             unknown_ids = router_train_ids - set(source_map)
@@ -655,7 +657,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--kfold-root', '--kfold_root',
-        default='data/qwen/kfold',
+        default='output/qwen-2.5/kfold',
         help='Prepared K-fold root; each fold contains train/val JSONL and ID manifests.',
     )
     parser.add_argument(

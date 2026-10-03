@@ -293,8 +293,8 @@ def run_dynamic_schedule(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-root", default="checkpoints/qwen_lora_qv_r3_seed42")
-    parser.add_argument("--test-root", default="data/kfold")
-    parser.add_argument("--id-root", default="data/qwen/kfold")
+    parser.add_argument("--test-root", default="output/qwen-2.5/kfold")
+    parser.add_argument("--id-root", default="output/qwen-2.5/kfold")
     parser.add_argument("--output-root", default="output/qwen_lora_qv_r3_seed42")
     parser.add_argument("--inference-script", default="scripts/inference.py")
     parser.add_argument("--checkpoint-selection", choices=("best", "latest"), default="best")
@@ -343,7 +343,7 @@ def main() -> int:
             expected_ids = [args.problem_id]
         else:
             expected_ids = all_expected_ids
-        data_path = test_root / f"fold_{fold}" / "test_raw.jsonl"
+        data_path = test_root / f"fold_{fold}" / "test.jsonl"
         if not data_path.is_file():
             raise FileNotFoundError(f"Missing Fold {fold} test data: {data_path}")
         raw_ids = [int(record["problem_id"]) for record in read_jsonl(data_path)]
