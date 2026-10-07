@@ -76,7 +76,7 @@ def parse_args(argv=None):
                         help='Answer correctness JSONL path; default: <output-root>/all_records_50.jsonl')
     parser.add_argument('--all-results-output', type=str, default=None,
                         help='GED summary JSONL output path; default: <output-root>/all_ged_results.jsonl')
-    parser.add_argument('--problem-id', type=int, help='Specific problem ID to analyze (default: all 279)')
+    parser.add_argument('--problem-id', type=int, help='Specific problem ID to analyze (default: all input problems)')
     parser.add_argument('--num-samples', type=int, default=50, help='Number of samples per variant (max 50)')
     parser.add_argument('--save-csv', action='store_true', help='Save individual CSV files per problem')
     parser.add_argument(

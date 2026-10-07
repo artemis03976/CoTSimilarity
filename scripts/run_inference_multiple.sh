@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# New canonical-data protocol.  Override these variables when launching a
-# different model, GPU, split, or sampling budget, for example:
+# Generate trajectories from the canonical problem dataset. Override these
+# variables for a different model, GPU, dataset, or sampling budget, for example:
 #
-#   SPLIT=test CUDA_VISIBLE_DEVICES=1 bash scripts/run_inference_multiple.sh
+#   CUDA_VISIBLE_DEVICES=1 bash scripts/run_inference_multiple.sh
 #
 MODEL="${MODEL:-Qwen/Qwen2.5-Math-7B-Instruct}"
 GPU="${GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
-SPLIT="${SPLIT:-development}"
 SAMPLES_PER_PROBLEM="${SAMPLES_PER_PROBLEM:-8}"
 SEED="${SEED:-42}"
-DATA_PATH="${DATA_PATH:-data/canonical_splits_seed42/${SPLIT}.jsonl}"
-OUTPUT_DIR="${OUTPUT_DIR:-output/qwen-2.5/multiple_seed42/${SPLIT}}"
+DATA_PATH="${DATA_PATH:-data/canonical_math_paired.jsonl}"
+OUTPUT_DIR="${OUTPUT_DIR:-output/qwen-2.5/multiple_seed42}"
 
 if [[ ! -f "${DATA_PATH}" ]]; then
   echo "Input JSONL does not exist: ${DATA_PATH}" >&2
@@ -20,7 +19,6 @@ if [[ ! -f "${DATA_PATH}" ]]; then
 fi
 
 echo "Model: ${MODEL}"
-echo "Split: ${SPLIT}"
 echo "Input: ${DATA_PATH}"
 echo "Output: ${OUTPUT_DIR}"
 echo "GPU: ${GPU}"

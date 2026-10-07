@@ -31,12 +31,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--data-path",
         "--data_path",
-        default="data/canonical_splits_seed42/development.jsonl",
+        default="data/canonical_math_paired.jsonl",
     )
     parser.add_argument(
         "--output-dir",
         "--output_dir",
-        default="output/qwen-2.5/multiple_seed42/development",
+        default="output/qwen-2.5/multiple_seed42",
     )
     parser.add_argument("--problem-id", "--id", type=int, default=None)
     parser.add_argument("--num", type=int, default=None)

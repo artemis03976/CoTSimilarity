@@ -32,8 +32,10 @@ TRAIN_LOG_PREFIX = "__DSPR_TRAIN_LOG__"
 class ProgressEventCallback(TrainerCallback):
     """Emit machine-readable optimizer-step progress for the K-fold parent."""
 
-    @staticmethod
-    def _emit(event: str, state) -> None:
+    def __init__(self, stage: str | None = None):
+        self.stage = stage
+
+    def _emit(self, event: str, state) -> None:
         payload = {
             "event": event,
             "step": int(state.global_step),
@@ -42,6 +44,8 @@ class ProgressEventCallback(TrainerCallback):
             "best_metric": getattr(state, "best_metric", None),
             "best_model_checkpoint": getattr(state, "best_model_checkpoint", None),
         }
+        if self.stage is not None:
+            payload["stage"] = self.stage
         print(
             PROGRESS_EVENT_PREFIX + json.dumps(payload, separators=(",", ":")),
             file=sys.stdout,

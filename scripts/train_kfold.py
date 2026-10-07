@@ -17,7 +17,7 @@ def _usage() -> str:
     return (
         "Usage: python scripts/train_kfold.py METHOD [METHOD OPTIONS]\n"
         "\n"
-        "METHOD: dspr | lora\n"
+        "METHOD: dspr (router -> frozen-router prefix) | lora\n"
         "Use 'python scripts/train_kfold.py METHOD --help' for method-specific options."
     )
 

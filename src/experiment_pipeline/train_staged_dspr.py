@@ -31,7 +31,7 @@ from dspr_training.dataset import DSPRDataset, ProblemResampledDSPRDataset, Rout
 from dspr_training.router_cache import load_or_build_router_context_cache
 from dspr_training.router_trainer import RouterPromptTrainer, compute_router_metrics
 from dspr_training.trainer import DSPRTrainer, compute_dspr_metrics
-from experiment_pipeline.train_dspr import TrainingHistoryCallback, update_steps_per_epoch
+from experiment_pipeline.train_dspr import ProgressEventCallback, TrainingHistoryCallback, update_steps_per_epoch
 
 
 def set_seed(seed: int) -> None:
@@ -196,9 +196,7 @@ def read_id_manifest(path: Path) -> set[int]:
     try:
         payload = json.loads(path.read_text(encoding='utf-8'))
     except json.JSONDecodeError:
-        # The canonical development/test files are JSONL records rather than
-        # ``{"all": [...]}`` manifests.  Accepting them directly avoids a
-        # second one-off ID-generation script for router-only experiments.
+        # Accept problem records directly for router-only experiments.
         ids = read_jsonl_ids(path)
         if ids:
             return ids
@@ -207,13 +205,8 @@ def read_id_manifest(path: Path) -> set[int]:
         raise ValueError(f'Expected an ID manifest object: {path}')
     values = payload.get('all')
     if values is None:
-        # Also accept a simple list-like manifest for portability.  The fixed
-        # canonical outer-split manifest stores IDs as
-        # ``problem_ids: {development: [...], test: [...]}``; for router-only
-        # runs, its development list is the natural default training pool.
-        nested = payload.get('problem_ids')
-        values = nested.get('development') if isinstance(nested, dict) else nested
-    if values is None:
+        values = payload.get('problem_ids')
+    if not isinstance(values, list):
         raise ValueError(f'ID manifest has no usable IDs: {path}')
     return {int(value) for value in values}
 
@@ -246,9 +239,9 @@ def parse_source_filter(value: str | None) -> set[str] | None:
 
 def resolve_data_paths(args: argparse.Namespace) -> dict[str, Path | set[int] | None]:
     """Resolve canonical router source and fold-specific prefix inputs."""
-    math_paired = Path(args.math_paired_path)
-    if not math_paired.is_file():
-        raise FileNotFoundError(f'Canonical math-paired source not found: {math_paired}')
+    problem_dataset = Path(args.problem_dataset)
+    if not problem_dataset.is_file():
+        raise FileNotFoundError(f'Problem dataset not found: {problem_dataset}')
 
     prefix_train = Path(args.prefix_train_data_path) if args.prefix_train_data_path else None
     prefix_val = Path(args.prefix_val_data_path) if args.prefix_val_data_path else None
@@ -290,7 +283,7 @@ def resolve_data_paths(args: argparse.Namespace) -> dict[str, Path | set[int] | 
                 raise FileNotFoundError(f'Router training ID manifest not found: {train_ids}')
             # A fold may have train.jsonl/val.jsonl but no explicit manifests;
             # use those files only to recover IDs. Prompt text still comes from
-            # math_paired.jsonl below.
+            # the problem dataset below.
             train_ids = None
         if val_ids is not None and not val_ids.is_file():
             if val_ids_explicit:
@@ -326,7 +319,7 @@ def resolve_data_paths(args: argparse.Namespace) -> dict[str, Path | set[int] | 
 
         train_sources = parse_source_filter(router_train_sources)
         if train_sources is not None:
-            source_map = read_source_map(math_paired)
+            source_map = read_source_map(problem_dataset)
             unknown_ids = router_train_ids - set(source_map)
             if unknown_ids:
                 raise ValueError(
@@ -346,7 +339,7 @@ def resolve_data_paths(args: argparse.Namespace) -> dict[str, Path | set[int] | 
         router_eval_ids = None
 
     return {
-        'math_paired': math_paired,
+        'problem_dataset': problem_dataset,
         'prefix_train': prefix_train,
         'prefix_val': prefix_val,
         'router_train_ids': router_train_ids,
@@ -359,30 +352,30 @@ def run_router_stage(
     model: DSPRModel,
     args: argparse.Namespace,
     config: DSPRConfig,
-    math_paired_path: Path,
+    problem_dataset: Path,
     train_ids: set[int],
     val_ids: set[int] | None,
     eval_ids: set[int] | None = None,
 ) -> Path:
     stage_dir = Path(args.output_path) / 'router'
-    train_dataset = RouterPromptDataset.from_math_paired(
-        math_paired_path,
+    train_dataset = RouterPromptDataset.from_problem_dataset(
+        problem_dataset,
         model.tokenizer,
         config.max_seq_length,
         problem_ids=train_ids,
     )
     val_dataset = None
     if val_ids is not None:
-        val_dataset = RouterPromptDataset.from_math_paired(
-            math_paired_path,
+        val_dataset = RouterPromptDataset.from_problem_dataset(
+            problem_dataset,
             model.tokenizer,
             config.max_seq_length,
             problem_ids=val_ids,
         )
     eval_dataset = None
     if eval_ids is not None:
-        eval_dataset = RouterPromptDataset.from_math_paired(
-            math_paired_path,
+        eval_dataset = RouterPromptDataset.from_problem_dataset(
+            problem_dataset,
             model.tokenizer,
             config.max_seq_length,
             problem_ids=eval_ids,
@@ -394,7 +387,7 @@ def run_router_stage(
     )
     contexts = load_or_build_router_context_cache(
         model,
-        math_paired_path,
+        problem_dataset,
         model.tokenizer,
         config.max_seq_length,
         cache_path,
@@ -410,6 +403,8 @@ def run_router_stage(
         TrainingHistoryCallback(write_train_log=True),
         KeepFrozenBackboneEvalCallback(),
     ]
+    if args.emit_progress_events:
+        callbacks.append(ProgressEventCallback(stage='router'))
     if val_dataset is not None:
         add_early_stopping(callbacks, args.router_early_stopping_patience, args.early_stopping_threshold)
 
@@ -515,6 +510,8 @@ def run_prefix_stage(
         KeepRouterEvalCallback(),
         KeepFrozenBackboneEvalCallback(),
     ]
+    if args.emit_progress_events:
+        callbacks.append(ProgressEventCallback(stage=stage_name))
     add_early_stopping(callbacks, args.prefix_early_stopping_patience, args.early_stopping_threshold)
 
     model.router.requires_grad_(False)
@@ -593,6 +590,8 @@ def run_joint_stage(
         TrainingHistoryCallback(write_train_log=True),
         KeepFrozenBackboneEvalCallback(),
     ]
+    if args.emit_progress_events:
+        callbacks.append(ProgressEventCallback(stage='joint'))
     add_early_stopping(callbacks, args.joint_early_stopping_patience, args.early_stopping_threshold)
     training_args = make_training_args(
         output_dir=stage_dir,
@@ -651,8 +650,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--router-intermediate-dim', '--router_intermediate_dim', type=int, default=defaults.router_intermediate_dim)
     parser.add_argument('--router-dropout', '--router_dropout', type=float, default=defaults.router_dropout)
     parser.add_argument(
-        '--math-paired-path', '--math_paired_path',
-        default='data/math_paired.jsonl',
+        '--problem-dataset', '--problem_dataset',
+        default='data/canonical_math_paired.jsonl',
         help='Canonical source containing original/simple/hard problem variants.',
     )
     parser.add_argument(
@@ -666,11 +665,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--router-train-ids', '--router_train_ids', default=None,
-        help='Optional ID manifest or canonical split JSONL. IDs select examples from --math-paired-path; prompt text is never read from this file.',
+        help='Optional ID manifest or canonical split JSONL. IDs select examples from --problem-dataset; prompt text is never read from this file.',
     )
     parser.add_argument(
         '--router-val-ids', '--router_val_ids', default=None,
-        help='Optional validation ID manifest or canonical split JSONL. IDs select examples from --math-paired-path.',
+        help='Optional validation ID manifest or canonical split JSONL. IDs select examples from --problem-dataset.',
     )
     parser.add_argument(
         '--router-eval-ids', '--router_eval_ids', default=None,
@@ -714,6 +713,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--seed', type=int, default=defaults.seed)
     parser.add_argument('--device', default=defaults.device)
     parser.add_argument('--logging-steps', '--logging_steps', type=int, default=10)
+    parser.add_argument('--emit-progress-events', '--emit_progress_events', action='store_true')
     parser.add_argument('--save-total-limit', '--save_total_limit', type=int, default=3)
     parser.add_argument('--early-stopping-threshold', '--early_stopping_threshold', type=float, default=0.0)
     parser.add_argument('--router-early-stopping-patience', '--router_early_stopping_patience', type=int, default=3)
@@ -756,7 +756,7 @@ def main() -> int:
             model,
             args,
             config,
-            paths['math_paired'],
+            paths['problem_dataset'],
             paths['router_train_ids'],
             paths['router_val_ids'],
             paths['router_eval_ids'],

@@ -16,7 +16,7 @@ Run a Fold-0 smoke test on the held-out problem 2::
 
     python scripts/evaluate.py dspr run \
         --folds 0 --problem-id 2 --gpus 0 \
-        --output-root output/qwen_kfold_seed42_smoke
+        --output-root output/qwen_staged_kfold_seed42_smoke
 """
 
 from __future__ import annotations
@@ -171,6 +171,11 @@ def eval_loss_for_checkpoint(state: dict[str, Any], step: int) -> float | None:
 
 def resolve_checkpoint(fold_root: Path, mode: str = "best") -> tuple[Path, dict[str, Any]]:
     """Resolve a trainable checkpoint, repairing stale absolute best paths."""
+    # The prefix stage saves both the trained prefixes and its frozen router.
+    # Restrict best-checkpoint selection to that stage, whose step counter is
+    # independent from the router stage's counter.
+    if (fold_root / "prefix").is_dir():
+        return resolve_checkpoint(fold_root / "prefix", mode)
     direct = checkpoint_file(fold_root)
     checkpoint_dirs = sorted(
         [path for path in fold_root.glob("checkpoint-*") if path.is_dir()],
@@ -309,14 +314,19 @@ def build_inference_command(
     return command
 
 
-def expected_ids_for_fold(id_root: Path, fold: int) -> list[int]:
+def held_out_id_path(id_root: Path, fold: int) -> Path:
     path = id_root / f"fold_{fold}" / "test_ids.json"
     if not path.is_file():
         raise FileNotFoundError(f"Missing fold test IDs: {path}")
+    return path
+
+
+def expected_ids_for_fold(id_root: Path, fold: int) -> list[int]:
+    path = held_out_id_path(id_root, fold)
     payload = read_json(path)
     ids = [normalise_id(value) for value in payload.get("all", [])]
     if not ids or len(ids) != len(set(ids)):
-        raise ValueError(f"Invalid or duplicate test IDs in {path}")
+        raise ValueError(f"Invalid or duplicate held-out IDs in {path}")
     return sorted(ids)
 
 
@@ -368,10 +378,10 @@ def output_is_nonempty(path: Path) -> bool:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint-root", default="checkpoints/qwen_kfold_seed42")
+    parser.add_argument("--checkpoint-root", default="checkpoints/qwen_staged_kfold_seed42")
     parser.add_argument("--test-root", default="output/qwen-2.5/kfold")
     parser.add_argument("--id-root", default="output/qwen-2.5/kfold")
-    parser.add_argument("--output-root", default="output/qwen_kfold_seed42")
+    parser.add_argument("--output-root", default="output/qwen_staged_kfold_seed42")
     parser.add_argument("--inference-script", default="scripts/inference.py")
     parser.add_argument("--checkpoint-selection", choices=("best", "latest"), default="best")
     parser.add_argument("--folds", nargs="+", type=int, default=None)
@@ -383,8 +393,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--context-layer-idx", type=int, default=15)
     parser.add_argument("--prefix-length", type=int, default=15)
-    parser.add_argument("--router-intermediate-dim", type=int, default=256)
-    parser.add_argument("--router-dropout", type=float, default=0.05)
+    parser.add_argument("--router-intermediate-dim", type=int, default=64)
+    parser.add_argument("--router-dropout", type=float, default=0.10)
     parser.add_argument("--max-seq-length", type=int, default=2048)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)

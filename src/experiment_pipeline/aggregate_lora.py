@@ -205,7 +205,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-root", default="output/qwen_lora_qv_r3_seed42")
     parser.add_argument("--id-root", default="output/qwen-2.5/kfold")
-    parser.add_argument("--raw-data", default="data/math_paired.jsonl")
+    parser.add_argument("--raw-data", default="data/canonical_math_paired.jsonl")
     parser.add_argument(
         "--base",
         default="output/qwen-2.5/greedy/all_records.jsonl",
@@ -217,7 +217,7 @@ def parse_args() -> argparse.Namespace:
         help="DSPR OOF result; use an empty string to skip",
     )
     parser.add_argument("--expected-samples", type=int, default=1)
-    parser.add_argument("--expected-problems", type=int, default=279)
+    parser.add_argument("--expected-problems", type=int, default=None)
     parser.add_argument(
         "--expected-simple-eligible",
         type=int,
@@ -252,7 +252,7 @@ def main() -> int:
     fold_ids, eligible = common.load_fold_expectations(id_root)
     raw_records = common.load_id_map(common.read_jsonl(raw_path), raw_path)
     all_ids = set(raw_records)
-    if len(all_ids) != args.expected_problems:
+    if args.expected_problems is not None and len(all_ids) != args.expected_problems:
         raise ValueError(
             f"Raw problem count is {len(all_ids)}; expected {args.expected_problems}"
         )

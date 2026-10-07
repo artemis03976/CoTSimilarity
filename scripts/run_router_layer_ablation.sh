@@ -3,8 +3,8 @@
 set -euo pipefail
 
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-Math-7B-Instruct}"
-MATH_PAIRED="${MATH_PAIRED:-data/math_paired.jsonl}"
-KFOLD_ROOT="${KFOLD_ROOT:-data/kfold_normalized/qwen/kfold}"
+PROBLEM_DATASET="${PROBLEM_DATASET:-data/canonical_math_paired.jsonl}"
+KFOLD_ROOT="${KFOLD_ROOT:-output/qwen-2.5/kfold}"
 FOLD="${FOLD:-0}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-checkpoints/qwen-2.5_router_layer_ablation_seed42}"
 SEED="${SEED:-42}"
@@ -18,8 +18,8 @@ ROUTER_DROPOUT="${ROUTER_DROPOUT:-0.10}"
 ROUTER_TARGET_SMOOTHING="${ROUTER_TARGET_SMOOTHING:-0.05}"
 LOGGING_STEPS="${LOGGING_STEPS:-10}"
 
-if [[ ! -f "${MATH_PAIRED}" ]]; then
-    echo "Error: canonical source not found: ${MATH_PAIRED}" >&2
+if [[ ! -f "${PROBLEM_DATASET}" ]]; then
+    echo "Error: canonical source not found: ${PROBLEM_DATASET}" >&2
     exit 1
 fi
 
@@ -81,7 +81,7 @@ for LAYER_IDX in "${LAYER_INDICES[@]}"; do
         --context-layer-idx "${LAYER_IDX}" \
         --router-intermediate-dim "${ROUTER_INTERMEDIATE_DIM:-64}" \
         --router-dropout "${ROUTER_DROPOUT}" \
-        --math-paired-path "${MATH_PAIRED}" \
+        --problem-dataset "${PROBLEM_DATASET}" \
         --kfold-root "${KFOLD_ROOT}" \
         --fold "${FOLD}" \
         --router-context-cache-path "${CACHE_PATH}" \

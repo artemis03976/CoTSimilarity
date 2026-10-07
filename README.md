@@ -15,7 +15,7 @@ Most workflows are driven by scripts under `scripts/`, with reusable implementat
 |   +-- train.py                      # Unified DSPR/SPT/LoRA training entrypoint
 |   +-- train_kfold.py                # Unified multi-GPU DSPR/LoRA K-fold training
 |   +-- evaluate.py                   # Unified K-fold inference and OOF aggregation
-|   +-- run_dspr_pipeline.sh          # Example DSPR train/eval pipeline
+|   +-- run_dspr_pipeline.sh          # Staged K-fold DSPR training, inference, and OOF metrics
 |   +-- run_ablation_*.sh             # Ablation for DSPR hyperparameters
 |
 +-- src/
@@ -94,7 +94,7 @@ export PYTHONPATH=src
 
 Common paths used by the current scripts:
 
-- `data/math_paired.jsonl`: source math problems.
+- `data/canonical_math_paired.jsonl`: source math problems.
 - `output/<model>/multiple_seed42/all_records.jsonl`: accepted original/simple/hard responses.
 - `output/<model>/multiple_seed42/raw_generations.jsonl`: all multi-path attempts, including rejected paths.
 - `output/<model>/multiple_seed42/generation_qc.json`: decoding and validation audit summary.
@@ -118,7 +118,7 @@ trajectory records while keeping the router fixed:
 
 ```bash
 python scripts/train.py staged_dspr \
-  --math-paired-path data/math_paired.jsonl \
+  --problem-dataset data/canonical_math_paired.jsonl \
   --kfold-root output/qwen-2.5/kfold \
   --fold 0 \
   --output-path checkpoints/qwen-2.5_staged_seed42 \
@@ -137,7 +137,7 @@ The router artifact is saved as
 optional short joint calibration can be enabled with `--joint-epochs N`; it
 uses the small `--joint-router-learning-rate` rather than the main router rate.
 
-The staged pipeline treats `data/math_paired.jsonl` as the only canonical
+The staged pipeline treats `data/canonical_math_paired.jsonl` as the only canonical
 source of problem-variant prompts. K-fold `train_ids.json` and `val_ids.json`
 select the router examples from that source, while `fold_N/train.jsonl` and
 `fold_N/val.jsonl` provide the refined CoT trajectories used only by the prefix
@@ -156,7 +156,7 @@ bash scripts/run_router_layer_ablation.sh
 The script discovers `num_hidden_layers` from the model configuration and
 sweeps hidden-state indices `0..L` (including the embedding output at index
 0). Set `LAYERS="8 12 15 20"` for a smaller sweep, or override `MODEL_NAME`,
-`MATH_PAIRED`, `KFOLD_ROOT`, `FOLD`, and `OUTPUT_ROOT` for another setup. Each
+`problem_dataset`, `KFOLD_ROOT`, `FOLD`, and `OUTPUT_ROOT` for another setup. Each
 run writes its own router history under `layer_<idx>/router/`. After training,
 plot the curves and layer summary with:
 
@@ -175,7 +175,7 @@ The example commands below use Qwen2.5-Math-7B-Instruct and write new artifacts 
 ```bash
 python scripts/inference_multiple.py \
   --model Qwen/Qwen2.5-Math-7B-Instruct \
-  --data-path data/math_paired.jsonl \
+  --data-path data/canonical_math_paired.jsonl \
   --output-dir output/qwen-2.5/multiple_seed42 \
   --sampled-variants simple hard \
   --samples-per-problem 50 \
@@ -333,45 +333,47 @@ Hard selects the five highest when five are available. Eligibility is per
 variant, so a single-sided group contributes prefix trajectories only for its
 eligible variant.
 
-### 6. Development K-fold Splits
+### 6. K-fold Train/Validation/Test Splits
 
-The preparation script uses eligible groups from
-`data/canonical_splits_seed42/development.jsonl` for group-level five-fold
-cross-validation with seed 42: four folds train and one validates. All variants
-and trajectories of a problem stay together. Source, type, level, and variant
-eligibility are balanced across folds. The separate 109-group canonical test
-set remains reserved for final evaluation.
+The problem dataset is `data/canonical_math_paired.jsonl`. The preparation
+script assigns every raw problem group to one of five outer test folds with
+seed 42, then selects validation groups from the remaining train/validation
+pool. With the default eight validation buckets, each run uses approximately
+70% of groups for training, 10% for validation, and 20% for testing. All
+variants and trajectories of a problem stay together. Assignment balances
+problem type, level, and the eligible/noneligible status of the simple and
+hard variants. Eligibility controls which trajectories enter prefix training;
+the outer test folds retain all problem groups.
 
 Each `output/qwen-2.5/kfold/fold_N/` contains `train.jsonl`, `val.jsonl`,
-`train_ids.json`, `val_ids.json`, and `val_raw.jsonl` (canonical validation
-triplets). `manifest.json`, `coverage.json`, `fold_assignments.jsonl`, and
+`test.jsonl`, and the corresponding `train_ids.json`, `val_ids.json`, and
+`test_ids.json` manifests. `manifest.json`, `coverage.json`, `fold_assignments.jsonl`, and
 `fold_balance.csv` record the protocol and coverage at the K-fold root.
 
 ### 7. Train DSPR
 
+Train one fold with the staged pipeline:
+
 ```bash
-python scripts/train.py dspr \
-  --model_name "Qwen/Qwen2.5-Math-7B-Instruct" \
-  --train_data_path "output/qwen-2.5/kfold/fold_0/train.jsonl" \
-  --val_data_path "output/qwen-2.5/kfold/fold_0/val.jsonl" \
-  --output_path "checkpoints/qwen/dspr/fold_0" \
-  --batch_size 4 \
-  --num_epochs 10
+python scripts/train_kfold.py dspr --folds 0 --gpus 0
 ```
 
-For router-then-prefix training, use `FOLD=0 bash scripts/run_staged_dspr.sh`.
-Repeat with folds 1-4; each fold has its own output directory.
-
-The trainer saves the trainable DSPR parameters as:
+Each fold first trains the router on canonical problem-variant prompts from
+`data/canonical_math_paired.jsonl`, selected by its `train_ids.json` and `val_ids.json`.
+It then freezes the router and trains the dual prefix on that fold's
+`train.jsonl` and `val.jsonl` trajectories. Joint calibration is disabled in
+the K-fold entrypoint. Artifacts are saved separately:
 
 ```text
-checkpoints/qwen/dspr/fold_0/dspr_trainable.pt
+checkpoints/qwen_staged_kfold_seed42/fold_0/router/router_trainable.pt
+checkpoints/qwen_staged_kfold_seed42/fold_0/prefix/dspr_trainable.pt
 ```
 
 ### 8. Train Qwen DSPR with the Prepared K-Folds
 
-The five prepared Qwen folds can be trained with seed 42 using the orchestration
-script below. Each fold gets an isolated checkpoint directory and `train.log`.
+The five prepared Qwen folds can be trained in router -> prefix stages with seed
+42 using the orchestration script below. Each fold gets an isolated checkpoint
+directory and `train.log`.
 GPU workers dynamically claim the next unfinished fold, so the same command
 also works when fewer than five GPUs are available:
 
@@ -381,8 +383,38 @@ python scripts/train_kfold.py dspr --gpus 0,1,2,3,4
 
 Use `--dry-run` to validate the fold files and print the exact child commands
 without loading a model. Outputs default to
-`checkpoints/qwen_kfold_seed42/fold_0` through `fold_4`; the complete run
-manifest is written to the parent directory.
+`checkpoints/qwen_staged_kfold_seed42/fold_0` through `fold_4`; the complete run
+manifest is written to the parent directory. `run_status.json` records separate
+router and prefix progress and early stopping results. Defaults are 20 router
+epochs at learning rate `1e-5`, 15 prefix epochs at `4e-5`, and early stopping
+patience 3 for each stage. Use `--router-epochs`, `--prefix-epochs`,
+`--router-learning-rate`, and `--prefix-learning-rate` to override them.
+
+`scripts/run_dspr_pipeline.sh` is the unified shell entrypoint, replacing the
+former separate staged-training script. It runs training, held-out inference,
+and OOF metric reporting with the same folds and model settings:
+
+```bash
+# Full five-fold pipeline on two GPUs
+bash scripts/run_dspr_pipeline.sh --gpus 0,1
+
+# Training only, or validate the training commands without loading a model
+bash scripts/run_dspr_pipeline.sh --gpus 0 --train-only
+bash scripts/run_dspr_pipeline.sh --gpus 0 --dry-run
+
+# Run just one fold, including inference and metrics for that fold
+bash scripts/run_dspr_pipeline.sh --gpus 0 --folds 0
+
+# Evaluate already trained prefix checkpoints
+bash scripts/run_dspr_pipeline.sh --gpus 0,1 --eval-only
+```
+
+Set `KFOLD_ROOT`, `problem_dataset`, `CHECKPOINT_DIR`, and `INFER_OUTPUT_DIR` to
+override data and output locations. Training settings can be configured with
+environment variables such as `ROUTER_EPOCHS`, `PREFIX_EPOCHS`,
+`ROUTER_LEARNING_RATE`, and `PREFIX_LEARNING_RATE`; see `--help` for the full
+list. A training dry run stops before inference because it creates no
+checkpoints. To compare OOF results with a baseline, set `BASELINE_PATH`.
 
 ### 9. Evaluate Qwen DSPR with Held-Out K-Folds
 
@@ -394,11 +426,11 @@ python scripts/evaluate.py dspr run \
   --folds 0 \
   --problem-id 2 \
   --gpus 0 \
-  --output-root output/qwen_kfold_seed42_smoke
+  --output-root output/qwen_staged_kfold_seed42_smoke
 ```
 
 After the smoke test passes, run all folds. The evaluator reads each fold's
-`trainer_state.json`, selects its best validation checkpoint, explicitly uses
+`prefix/checkpoint-*/trainer_state.json`, selects its best prefix validation checkpoint, explicitly uses
 prefix length 15, and dynamically assigns pending folds to available GPUs:
 
 ```bash
@@ -406,8 +438,10 @@ python scripts/evaluate.py dspr run --gpus 0,1,2,3,4
 ```
 
 Each fold writes `all_records.jsonl`, `inference.log`, and `run_status.json`
-under `output/qwen_kfold_seed42/fold_N`. The parent directory also contains an
+under `output/qwen_staged_kfold_seed42/fold_N`. The parent directory also contains an
 `inference_manifest.json` with the exact checkpoint and command for every fold.
+Inference reads each fold's `test.jsonl` and checks coverage against its
+`test_ids.json` manifest.
 
 Validate and pool the five folds into one OOF result:
 
@@ -424,12 +458,12 @@ because it has no fold-specific training:
 python scripts/inference.py \
   --baseline base \
   --model-name Qwen/Qwen2.5-Math-7B-Instruct \
-  --data-path data/math_paired.jsonl \
+  --data-path data/canonical_math_paired.jsonl \
   --output-dir output/qwen_matched_greedy \
   --max-new-tokens 4096
 ```
 
-Then pass the resulting 279-problem file to the aggregator:
+Then pass the resulting baseline file to the aggregator:
 
 ```bash
 python scripts/evaluate.py dspr aggregate \
@@ -439,6 +473,10 @@ python scripts/evaluate.py dspr aggregate \
 The aggregator requires exact fold-ID coverage and writes
 `oof_all_records.jsonl`, `oof_metrics.json`, `oof_metrics.csv`, and
 `oof_alpha_summary.csv` under the K-fold output root.
+The OOF problem count is inferred from the selected folds. Use `--folds 0` to
+report a single fold and `--expected-problems N` for an explicit count assertion.
+Canonical raw data and baseline files can cover a larger universe; metrics use
+only the selected held-out IDs.
 
 ### 9.1 Train and Evaluate the Parameter-Matched LoRA Baseline
 
@@ -473,7 +511,7 @@ matched greedy base model and DSPR:
 ```bash
 python scripts/evaluate.py lora aggregate \
   --base output/qwen-2.5/greedy/all_records.jsonl \
-  --dspr output/qwen_kfold_seed42/oof_all_records.jsonl
+  --dspr output/qwen_staged_kfold_seed42/oof_all_records.jsonl
 ```
 
 The LoRA report writes `oof_all_records.jsonl`, `oof_metrics.json`, and
@@ -488,7 +526,7 @@ python scripts/inference.py \
   --baseline dspr \
   --checkpoint "checkpoints/qwen/dspr/dspr_trainable.pt" \
   --model-name "Qwen/Qwen2.5-Math-7B-Instruct" \
-  --data-path "data/math_paired.jsonl" \
+  --data-path "data/canonical_math_paired.jsonl" \
   --output-dir "output/qwen-2.5/dspr" \
   --prefix-length 50 \
   --max-new-tokens 4096

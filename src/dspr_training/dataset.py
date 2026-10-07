@@ -103,16 +103,16 @@ class DSPRDataset(Dataset):
 
 
 class RouterPromptDataset(DSPRDataset):
-    """Prompt-level router data from the canonical math-paired records."""
+    """Prompt-level router data from the canonical problem dataset."""
 
-    def __init__(self, math_paired_path, tokenizer, max_length=2048, problem_ids=None):
+    def __init__(self, problem_dataset, tokenizer, max_length=2048, problem_ids=None):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.pad_token_id = self._resolve_pad_token_id()
         wanted = None if problem_ids is None else {int(pid) for pid in problem_ids}
         self.data = []
         seen = set()
-        for item in self._load_jsonl(math_paired_path):
+        for item in self._load_jsonl(problem_dataset):
             problem_id = item['problem_id']
             if wanted is not None and int(problem_id) not in wanted:
                 continue
@@ -128,11 +128,11 @@ class RouterPromptDataset(DSPRDataset):
                     })
                     seen.add(key)
         if not self.data:
-            raise ValueError(f'Router dataset is empty: {math_paired_path}')
+            raise ValueError(f'Router dataset is empty: {problem_dataset}')
         self.contexts = None
 
     @classmethod
-    def from_math_paired(cls, path, tokenizer, max_length=2048, problem_ids=None):
+    def from_problem_dataset(cls, path, tokenizer, max_length=2048, problem_ids=None):
         return cls(path, tokenizer, max_length, problem_ids)
 
     def set_contexts(self, contexts):

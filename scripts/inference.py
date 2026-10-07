@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="DSPR/SPT checkpoint file or LoRA adapter directory; omitted for base",
     )
-    parser.add_argument("--data-path", "--data_path", default="data/math_paired.jsonl")
+    parser.add_argument("--data-path", "--data_path", default="data/canonical_math_paired.jsonl")
     parser.add_argument("--output-dir", "--output_dir", default="output/inference")
     parser.add_argument("--problem-id", "--id", type=int, default=None)
     parser.add_argument("--num", type=int, default=None)

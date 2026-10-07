@@ -158,15 +158,15 @@ def make_fold_splits(
     splits: dict[int, dict[str, list[int]]] = {}
     for outer_fold in range(n_folds):
         test_ids = sorted(pid for pid in raw_ids if outer_assignment[pid] == outer_fold)
-        development_ids = sorted(pid for pid in raw_ids if outer_assignment[pid] != outer_fold)
+        train_val_ids = sorted(pid for pid in raw_ids if outer_assignment[pid] != outer_fold)
         internal_assignment = balanced_assign(
-            development_ids,
+            train_val_ids,
             labels,
             validation_buckets,
             seed=seed + 1009 * (outer_fold + 1),
         )
-        val_ids = sorted(pid for pid in development_ids if internal_assignment[pid] == 0)
-        train_ids = sorted(set(development_ids) - set(val_ids))
+        val_ids = sorted(pid for pid in train_val_ids if internal_assignment[pid] == 0)
+        train_ids = sorted(set(train_val_ids) - set(val_ids))
         if set(train_ids) & set(val_ids) or set(train_ids) & set(test_ids) or set(val_ids) & set(test_ids):
             raise AssertionError(f"Overlapping split IDs for outer fold {outer_fold}")
         if set(train_ids) | set(val_ids) | set(test_ids) != set(raw_ids):
@@ -363,7 +363,7 @@ def main() -> None:
         "--validation-buckets",
         type=int,
         default=8,
-        help="Internal development buckets; one bucket is used for validation.",
+        help="Internal train/validation buckets; one bucket is used for validation.",
     )
     args = parser.parse_args()
     if args.k < 2:
@@ -423,7 +423,7 @@ def main() -> None:
         "k": args.k,
         "seed": args.seed,
         "validation_buckets": args.validation_buckets,
-        "validation_fraction_of_development": 1 / args.validation_buckets,
+        "validation_fraction_of_train_val": 1 / args.validation_buckets,
         "approximate_proportions": {
             "train": 1 - 1 / args.k - (1 - 1 / args.k) / args.validation_buckets,
             "val": (1 - 1 / args.k) / args.validation_buckets,

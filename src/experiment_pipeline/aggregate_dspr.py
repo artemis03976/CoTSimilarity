@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate, merge, and report DSPR K-fold out-of-fold predictions.
 
-The five test folds are pooled into one 279-problem OOF file.  Metrics are
+The selected held-out folds are pooled into one OOF file. Metrics are
 reported for the full test universe and for variant-specific eligible and
 non-eligible slices.  An optional baseline enables paired bootstrap confidence
 intervals and exact McNemar tests on matching problem IDs.
@@ -19,6 +19,8 @@ import statistics
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
+
+from .evaluate_dspr import held_out_id_path, parse_fold_list
 
 
 FOLDS = tuple(range(5))
@@ -148,14 +150,14 @@ def validate_records(
                     )
 
 
-def load_fold_expectations(id_root: Path) -> tuple[dict[int, set[int]], dict[str, set[int]]]:
+def load_fold_expectations(
+    id_root: Path, folds: Iterable[int] = FOLDS,
+) -> tuple[dict[int, set[int]], dict[str, set[int]]]:
     fold_ids: dict[int, set[int]] = {}
     eligible = {"simple": set(), "hard": set()}
     all_seen: set[int] = set()
-    for fold in FOLDS:
-        path = id_root / f"fold_{fold}" / "test_ids.json"
-        if not path.is_file():
-            raise FileNotFoundError(f"Missing fold test IDs: {path}")
+    for fold in folds:
+        path = held_out_id_path(id_root, fold)
         payload = read_json(path)
         raw_current = [normalise_id(value) for value in payload.get("all", [])]
         current = set(raw_current)
@@ -185,7 +187,7 @@ def resolve_eligible_count_expectations(
 ) -> tuple[dict[str, int], dict[str, str]]:
     """Infer eligibility counts from fold masks, with optional CLI assertions.
 
-    ``test_ids.json`` is the authoritative mask used by OOF evaluation.  The
+    The held-out ID manifest is the authoritative mask used by OOF evaluation. The
     command-line counts are therefore optional guards rather than a second
     source of truth that callers must keep synchronized by hand.
     """
@@ -458,12 +460,16 @@ def write_alpha_csv(path: Path, summaries: dict[str, dict[str, Any]]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--result-root", default="output/qwen_kfold_seed42")
+    parser.add_argument("--result-root", default="output/qwen_staged_kfold_seed42")
     parser.add_argument("--id-root", default="output/qwen-2.5/kfold")
-    parser.add_argument("--raw-data", default="data/math_paired.jsonl")
+    parser.add_argument("--raw-data", default="data/canonical_math_paired.jsonl")
     parser.add_argument("--baseline", default=None, help="Optional matched baseline all_records.jsonl")
     parser.add_argument("--expected-samples", type=int, default=1, help="Use 0 to accept any positive sample count")
-    parser.add_argument("--expected-problems", type=int, default=279)
+    parser.add_argument("--folds", nargs="+", type=int, default=None, help="Selected folds to pool; default: all five")
+    parser.add_argument(
+        "--expected-problems", type=int, default=None,
+        help="Optional assertion on the selected OOF problem count; otherwise inferred from held-out IDs",
+    )
     parser.add_argument(
         "--expected-simple-eligible",
         type=int,
@@ -500,19 +506,18 @@ def main() -> int:
     raw_path = (repo_root / args.raw_data).resolve() if not Path(args.raw_data).is_absolute() else Path(args.raw_data)
     expected_sample_count = args.expected_samples or None
 
-    fold_ids, eligible = load_fold_expectations(id_root)
+    folds = parse_fold_list(args.folds)
+    fold_ids, eligible = load_fold_expectations(id_root, folds)
     raw_records = load_id_map(read_jsonl(raw_path), raw_path)
-    all_ids = set(raw_records)
-    if len(all_ids) != args.expected_problems:
+    all_ids = set().union(*fold_ids.values())
+    if args.expected_problems is not None and len(all_ids) != args.expected_problems:
         raise ValueError(
-            f"Raw problem count is {len(all_ids)}; expected {args.expected_problems}. "
-            "Check --raw-data or override --expected-problems explicitly."
+            f"Selected OOF problem count is {len(all_ids)}; expected {args.expected_problems}. "
+            "Check --id-root and --folds or override --expected-problems explicitly."
         )
-    expected_all_ids = set().union(*fold_ids.values())
-    if expected_all_ids != all_ids:
-        missing = sorted(all_ids - expected_all_ids)
-        extra = sorted(expected_all_ids - all_ids)
-        raise ValueError(f"Fold test universe differs from raw data: missing={missing}, extra={extra}")
+    missing = sorted(all_ids - set(raw_records))
+    if missing:
+        raise ValueError(f"Fold held-out IDs are absent from raw data: {missing}")
     expected_eligible_counts, eligible_count_sources = resolve_eligible_count_expectations(
         eligible,
         {
@@ -523,7 +528,7 @@ def main() -> int:
 
     merged: dict[int, dict[str, Any]] = {}
     fold_counts: dict[str, int] = {}
-    for fold in FOLDS:
+    for fold in folds:
         path = result_root / f"fold_{fold}" / "all_records.jsonl"
         if not path.is_file():
             raise FileNotFoundError(f"Missing Fold {fold} result: {path}")
@@ -573,6 +578,7 @@ def main() -> int:
     if args.baseline:
         baseline_path = (repo_root / args.baseline).resolve() if not Path(args.baseline).is_absolute() else Path(args.baseline)
         baseline_map = load_id_map(read_jsonl(baseline_path), baseline_path)
+        baseline_map = {pid: record for pid, record in baseline_map.items() if pid in all_ids}
         validate_records(
             baseline_map,
             all_ids,
@@ -597,7 +603,7 @@ def main() -> int:
     report = {
         "validation": {
             "status": "passed",
-            "raw_problem_count": len(all_ids),
+            "raw_problem_count": len(raw_records),
             "oof_problem_count": len(merged),
             "unique_problem_count": len(set(merged)),
             "fold_counts": fold_counts,
@@ -606,7 +612,8 @@ def main() -> int:
                 variant: len(all_ids - ids) for variant, ids in eligible.items()
             },
             "expected_samples_per_variant": expected_sample_count,
-            "expected_problem_count": args.expected_problems,
+            "expected_problem_count": args.expected_problems if args.expected_problems is not None else len(all_ids),
+            "selected_folds": folds,
             "expected_eligible_counts": expected_eligible_counts,
             "eligible_count_sources": eligible_count_sources,
         },

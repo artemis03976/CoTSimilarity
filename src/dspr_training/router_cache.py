@@ -28,7 +28,7 @@ def _read_cache(path: Path, metadata: dict, dataset: RouterPromptDataset):
     keys = [tuple(key) for key in payload['keys']]
     expected = [router_prompt_key(item) for item in dataset.data]
     if set(keys) != set(expected):
-        raise ValueError('cache prompts do not match math_paired.jsonl')
+        raise ValueError('cache prompts do not match the problem dataset')
     contexts = payload['contexts']
     if contexts.ndim != 2 or len(contexts) != len(keys):
         raise ValueError('cache has an invalid context tensor')
@@ -37,7 +37,7 @@ def _read_cache(path: Path, metadata: dict, dataset: RouterPromptDataset):
 
 def load_or_build_router_context_cache(
     model,
-    math_paired_path,
+    problem_dataset,
     tokenizer,
     max_length: int,
     cache_path,
@@ -45,7 +45,7 @@ def load_or_build_router_context_cache(
     batch_size: int,
 ):
     """Return ``prompt_key -> context`` and persist it for later runs."""
-    dataset = RouterPromptDataset(math_paired_path, tokenizer, max_length)
+    dataset = RouterPromptDataset(problem_dataset, tokenizer, max_length)
     metadata = _metadata(model, max_length)
     cache_path = Path(cache_path)
     if cache_path.is_file():

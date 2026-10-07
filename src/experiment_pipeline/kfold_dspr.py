@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Train DSPR on the prepared Qwen K-fold splits.
+"""Train staged DSPR on the prepared Qwen K-fold splits.
 
-This is an orchestration layer around ``scripts/train.py dspr``.  It keeps the
-actual training pipeline in one place and runs one independent process per GPU.
+This is an orchestration layer around ``scripts/train.py staged_dspr``. Each fold
+trains a prompt-only router, then freezes it while training the dual prefix.
+Router prompts come from canonical_math_paired.jsonl and prefix trajectories from the fold.
+It keeps the actual training pipeline in one place and runs one process per GPU.
 When fewer GPUs than folds are available, each GPU takes the next fold as soon
 as its previous fold finishes (a small dynamic work queue).
 
@@ -34,7 +36,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -158,6 +160,8 @@ class FoldSpec:
     termination: str | None = None
     best_metric: float | None = None
     best_model_checkpoint: str | None = None
+    stage: str | None = None
+    stage_results: dict[str, Any] = field(default_factory=dict)
 
 
 def build_train_command(
@@ -169,7 +173,17 @@ def build_train_command(
     command = [
         sys.executable,
         str(train_script),
-        "dspr",
+        "staged_dspr",
+        "--run-stage",
+        "all",
+        "--joint-epochs",
+        "0",
+        "--problem-dataset",
+        args.problem_dataset,
+        "--kfold-root",
+        args.fold_root,
+        "--fold",
+        str(spec.fold),
         "--model_name",
         args.model_name,
         "--context_layer_idx",
@@ -180,21 +194,29 @@ def build_train_command(
         str(args.router_intermediate_dim),
         "--router_dropout",
         str(args.router_dropout),
-        "--learning_rate",
-        str(args.learning_rate),
+        "--router_learning_rate",
+        str(args.router_learning_rate),
+        "--prefix_learning_rate",
+        str(args.prefix_learning_rate),
+        "--router_weight_decay",
+        str(args.router_weight_decay),
+        "--prefix_weight_decay",
+        str(args.prefix_weight_decay),
+        "--router_target_smoothing",
+        str(args.router_target_smoothing),
         "--batch_size",
         str(args.batch_size),
-        "--num_epochs",
-        str(args.num_epochs),
+        "--router_epochs",
+        str(args.router_epochs),
+        "--prefix_epochs",
+        str(args.prefix_epochs),
         "--gradient_accumulation_steps",
         str(args.gradient_accumulation_steps),
         "--max_grad_norm",
         str(args.max_grad_norm),
-        "--lambda_router",
-        str(args.lambda_router),
-        "--train_data_path",
+        "--prefix_train_data_path",
         spec.train_data,
-        "--val_data_path",
+        "--prefix_val_data_path",
         spec.val_data,
         "--max_seq_length",
         str(args.max_seq_length),
@@ -208,28 +230,25 @@ def build_train_command(
         str(args.logging_steps),
         "--save_total_limit",
         str(args.save_total_limit),
-        "--gradient_checkpointing",
         "--emit_progress_events",
-        "--trajectory_sampling",
-        args.trajectory_sampling,
+        "--prefix_trajectory_sampling",
+        args.prefix_trajectory_sampling,
+        "--router_early_stopping_patience",
+        str(args.router_early_stopping_patience),
+        "--prefix_early_stopping_patience",
+        str(args.prefix_early_stopping_patience),
+        "--early_stopping_threshold",
+        str(args.early_stopping_threshold),
     ]
-    if args.prefix_learning_rate is not None:
-        command.extend(["--prefix_learning_rate", str(args.prefix_learning_rate)])
-    if args.router_learning_rate is not None:
-        command.extend(["--router_learning_rate", str(args.router_learning_rate)])
+    command.append(
+        "--gradient_checkpointing" if args.gradient_checkpointing else "--no-gradient_checkpointing"
+    )
+    if args.router_positive_weight is not None:
+        command.extend(["--router_positive_weight", str(args.router_positive_weight)])
     if args.warmup_ratio is None:
         command.extend(["--warmup_steps", str(args.warmup_steps)])
     else:
         command.extend(["--warmup_ratio", str(args.warmup_ratio)])
-    if args.early_stopping_patience > 0:
-        command.extend(
-            [
-                "--early_stopping_patience",
-                str(args.early_stopping_patience),
-                "--early_stopping_threshold",
-                str(args.early_stopping_threshold),
-            ]
-        )
     return command
 
 
@@ -267,11 +286,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fold-root", default="output/qwen-2.5/kfold", help="Prepared Qwen K-fold data directory")
     parser.add_argument(
         "--output-root",
-        default="checkpoints/qwen_kfold_seed42",
+        default="checkpoints/qwen_staged_kfold_seed42",
         help="Root directory; each fold is written to <output-root>/fold_N",
     )
     parser.add_argument("--train-script", default="scripts/train.py")
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
+    parser.add_argument(
+        "--problem-dataset", "--problem_dataset", default="data/canonical_math_paired.jsonl",
+        help="Canonical source of router prompts; fold manifests select problem IDs",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--folds", nargs="+", type=int, default=None, help="Subset of folds, e.g. --folds 0 1")
     parser.add_argument(
@@ -282,42 +305,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-existing", action="store_true", help="Allow non-empty fold output directories")
     parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print the schedule only")
 
-    # These defaults are the paper-facing DSPR settings.  They are forwarded
+    # These defaults match the staged DSPR settings. They are forwarded
     # explicitly so a later change to DSPRConfig cannot silently alter a fold.
     parser.add_argument("--context-layer-idx", type=int, default=15)
     parser.add_argument("--prefix-length", type=int, default=15)
-    parser.add_argument("--router-intermediate-dim", type=int, default=256)
-    parser.add_argument("--router-dropout", type=float, default=0.05)
-    parser.add_argument("--learning-rate", type=float, default=4e-5)
+    parser.add_argument("--router-intermediate-dim", type=int, default=64)
+    parser.add_argument("--router-dropout", type=float, default=0.10)
     parser.add_argument(
-        "--prefix-learning-rate",
+        "--prefix-learning-rate", "--learning-rate",
         type=float,
-        default=None,
-        help="Dual-prefix learning rate; defaults to --learning-rate.",
+        default=4e-5,
+        help="Dual-prefix learning rate for the frozen-router stage.",
     )
     parser.add_argument(
         "--router-learning-rate",
         type=float,
-        default=None,
-        help="Router learning rate; defaults to --learning-rate.",
+        default=1e-5,
+        help="Router learning rate for the prompt-only stage.",
     )
+    parser.add_argument("--router-weight-decay", type=float, default=1e-3)
+    parser.add_argument("--prefix-weight-decay", type=float, default=0.0)
+    parser.add_argument("--router-target-smoothing", type=float, default=0.05)
+    parser.add_argument("--router-positive-weight", type=float, default=None)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--num-epochs", type=int, default=15)
+    parser.add_argument("--router-epochs", type=int, default=20)
+    parser.add_argument("--prefix-epochs", "--num-epochs", type=int, default=15)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
-    parser.add_argument("--warmup-steps", type=int, default=100)
-    parser.add_argument(
+    warmup = parser.add_mutually_exclusive_group()
+    warmup.add_argument("--warmup-steps", type=int, default=None)
+    warmup.add_argument(
         "--warmup-ratio",
         type=float,
         default=None,
-        help="Warmup fraction in [0, 1); replaces --warmup-steps when set.",
+        help="Warmup fraction in [0, 1); default: 0.05 unless --warmup-steps is set.",
     )
-    parser.add_argument("--lambda-router", type=float, default=0.5)
     parser.add_argument("--max-seq-length", type=int, default=2048)
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--save-total-limit", type=int, default=3)
     parser.add_argument(
-        "--trajectory-sampling",
+        "--prefix-trajectory-sampling", "--trajectory-sampling",
         choices=("flat", "random_one"),
         default="flat",
         help="Use all trajectories or resample one trajectory per problem each sampling epoch.",
@@ -325,11 +352,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--early-stopping-patience",
         type=int,
-        default=0,
-        help="Evaluations without improvement before stopping; 0 disables it.",
+        default=None,
+        help="Set early stopping patience for both stages; 0 disables it.",
     )
+    parser.add_argument("--router-early-stopping-patience", type=int, default=3)
+    parser.add_argument("--prefix-early-stopping-patience", type=int, default=3)
     parser.add_argument("--early-stopping-threshold", type=float, default=0.0)
-    return parser.parse_args()
+    parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True)
+    args = parser.parse_args()
+    if args.warmup_steps is None:
+        args.warmup_steps = 100
+        if args.warmup_ratio is None:
+            args.warmup_ratio = 0.05
+    if args.early_stopping_patience is not None:
+        args.router_early_stopping_patience = args.early_stopping_patience
+        args.prefix_early_stopping_patience = args.early_stopping_patience
+    return args
 
 
 def run_fold(
@@ -382,6 +420,13 @@ def run_fold(
                 log_handle.flush()
                 continue
 
+            event_stage = event.get("stage")
+            if event_stage != spec.stage or event.get("event") == "start":
+                if progress_bar is not None:
+                    progress_bar.close()
+                    progress_bar = None
+                spec.stage = event_stage
+                spec.termination = None
             last_progress_event = event
             spec.global_step = int(event.get("step", 0))
             spec.max_steps = int(event.get("total_steps", 0))
@@ -395,13 +440,18 @@ def run_fold(
                 )
                 log_handle.write(f"[progress] {line}")
                 log_handle.flush()
+                if spec.stage is not None:
+                    spec.stage_results[spec.stage] = {**event, "termination": spec.termination}
+            if event.get("event") in {"start", "early_stop", "complete"}:
+                with state_lock:
+                    write_json(output_path / "run_status.json", asdict(spec))
 
             total_steps = max(int(event.get("total_steps", 0)), 0)
             current_step = max(int(event.get("step", 0)), 0)
             if progress_bar is None and total_steps > 0:
                 progress_bar = tqdm(
                     total=total_steps,
-                    desc=f"fold {spec.fold} | GPU {spec.gpu}",
+                    desc=f"fold {spec.fold} | {spec.stage or 'train'} | GPU {spec.gpu}",
                     unit="step",
                     position=progress_position,
                     leave=False,
@@ -417,6 +467,7 @@ def run_fold(
                     postfix["status"] = "early stop"
                 if postfix:
                     progress_bar.set_postfix(postfix, refresh=False)
+        process.stdout.close()
         return_code = process.wait()
         log_handle.write(
             "Child process exited: "
@@ -500,16 +551,22 @@ def main() -> int:
     args = parse_args()
     if args.warmup_steps < 0:
         raise ValueError("--warmup-steps must be non-negative")
-    if args.learning_rate <= 0.0:
-        raise ValueError("--learning-rate must be positive")
     if args.prefix_learning_rate is not None and args.prefix_learning_rate <= 0.0:
         raise ValueError("--prefix-learning-rate must be positive")
     if args.router_learning_rate is not None and args.router_learning_rate <= 0.0:
         raise ValueError("--router-learning-rate must be positive")
     if args.warmup_ratio is not None and not 0.0 <= args.warmup_ratio < 1.0:
         raise ValueError("--warmup-ratio must be in [0, 1)")
-    if args.early_stopping_patience < 0:
-        raise ValueError("--early-stopping-patience must be non-negative")
+    if min(args.router_early_stopping_patience, args.prefix_early_stopping_patience) < 0:
+        raise ValueError("Stage early stopping patience must be non-negative")
+    if args.router_epochs <= 0 or args.prefix_epochs <= 0:
+        raise ValueError("Stage epoch counts must be positive")
+    if args.router_weight_decay < 0 or args.prefix_weight_decay < 0:
+        raise ValueError("Weight decay must be non-negative")
+    if not 0 <= args.router_target_smoothing < 0.5:
+        raise ValueError("--router-target-smoothing must be in [0, 0.5)")
+    if args.router_positive_weight is not None and args.router_positive_weight <= 0:
+        raise ValueError("--router-positive-weight must be positive")
     if args.early_stopping_threshold < 0.0:
         raise ValueError("--early-stopping-threshold must be non-negative")
     repo_root = Path(__file__).resolve().parents[2]
@@ -518,6 +575,10 @@ def main() -> int:
     fold_root = resolve_path(repo_root, args.fold_root).resolve()
     output_root = resolve_path(repo_root, args.output_root).resolve()
     train_script = resolve_path(repo_root, args.train_script).resolve()
+    args.fold_root = str(fold_root)
+    args.problem_dataset = str(resolve_path(repo_root, args.problem_dataset).resolve())
+    if not Path(args.problem_dataset).is_file():
+        raise FileNotFoundError(f"Canonical router source not found: {args.problem_dataset}")
 
     validate_inputs(
         train_script,
@@ -554,6 +615,7 @@ def main() -> int:
         "created_at": utc_now(),
         "repo_root": str(repo_root),
         "model_name": args.model_name,
+        "training_method": "staged_dspr",
         "seed": args.seed,
         "fold_root": str(fold_root),
         "output_root": str(output_root),
