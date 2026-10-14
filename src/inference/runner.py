@@ -44,6 +44,7 @@ def run_greedy_evaluation(
     fully_correct = 0
     total_generations = 0
     valid_generations = 0
+    ungraded_generations = 0
     rejection_reasons: Counter[str] = Counter()
     generate_batch = getattr(generator, "generate_batch", None)
     batched = callable(generate_batch)
@@ -71,6 +72,7 @@ def run_greedy_evaluation(
                 "generations": total_generations,
                 "valid_generations": valid_generations,
                 "invalid_generations": total_generations - valid_generations,
+                "ungraded_generations": ungraded_generations,
                 "rejection_reasons": dict(sorted(rejection_reasons.items())),
                 "fully_correct_triplets": fully_correct,
                 "run": metadata,
@@ -140,6 +142,12 @@ def run_greedy_evaluation(
                     else None
                 )
                 correct = bool(validation.valid and answer_correct)
+                evaluation_status = (
+                    "invalid_generation" if not validation.valid
+                    else "unsupported_reference" if answer_correct is None
+                    else "correct" if answer_correct else "incorrect"
+                )
+                ungraded_generations += int(validation.valid and answer_correct is None)
                 evaluation_seconds += perf_counter() - evaluation_started
                 total_generations += 1
                 valid_generations += int(validation.valid)
@@ -148,6 +156,7 @@ def run_greedy_evaluation(
                     "response": generated.text,
                     "correct": correct,
                     "answer_correct": answer_correct,
+                    "answer_evaluation_status": evaluation_status,
                     "valid": validation.valid,
                     "finish_reason": generated.finish_reason,
                     "validation_errors": list(validation.reasons),

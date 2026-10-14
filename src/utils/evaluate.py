@@ -37,6 +37,10 @@ def extract_ground_truth_answer(problem, ground_truth, dataset_type, reference_t
             ground_truth_answer += "}"
 
         ground_truth_answer_stripped = strip_string(ground_truth_answer)
+        if not ground_truth_answer_stripped:
+            raise UnsupportedReferenceError(
+                f"Reference label {ground_truth!r} contains no answer after normalization"
+            )
         ground_truth_wrapped = "\\boxed{" + ground_truth_answer + "}"
         extractor = extract_math_perturb_ground_truth_answer if dataset_type == 'perturb' else extract_math_answer
         ground_truth_answer_extracted = extractor(problem, ground_truth_wrapped, task='')

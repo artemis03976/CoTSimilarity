@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from dspr.config import MATH_SYSTEM_PROMPT
-from utils.evaluate import UnsupportedReferenceError, answer_check, test_parse_latex
+from utils.evaluate import (
+    UnsupportedReferenceError,
+    answer_check,
+    extract_ground_truth_answer,
+    test_parse_latex,
+)
 
 
 VARIANTS = ("original", "simple", "hard")
@@ -64,6 +69,7 @@ def read_math_records(
         records = records[:limit]
 
     seen: set[int] = set()
+    unsupported_references: list[str] = []
     for record in records:
         pid = normalise_problem_id(record.get("problem_id"))
         if pid in seen:
@@ -77,6 +83,26 @@ def read_math_records(
                 raise ValueError(f"Problem {pid} {variant} has no problem text")
             if ground_truth_for(variant_data) is None:
                 raise ValueError(f"Problem {pid} {variant} has no solution, answer, or ground_truth")
+            reference = ground_truth_for(variant_data)
+            try:
+                extract_ground_truth_answer(
+                    variant_data["problem"],
+                    reference,
+                    dataset_type_for_variant(variant),
+                    ground_truth_type_for(variant_data, variant),
+                )
+            except UnsupportedReferenceError:
+                unsupported_references.append(f"{pid}/{variant}: {reference!r}")
+            except Exception as exc:
+                raise ValueError(
+                    f"Problem {pid} {variant} has an invalid reference {reference!r}: {exc}"
+                ) from exc
+    if unsupported_references:
+        print(
+            f"Reference audit: {len(unsupported_references)} references cannot be graded; "
+            "their outputs will have answer_correct=null. "
+            + "; ".join(unsupported_references)
+        )
     return records
 
 
