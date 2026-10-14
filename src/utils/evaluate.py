@@ -14,15 +14,17 @@ def extract_ground_truth_answer(problem, ground_truth, dataset_type):
     """
     assert dataset_type in ['perturb', 'original'], "dataset_type must be either 'perturb' or 'original'"
     if dataset_type == 'perturb':
-        ground_truth_answer = ground_truth
-        if isinstance(ground_truth_answer, int) or isinstance(ground_truth_answer, float):
-            ground_truth_answer = str(ground_truth_answer)
+        ground_truth_answer = str(ground_truth).strip()
+        # Some canonical text answers omit their outer closing brace.
+        if (ground_truth_answer.startswith("\\text{")
+                and ground_truth_answer.count("{") == ground_truth_answer.count("}") + 1):
+            ground_truth_answer += "}"
 
         ground_truth_answer_stripped = strip_string(ground_truth_answer)
         ground_truth_wrapped = "\\boxed{" + ground_truth_answer + "}"
         ground_truth_answer_extracted = extract_math_perturb_ground_truth_answer(problem, ground_truth_wrapped, task='')
-
-
+        if not ground_truth_answer_extracted:
+            raise ValueError(f"Could not extract a reference answer from {ground_truth!r}")
         if ground_truth_answer_stripped != str(ground_truth_answer_extracted[0]):
             print("Multi-valued ground truth:" , ground_truth_answer_stripped, ground_truth_answer_extracted)
     elif dataset_type == 'original':
