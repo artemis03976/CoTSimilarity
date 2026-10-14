@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from tqdm import tqdm
@@ -27,11 +29,14 @@ def run_greedy_evaluation(
     validation_config: CoTValidationConfig | None = None,
     save_token_ids: bool = False,
     run_metadata: dict[str, Any] | None = None,
+    batch_size: int = 128,
 ) -> tuple[Path, Path]:
     """Run exactly one deterministic continuation for every selected triplet variant."""
 
     if not records:
         raise ValueError("No evaluation records selected")
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
     validation_config = validation_config or CoTValidationConfig()
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "all_records.jsonl"
@@ -40,19 +45,83 @@ def run_greedy_evaluation(
     total_generations = 0
     valid_generations = 0
     rejection_reasons: Counter[str] = Counter()
+    generate_batch = getattr(generator, "generate_batch", None)
+    batched = callable(generate_batch)
+    effective_batch_size = batch_size if batched else 1
+    batch_results = []
+    generated_tokens = 0
+    generation_seconds = 0.0
+    evaluation_seconds = 0.0
+    started = perf_counter()
+    metadata = {
+        **(run_metadata or {}),
+        **getattr(generator, "run_metadata", {}),
+        "batch_size": effective_batch_size,
+    }
+
+    def write_qc(status: str, completed_records: int) -> None:
+        write_json(
+            qc_path,
+            {
+                "status": status,
+                "mode": "greedy",
+                "baseline": generator.baseline,
+                "records": completed_records,
+                "expected_records": len(records),
+                "generations": total_generations,
+                "valid_generations": valid_generations,
+                "invalid_generations": total_generations - valid_generations,
+                "rejection_reasons": dict(sorted(rejection_reasons.items())),
+                "fully_correct_triplets": fully_correct,
+                "run": metadata,
+                "performance": {
+                    "elapsed_seconds": perf_counter() - started,
+                    "generation_seconds": generation_seconds,
+                    "evaluation_seconds": evaluation_seconds,
+                    "generated_tokens": generated_tokens,
+                    "generation_tokens_per_second": (
+                        generated_tokens / generation_seconds if generation_seconds else 0.0
+                    ),
+                },
+                "validation": {
+                    "require_boxed_answer": validation_config.require_boxed_answer,
+                    "min_characters": validation_config.min_characters,
+                    "repeat_ngram_size": validation_config.repeat_ngram_size,
+                    "max_ngram_repeats": validation_config.max_ngram_repeats,
+                    "min_repeat_span_tokens": validation_config.min_repeat_span_tokens,
+                },
+            },
+        )
 
     with output_path.open("w", encoding="utf-8", newline="\n") as handle:
+        write_qc("running", 0)
         progress = tqdm(records, desc=f"Greedy inference ({generator.baseline})")
-        for record in progress:
+        for record_index, record in enumerate(progress):
+            if batched and record_index % effective_batch_size == 0:
+                batch = records[record_index : record_index + effective_batch_size]
+                problems = [record[variant]["problem"] for record in batch for variant in VARIANTS]
+                generation_started = perf_counter()
+                batch_results = generate_batch(problems)
+                generation_seconds += perf_counter() - generation_started
+                if len(batch_results) != len(problems):
+                    raise RuntimeError("Batched generator did not return one result per prompt")
             problem_id = normalise_problem_id(record.get("problem_id"))
             results: dict[str, Any] = {}
             all_correct = True
-            for variant in VARIANTS:
+            for variant_index, variant in enumerate(VARIANTS):
                 variant_data = record[variant]
                 problem = variant_data["problem"]
                 ground_truth = ground_truth_for(variant_data)
                 ground_truth_type = ground_truth_type_for(variant_data, variant)
-                generated = generator.generate(problem)
+                if batched:
+                    offset = (record_index % effective_batch_size) * len(VARIANTS) + variant_index
+                    generated = batch_results[offset]
+                else:
+                    generation_started = perf_counter()
+                    generated = generator.generate(problem)
+                    generation_seconds += perf_counter() - generation_started
+                generated_tokens += len(generated.token_ids)
+                evaluation_started = perf_counter()
                 validation = validate_cot(
                     generated.text,
                     generated.finish_reason,
@@ -71,6 +140,7 @@ def run_greedy_evaluation(
                     else None
                 )
                 correct = bool(validation.valid and answer_correct)
+                evaluation_seconds += perf_counter() - evaluation_started
                 total_generations += 1
                 valid_generations += int(validation.valid)
                 rejection_reasons.update(validation.reasons)
@@ -106,31 +176,15 @@ def run_greedy_evaluation(
                 "level": record.get("level"),
                 **results,
             }
-            import json
-
             handle.write(json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n")
             handle.flush()
+            if (record_index + 1) % effective_batch_size == 0 or record_index + 1 == len(records):
+                write_qc("running", record_index + 1)
 
-    write_json(
-        qc_path,
-        {
-            "status": "completed",
-            "mode": "greedy",
-            "baseline": generator.baseline,
-            "records": len(records),
-            "generations": total_generations,
-            "valid_generations": valid_generations,
-            "invalid_generations": total_generations - valid_generations,
-            "rejection_reasons": dict(sorted(rejection_reasons.items())),
-            "fully_correct_triplets": fully_correct,
-            "run": run_metadata or {},
-            "validation": {
-                "require_boxed_answer": validation_config.require_boxed_answer,
-                "min_characters": validation_config.min_characters,
-                "repeat_ngram_size": validation_config.repeat_ngram_size,
-                "max_ngram_repeats": validation_config.max_ngram_repeats,
-                "min_repeat_span_tokens": validation_config.min_repeat_span_tokens,
-            },
-        },
+    write_qc("completed", len(records))
+    print(
+        f"Generated {generated_tokens} tokens in {generation_seconds:.1f}s "
+        f"({generated_tokens / generation_seconds if generation_seconds else 0.0:.1f} tokens/s); "
+        f"evaluation: {evaluation_seconds:.1f}s"
     )
     return output_path, qc_path

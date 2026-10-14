@@ -5,12 +5,13 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
 from .common import GenerationResult, build_prompt
 
 
 BASELINES = ("base", "dspr", "spt", "lora")
+BACKENDS = ("transformers", "vllm")
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,13 @@ class GreedyModelConfig:
     router_dropout: float = 0.05
     max_seq_length: int = 4096
     forced_alpha: float | None = None
+    backend: str = "transformers"
+    seed: int = 42
+    gpu_memory_utilization: float = 0.9
+    max_model_len: int | None = None
+    max_num_seqs: int = 64
+    max_num_batched_tokens: int = 8192
+    enable_chunked_prefill: bool = True
 
     def __post_init__(self) -> None:
         if self.baseline not in BASELINES:
@@ -39,6 +47,19 @@ class GreedyModelConfig:
             raise ValueError("token limits must be positive")
         if self.dtype not in {"float16", "bfloat16", "float32"}:
             raise ValueError(f"Unsupported dtype: {self.dtype}")
+        if self.backend not in BACKENDS:
+            raise ValueError(f"backend must be one of {BACKENDS}")
+        if self.backend == "vllm":
+            if self.baseline != "base":
+                raise ValueError("The vLLM greedy backend currently supports only baseline=base")
+            if self.device != "cuda":
+                raise ValueError("For vLLM, use device=cuda and select the GPU with CUDA_VISIBLE_DEVICES")
+            if not 0.0 < self.gpu_memory_utilization <= 1.0:
+                raise ValueError("gpu_memory_utilization must be in (0, 1]")
+            if self.max_model_len is not None and self.max_model_len < 1:
+                raise ValueError("max_model_len must be positive")
+            if self.max_num_seqs < 1 or self.max_num_batched_tokens < self.max_num_seqs:
+                raise ValueError("Require max_num_batched_tokens >= max_num_seqs >= 1")
         if self.forced_alpha is not None:
             if self.baseline != "dspr":
                 raise ValueError("forced_alpha is only valid for DSPR")
@@ -230,8 +251,17 @@ def _model_load_kwargs(config: GreedyModelConfig, torch: Any) -> dict[str, Any]:
     }
 
 
-def load_greedy_generator(config: GreedyModelConfig) -> GreedyGenerator:
+def load_greedy_generator(
+    config: GreedyModelConfig,
+    *,
+    problems: Sequence[str] | None = None,
+) -> GreedyGenerator:
     """Load the requested model family behind one deterministic interface."""
+
+    if config.backend == "vllm":
+        from .vllm_greedy import VLLMGreedyGenerator
+
+        return VLLMGreedyGenerator(config, problems=problems)
 
     import torch
 

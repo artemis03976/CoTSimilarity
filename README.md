@@ -457,11 +457,49 @@ because it has no fold-specific training:
 ```bash
 python scripts/inference.py \
   --baseline base \
+  --backend vllm \
   --model-name Qwen/Qwen2.5-Math-7B-Instruct \
   --data-path data/canonical_math_paired.jsonl \
   --output-dir output/qwen_matched_greedy \
-  --max-new-tokens 4096
+  --max-new-tokens 2048 \
+  --max-model-len 4096 \
+  --batch-size 128 \
+  --gpu-memory-utilization 0.90 \
+  --max-num-seqs 64 \
+  --max-num-batched-tokens 8192
 ```
+
+From the repository root, `bash scripts/run_inference.sh` runs this
+configuration on GPU 0. Edit `CUDA_VISIBLE_DEVICES` and the arguments directly
+in the script as needed. Extra arguments are forwarded to `inference.py`; for
+example, `--num 32 --output-dir output/qwen_base_smoke` selects 32 problem
+triplets and saves them separately.
+
+The vLLM backend supports base greedy inference and keeps one engine resident
+across batches. `--batch-size` counts problem triplets, so 128 submits 384
+prompts; `--max-num-seqs` controls the engine's concurrent sequence limit.
+Prompt tokenization, tokenizer EOS, model repetition penalty, quality checks,
+and answer scoring follow the Transformers path. Each variant gets one greedy
+output, including invalid outputs, with no resampling. Backend kernels can
+produce different greedy tokens despite matching these settings.
+
+Before loading model weights, the backend checks every selected prompt plus
+the full output budget against `--max-model-len`, without truncation. Omitting
+this option selects `max(4096, longest prompt + max-new-tokens)`. Chunked
+prefill is enabled by default; `--no-enable-chunked-prefill` disables it.
+The JSONL is flushed after each scored triplet, and `generation_qc.json` is
+updated after each batch with completion counts, backend settings, generation
+tokens/s, and separate generation/evaluation times. Throughput excludes model
+loading. Compare `--max-num-seqs 32`, `64`, and `128` on the same actual subset;
+`--max-num-batched-tokens 16384` is another tuning option. Re-running overwrites
+the selected output directory's prediction/QC files.
+
+The CLI defaults to `--backend transformers` for compatibility with existing
+DSPR/SPT/LoRA commands. When omitted, `--max-new-tokens` defaults to 2048 for
+vLLM and retains the previous 4096 default for Transformers. The base shell
+wrapper explicitly selects vLLM and a 2048-token output budget matching the
+completed staged K-fold inference;
+set the same output budget on both sides when comparing another experiment.
 
 Then pass the resulting baseline file to the aggregator:
 
