@@ -75,8 +75,8 @@ def read_math_records(
                 raise ValueError(f"Problem {pid} is missing the {variant!r} object")
             if not isinstance(variant_data.get("problem"), str) or not variant_data["problem"].strip():
                 raise ValueError(f"Problem {pid} {variant} has no problem text")
-            if variant_data.get("solution") is None and variant_data.get("answer") is None:
-                raise ValueError(f"Problem {pid} {variant} has no solution or answer")
+            if ground_truth_for(variant_data) is None:
+                raise ValueError(f"Problem {pid} {variant} has no solution, answer, or ground_truth")
     return records
 
 
@@ -109,8 +109,12 @@ def dataset_type_for_variant(variant: str) -> str:
 
 
 def ground_truth_for(variant_data: dict[str, Any]) -> Any:
-    solution = variant_data.get("solution")
-    return solution if solution is not None else variant_data.get("answer")
+    """Read references from canonical inputs or saved inference records."""
+    for field in ("solution", "answer", "ground_truth"):
+        value = variant_data.get(field)
+        if value is not None:
+            return value
+    return None
 
 
 def check_answer_strict(
