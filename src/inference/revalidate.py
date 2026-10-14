@@ -14,7 +14,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .common import VARIANTS, check_answer_strict, normalise_problem_id, read_jsonl
+from .common import VARIANTS, check_answer_strict, ground_truth_for, ground_truth_type_for, normalise_problem_id, read_jsonl
 from .quality import CoTValidationConfig, validate_cot
 
 
@@ -185,13 +185,9 @@ def revalidate_multiple(
                         answer_correct = check_answer_strict(
                             metadata_variant["problem"],
                             candidate["response"],
-                            metadata_variant.get(
-                                "ground_truth",
-                                metadata_variant.get(
-                                    "solution", metadata_variant.get("answer")
-                                ),
-                            ),
+                            ground_truth_for(metadata_variant),
                             variant,
+                            ground_truth_type_for(metadata_variant, variant),
                         )
                         correct = bool(answer_correct)
                 sample: dict[str, Any] = {
@@ -216,9 +212,8 @@ def revalidate_multiple(
 
             results[variant] = {
                 "problem": metadata_variant["problem"],
-                "ground_truth": metadata_variant.get(
-                    "ground_truth", metadata_variant.get("solution", metadata_variant.get("answer"))
-                ),
+                "ground_truth": ground_truth_for(metadata_variant),
+                "ground_truth_type": ground_truth_type_for(metadata_variant, variant),
                 "sampling_mode": "sample" if variant in sampled else "greedy",
                 "samples": samples,
             }

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from dspr.config import MATH_SYSTEM_PROMPT
-from utils.evaluate import answer_check, test_parse_latex
+from utils.evaluate import UnsupportedReferenceError, answer_check, test_parse_latex
 
 
 VARIANTS = ("original", "simple", "hard")
@@ -117,12 +117,25 @@ def ground_truth_for(variant_data: dict[str, Any]) -> Any:
     return None
 
 
+def ground_truth_type_for(variant_data: dict[str, Any], variant: str) -> str:
+    """Preserve the distinction between a final answer and a worked solution."""
+    for field in ("solution", "answer", "ground_truth"):
+        if variant_data.get(field) is not None:
+            if field == "ground_truth":
+                return variant_data.get("ground_truth_type") or (
+                    "solution" if variant == "original" else "answer"
+                )
+            return "solution" if field == "solution" else "answer"
+    raise ValueError(f"No reference found for variant={variant}")
+
+
 def check_answer_strict(
     problem: str,
     response: str,
     ground_truth: Any,
     variant: str,
-) -> bool:
+    ground_truth_type: str | None = None,
+) -> bool | None:
     """Evaluate one answer without silently converting evaluator failures to False."""
 
     try:
@@ -130,10 +143,13 @@ def check_answer_strict(
             answer_check(
                 problem,
                 response,
-                str(ground_truth),
+                ground_truth,
                 dataset_type_for_variant(variant),
+                reference_type=ground_truth_type,
             )
         )
+    except UnsupportedReferenceError:
+        return None
     except Exception as exc:
         raise RuntimeError(
             f"Answer evaluation failed for variant={variant}, problem={problem[:80]!r}"

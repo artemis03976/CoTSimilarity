@@ -17,6 +17,7 @@ from .common import (
     build_prompt,
     check_answer_strict,
     ground_truth_for,
+    ground_truth_type_for,
     normalise_problem_id,
     write_json,
 )
@@ -95,6 +96,7 @@ class SamplingTask:
     target: int
     resample_invalid: bool
     max_attempts: int
+    ground_truth_type: str = "solution"
     attempts: int = 0
     request_round: int = 0
     trajectories: list[AcceptedTrajectory] = field(default_factory=list)
@@ -246,6 +248,7 @@ class VLLMMultipleSampler:
                         variant=variant,
                         problem=variant_data["problem"],
                         ground_truth=ground_truth_for(variant_data),
+                        ground_truth_type=ground_truth_type_for(variant_data, variant),
                         prompt=build_prompt(
                             self.tokenizer,
                             variant_data["problem"],
@@ -449,6 +452,7 @@ class VLLMMultipleSampler:
                                 trajectory.text,
                                 task.ground_truth,
                                 variant,
+                                task.ground_truth_type,
                             )
                             if trajectory.validation.valid
                             else None
@@ -471,6 +475,7 @@ class VLLMMultipleSampler:
                     results[variant] = {
                         "problem": task.problem,
                         "ground_truth": task.ground_truth,
+                        "ground_truth_type": task.ground_truth_type,
                         "sampling_mode": "sample" if task.resample_invalid else "greedy",
                         "samples": samples,
                     }

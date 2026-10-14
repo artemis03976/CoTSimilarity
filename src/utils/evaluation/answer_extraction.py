@@ -8,6 +8,8 @@ def _fix_fracs(string):
         substrs = substrs[1:]
         for substr in substrs:
             new_str += "\\frac"
+            # Whitespace between the command and its argument is valid LaTeX.
+            substr = substr.lstrip()
             if len(substr) > 0 and substr[0] == "{":
                 new_str += substr
             else:

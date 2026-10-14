@@ -12,6 +12,7 @@ from .common import (
     VARIANTS,
     check_answer_strict,
     ground_truth_for,
+    ground_truth_type_for,
     normalise_problem_id,
     write_json,
 )
@@ -50,6 +51,7 @@ def run_greedy_evaluation(
                 variant_data = record[variant]
                 problem = variant_data["problem"]
                 ground_truth = ground_truth_for(variant_data)
+                ground_truth_type = ground_truth_type_for(variant_data, variant)
                 generated = generator.generate(problem)
                 validation = validate_cot(
                     generated.text,
@@ -63,6 +65,7 @@ def run_greedy_evaluation(
                         generated.text,
                         ground_truth,
                         variant,
+                        ground_truth_type,
                     )
                     if validation.valid
                     else None
@@ -84,6 +87,7 @@ def run_greedy_evaluation(
                 result: dict[str, Any] = {
                     "problem": problem,
                     "ground_truth": ground_truth,
+                    "ground_truth_type": ground_truth_type,
                     "samples": [sample],
                 }
                 if "alpha" in generated.metadata:
