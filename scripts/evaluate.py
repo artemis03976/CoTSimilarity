@@ -17,7 +17,7 @@ def _usage() -> str:
     return (
         "Usage: python scripts/evaluate.py METHOD ACTION [ACTION OPTIONS]\n"
         "\n"
-        "METHOD: dspr | lora\n"
+        "METHOD: dspr | spt | lora\n"
         "ACTION: run | aggregate\n"
         "Use 'python scripts/evaluate.py METHOD ACTION --help' for action-specific options."
     )
@@ -37,6 +37,10 @@ def main() -> int:
         from experiment_pipeline.evaluate_dspr import main as action_main
     elif (method, action) == ("dspr", "aggregate"):
         from experiment_pipeline.aggregate_dspr import main as action_main
+    elif (method, action) == ("spt", "run"):
+        from experiment_pipeline.evaluate_spt import main as action_main
+    elif (method, action) == ("spt", "aggregate"):
+        from experiment_pipeline.aggregate_spt import main as action_main
     elif (method, action) == ("lora", "run"):
         from experiment_pipeline.evaluate_lora import main as action_main
     elif (method, action) == ("lora", "aggregate"):

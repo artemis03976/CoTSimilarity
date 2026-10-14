@@ -17,7 +17,7 @@ def _usage() -> str:
     return (
         "Usage: python scripts/train_kfold.py METHOD [METHOD OPTIONS]\n"
         "\n"
-        "METHOD: dspr (router -> frozen-router prefix) | lora\n"
+        "METHOD: dspr (router -> frozen-router prefix) | spt | lora\n"
         "Use 'python scripts/train_kfold.py METHOD --help' for method-specific options."
     )
 
@@ -30,6 +30,8 @@ def main() -> int:
     method = sys.argv[1].lower()
     if method == "dspr":
         from experiment_pipeline.kfold_dspr import main as method_main
+    elif method == "spt":
+        from experiment_pipeline.kfold_spt import main as method_main
     elif method == "lora":
         from experiment_pipeline.kfold_lora import main as method_main
     else:

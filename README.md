@@ -13,9 +13,10 @@ Most workflows are driven by scripts under `scripts/`, with reusable implementat
 |   +-- inference_multiple.py         # Batched validated vLLM trajectory sampling
 |   +-- pertubation_test.py           # Legacy response-generation entrypoint
 |   +-- train.py                      # Unified DSPR/SPT/LoRA training entrypoint
-|   +-- train_kfold.py                # Unified multi-GPU DSPR/LoRA K-fold training
+|   +-- train_kfold.py                # Unified multi-GPU DSPR/SPT/LoRA K-fold training
 |   +-- evaluate.py                   # Unified K-fold inference and OOF aggregation
 |   +-- run_dspr_pipeline.sh          # Staged K-fold DSPR training, inference, and OOF metrics
+|   +-- run_baseline_pipeline.sh      # Same-fold SPT/LoRA training, inference, and OOF comparisons
 |   +-- run_ablation_*.sh             # Ablation for DSPR hyperparameters
 |
 +-- src/
@@ -107,6 +108,26 @@ Common paths used by the current scripts:
 - `output/<model>/dspr/all_records.jsonl`: DSPR inference records.
 
 Some `output/*/all_records.jsonl` files are expensive experiment artifacts and are intentionally kept in the repository workflow.
+
+`data/canonical_math_paired_cleaned.jsonl` is a separate cleaned dataset. It
+excludes paired groups containing proof tasks or questions that cannot be
+reliably repaired or graded. Corrections use each record's existing fields;
+worked solutions retain boxed final answers and multipart answer labels use
+ordinary text. Original problem IDs and source coordinates are preserved.
+The original four source files and existing experiment inputs remain unchanged.
+Audit records and exclusions are stored under `output/problem_answer_repair/`.
+
+Validate the cleaned dataset without loading a model:
+
+```bash
+python scripts/validate_problem_answers.py
+```
+
+This checks reference extraction, evaluator round trips, and preservation of
+the original field layouts and source coordinates. It does not establish
+mathematical correctness. Existing scripts continue to default to
+`data/canonical_math_paired.jsonl` for the completed experiment. Select the
+cleaned path explicitly and use a separate output directory for a new run.
 
 ## End-To-End DSPR Workflow
 
@@ -516,46 +537,79 @@ report a single fold and `--expected-problems N` for an explicit count assertion
 Canonical raw data and baseline files can cover a larger universe; metrics use
 only the selected held-out IDs.
 
-### 9.1 Train and Evaluate the Parameter-Matched LoRA Baseline
+### 9.1 Train and Evaluate SPT and LoRA on the Same Folds
 
-The LoRA baseline uses rank 3 adapters on every `q_proj` and `v_proj`. For
-Qwen2.5-Math-7B-Instruct this trains 946,176 parameters, 7.74% fewer than
-DSPR's 1,025,537 trainable parameters. The training entrypoint verifies this
-budget at runtime and aborts if the gap exceeds 10%.
+Both baselines directly reuse `output/qwen-2.5/kfold/fold_N/train.jsonl`,
+`val.jsonl`, and `test.jsonl`. They use the same CoT supervision and response-only
+loss mask as the DSPR prefix stage. Defaults are flat trajectory sampling,
+learning rate `4e-5`, batch size 4, gradient accumulation 4, a 15-epoch cap,
+maximum training length 2048, warmup ratio 0.05, and weight decay 0. Validation
+LM loss selects the best checkpoint, with early-stopping patience 3. These
+defaults match the current staged prefix configuration; historical overrides
+should be checked against the corresponding training manifest.
 
-Validate the fold commands without loading the model, then train all folds:
+SPT defaults to one 50-token static prompt: **179,200** parameters for
+Qwen2.5-Math-7B. This is about 53.2% of the completed DSPR parameter count;
+50 tokens brings its capacity closer while respecting the chosen prompt-length
+limit. Use `--prefix-length` to select a shorter prompt.
+The completed DSPR configuration has two 15-token prefixes and a 64-unit router,
+for **337,025** trainable parameters. Parameter-matched LoRA uses rank **1**,
+alpha **2**, and `q_proj`/`v_proj` adapters: **315,392** parameters, 6.42% fewer
+than DSPR. Its training entrypoint enforces the 10% budget tolerance. The older
+1,025,537-parameter reference corresponds to a 256-unit router.
 
-```bash
-python scripts/train_kfold.py lora --dry-run --gpus 0,1,2,3,4
-python scripts/train_kfold.py lora --gpus 0,1,2,3,4
-```
-
-Run one held-out smoke test before starting all-fold inference:
-
-```bash
-python scripts/evaluate.py lora run \
-  --folds 0 \
-  --problem-id 2 \
-  --gpus 0 \
-  --output-root output/qwen_lora_qv_r3_seed42_smoke
-
-python scripts/evaluate.py lora run --gpus 0,1,2,3,4
-```
-
-The inference entrypoint runs symbolic-answer evaluator self-tests before it
-loads the model. Pool the exact OOF coverage and compare LoRA against both the
-matched greedy base model and DSPR:
+Validate both five-fold training schedules without loading model weights:
 
 ```bash
-python scripts/evaluate.py lora aggregate \
-  --base output/qwen-2.5/greedy/all_records.jsonl \
-  --dspr output/qwen_staged_kfold_seed42/oof_all_records.jsonl
+python scripts/train_kfold.py spt --gpus 0 --dry-run
+python scripts/train_kfold.py lora --gpus 0 --dry-run
 ```
 
-The LoRA report writes `oof_all_records.jsonl`, `oof_metrics.json`, and
-`oof_metrics.csv` under `output/qwen_lora_qv_r3_seed42`. Paired comparisons
-include bootstrap confidence intervals and exact McNemar tests for full,
-eligible, and noneligible slices.
+Run training, held-out greedy inference, and OOF comparison:
+
+```bash
+GPUS=0 bash scripts/run_baseline_pipeline.sh spt
+GPUS=0 bash scripts/run_baseline_pipeline.sh lora
+```
+
+One GPU runs folds sequentially; `GPUS=0,1,2,3,4` enables parallel folds.
+For an initial fold-0 run, use `FOLDS=0`. Set `STAGE=train` or `STAGE=eval` to
+run only that stage; `DRY_RUN=1` validates the training commands. `RUN_NAME`,
+`CHECKPOINT_ROOT`, and `OUTPUT_ROOT` can select separate experiment directories.
+Extra arguments after the method are forwarded to K-fold training.
+
+The individual entrypoints are also available:
+
+```bash
+python scripts/train_kfold.py spt --gpus 0
+python scripts/evaluate.py spt run --gpus 0
+python scripts/evaluate.py spt aggregate
+
+python scripts/train_kfold.py lora --gpus 0
+python scripts/evaluate.py lora run --gpus 0
+python scripts/evaluate.py lora aggregate
+```
+
+SPT selects and loads `baseline_trainable.pt` using its validation checkpoint
+state, including the saved prompt length. LoRA selects the best PEFT adapter.
+Inference uses one greedy response per variant, a 2048-output-token budget,
+and the existing answer evaluator. Aggregation supports `--folds 0` and the
+full five-fold OOF universe, with full, eligible, and noneligible comparisons
+against `output/qwen-2.5/base/all_records.jsonl` and
+`output/qwen_staged_kfold_seed42/oof_all_records.jsonl`.
+
+Outputs are separate: `checkpoints/qwen_spt_seed42` / `output/qwen_spt_seed42`
+and `checkpoints/qwen_lora_qv_r1_seed42` / `output/qwen_lora_qv_r1_seed42`.
+This comparison uses the original 548-group folds. A cleaned-dataset experiment
+requires separately rebuilt training records and folds.
+
+To run a larger LoRA configuration, explicitly disable parameter matching and
+use its own output directory:
+
+```bash
+RUN_NAME=qwen_lora_qv_r3_seed42 GPUS=0 bash scripts/run_baseline_pipeline.sh lora \
+  --rank 3 --lora-alpha 6 --no-enforce-parameter-budget
+```
 
 ### 10. Evaluate a Single DSPR Checkpoint
 

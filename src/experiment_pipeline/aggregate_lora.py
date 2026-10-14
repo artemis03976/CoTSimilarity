@@ -12,6 +12,7 @@ from typing import Any, Iterable
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from . import aggregate_dspr as common
+from .train_lora import DEFAULT_RUN_NAME
 
 
 FOLDS = common.FOLDS
@@ -27,21 +28,23 @@ def build_metrics(
     records: dict[int, dict[str, Any]],
     all_ids: set[int],
     eligible: dict[str, set[int]],
+    baseline_name: str = "lora",
 ) -> dict[str, Any]:
+    label = f"{baseline_name.upper()} OOF"
     return {
         "full": {
             **{
-                variant: common.metric_for_variant(records, all_ids, variant, "LoRA OOF")
+                variant: common.metric_for_variant(records, all_ids, variant, label)
                 for variant in VARIANTS
             },
-            "all_variants": common.all_variants_metric(records, all_ids, "LoRA OOF"),
+            "all_variants": common.all_variants_metric(records, all_ids, label),
         },
         "eligible": {
             variant: common.metric_for_variant(
                 records,
                 eligible[variant],
                 variant,
-                "LoRA OOF",
+                label,
             )
             for variant in ("simple", "hard")
         },
@@ -50,7 +53,7 @@ def build_metrics(
                 records,
                 all_ids - eligible[variant],
                 variant,
-                "LoRA OOF",
+                label,
             )
             for variant in ("simple", "hard")
         },
@@ -72,20 +75,20 @@ def all_variants_outcome(
     return all(first_outcome(records, problem_id, variant) for variant in VARIANTS)
 
 
-def rename_comparison(raw: dict[str, Any]) -> dict[str, Any]:
+def rename_comparison(raw: dict[str, Any], baseline_name: str = "lora") -> dict[str, Any]:
     return {
         "total": raw["total"],
-        "lora_correct": raw["dspr_correct"],
-        "lora_accuracy": raw["dspr_accuracy"],
+        f"{baseline_name}_correct": raw["dspr_correct"],
+        f"{baseline_name}_accuracy": raw["dspr_accuracy"],
         "comparator_correct": raw["baseline_correct"],
         "comparator_accuracy": raw["baseline_accuracy"],
-        "delta_lora_minus_comparator": raw["delta"],
+        f"delta_{baseline_name}_minus_comparator": raw["delta"],
         "paired_bootstrap_95_ci": raw["paired_bootstrap_95_ci"],
         "bootstrap_samples": raw["bootstrap_samples"],
         "both_correct": raw["both_correct"],
         "both_wrong": raw["both_wrong"],
         "comparator_only_correct": raw["baseline_only_correct"],
-        "lora_only_correct": raw["dspr_only_correct"],
+        f"{baseline_name}_only_correct": raw["dspr_only_correct"],
         "mcnemar_exact_p": raw["mcnemar_exact_p"],
     }
 
@@ -98,6 +101,7 @@ def compare_records(
     bootstrap_samples: int,
     seed: int,
     comparator_name: str,
+    baseline_name: str = "lora",
 ) -> dict[str, Any]:
     result: dict[str, Any] = {"full": {}, "eligible": {}, "noneligible": {}}
     for variant in VARIANTS:
@@ -109,7 +113,8 @@ def compare_records(
                 bootstrap_samples,
                 seed,
                 f"{comparator_name}/full/{variant}",
-            )
+            ),
+            baseline_name,
         )
     result["full"]["all_variants"] = rename_comparison(
         common.paired_comparison(
@@ -119,7 +124,8 @@ def compare_records(
             bootstrap_samples,
             seed,
             f"{comparator_name}/full/all_variants",
-        )
+        ),
+        baseline_name,
     )
     for variant in ("simple", "hard"):
         for scope, selected in (
@@ -134,7 +140,8 @@ def compare_records(
                     bootstrap_samples,
                     seed,
                     f"{comparator_name}/{scope}/{variant}",
-                )
+                ),
+                baseline_name,
             )
     return result
 
@@ -143,17 +150,18 @@ def write_metrics_csv(
     path: Path,
     metrics: dict[str, Any],
     comparisons: dict[str, dict[str, Any]],
+    baseline_name: str = "lora",
 ) -> None:
     fields = [
         "comparator",
         "scope",
         "variant",
         "total",
-        "lora_correct",
-        "lora_accuracy",
+        f"{baseline_name}_correct",
+        f"{baseline_name}_accuracy",
         "comparator_correct",
         "comparator_accuracy",
-        "delta_lora_minus_comparator",
+        f"delta_{baseline_name}_minus_comparator",
         "ci95_low",
         "ci95_high",
         "mcnemar_exact_p",
@@ -173,8 +181,8 @@ def write_metrics_csv(
                             "scope": scope,
                             "variant": variant,
                             "total": metric["total"],
-                            "lora_correct": metric[correct_key],
-                            "lora_accuracy": metric[accuracy_key],
+                            f"{baseline_name}_correct": metric[correct_key],
+                            f"{baseline_name}_accuracy": metric[accuracy_key],
                         }
                     )
             return
@@ -187,12 +195,12 @@ def write_metrics_csv(
                             "scope": scope,
                             "variant": variant,
                             "total": comparison["total"],
-                            "lora_correct": comparison["lora_correct"],
-                            "lora_accuracy": comparison["lora_accuracy"],
+                            f"{baseline_name}_correct": comparison[f"{baseline_name}_correct"],
+                            f"{baseline_name}_accuracy": comparison[f"{baseline_name}_accuracy"],
                             "comparator_correct": comparison["comparator_correct"],
                             "comparator_accuracy": comparison["comparator_accuracy"],
-                            "delta_lora_minus_comparator": comparison[
-                                "delta_lora_minus_comparator"
+                            f"delta_{baseline_name}_minus_comparator": comparison[
+                                f"delta_{baseline_name}_minus_comparator"
                             ],
                             "ci95_low": comparison["paired_bootstrap_95_ci"][0],
                             "ci95_high": comparison["paired_bootstrap_95_ci"][1],
@@ -201,22 +209,24 @@ def write_metrics_csv(
                     )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(baseline_name: str = "lora") -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--result-root", default="output/qwen_lora_qv_r3_seed42")
+    run_name = DEFAULT_RUN_NAME if baseline_name == "lora" else f"qwen_{baseline_name}_seed42"
+    parser.add_argument("--result-root", default=f"output/{run_name}")
     parser.add_argument("--id-root", default="output/qwen-2.5/kfold")
     parser.add_argument("--raw-data", default="data/canonical_math_paired.jsonl")
     parser.add_argument(
         "--base",
-        default="output/qwen-2.5/greedy/all_records.jsonl",
+        default="output/qwen-2.5/base/all_records.jsonl",
         help="Matched greedy base-model result; use an empty string to skip",
     )
     parser.add_argument(
         "--dspr",
-        default="output/qwen_kfold_seed42/oof_all_records.jsonl",
+        default="output/qwen_staged_kfold_seed42/oof_all_records.jsonl",
         help="DSPR OOF result; use an empty string to skip",
     )
     parser.add_argument("--expected-samples", type=int, default=1)
+    parser.add_argument("--folds", nargs="+", type=int, default=None)
     parser.add_argument("--expected-problems", type=int, default=None)
     parser.add_argument(
         "--expected-simple-eligible",
@@ -241,22 +251,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
+def main(baseline_name: str = "lora") -> int:
+    args = parse_args(baseline_name)
     if args.expected_samples < 0 or args.bootstrap_samples < 1:
         raise ValueError("Invalid expected sample count or bootstrap count")
     result_root = resolve_path(args.result_root)
     id_root = resolve_path(args.id_root)
     raw_path = resolve_path(args.raw_data)
     expected_samples = args.expected_samples or None
-    fold_ids, eligible = common.load_fold_expectations(id_root)
+    folds = common.parse_fold_list(args.folds)
+    fold_ids, eligible = common.load_fold_expectations(id_root, folds)
     raw_records = common.load_id_map(common.read_jsonl(raw_path), raw_path)
-    all_ids = set(raw_records)
+    all_ids = set().union(*fold_ids.values())
     if args.expected_problems is not None and len(all_ids) != args.expected_problems:
         raise ValueError(
-            f"Raw problem count is {len(all_ids)}; expected {args.expected_problems}"
+            f"Selected OOF problem count is {len(all_ids)}; expected {args.expected_problems}"
         )
-    if set().union(*fold_ids.values()) != all_ids:
+    if not all_ids <= set(raw_records):
+        raise ValueError("Fold held-out IDs are absent from raw data")
+    if set(folds) == set(FOLDS) and all_ids != set(raw_records):
         raise ValueError("Fold test universe differs from raw data")
     expected_eligible, eligible_count_sources = common.resolve_eligible_count_expectations(
         eligible,
@@ -268,10 +281,10 @@ def main() -> int:
 
     merged: dict[int, dict[str, Any]] = {}
     fold_counts: dict[str, int] = {}
-    for fold in FOLDS:
+    for fold in folds:
         path = result_root / f"fold_{fold}" / "all_records.jsonl"
         if not path.is_file():
-            raise FileNotFoundError(f"Missing Fold {fold} LoRA result: {path}")
+            raise FileNotFoundError(f"Missing Fold {fold} {baseline_name.upper()} result: {path}")
         fold_records = common.load_id_map(common.read_jsonl(path), path)
         common.validate_records(
             fold_records,
@@ -289,12 +302,12 @@ def main() -> int:
     common.validate_records(
         merged,
         all_ids,
-        "merged LoRA OOF",
+        f"merged {baseline_name.upper()} OOF",
         expected_samples,
         require_alpha=False,
     )
 
-    metrics = build_metrics(merged, all_ids, eligible)
+    metrics = build_metrics(merged, all_ids, eligible, baseline_name)
     comparator_paths = {
         name: resolve_path(value)
         for name, value in (("base", args.base), ("dspr", args.dspr))
@@ -303,6 +316,10 @@ def main() -> int:
     comparisons: dict[str, dict[str, Any]] = {}
     for name, path in comparator_paths.items():
         comparator = common.load_id_map(common.read_jsonl(path), path)
+        if not all_ids <= set(comparator):
+            raise ValueError(f"{path}: comparator is missing selected held-out IDs")
+        if set(folds) != set(FOLDS):
+            comparator = {problem_id: comparator[problem_id] for problem_id in all_ids}
         common.validate_records(
             comparator,
             all_ids,
@@ -318,6 +335,7 @@ def main() -> int:
             args.bootstrap_samples,
             args.bootstrap_seed,
             name,
+            baseline_name,
         )
 
     merged_path = result_root / "oof_all_records.jsonl"
@@ -325,13 +343,14 @@ def main() -> int:
     csv_path = result_root / "oof_metrics.csv"
     common.write_jsonl(merged_path, [merged[problem_id] for problem_id in sorted(merged)])
     report = {
-        "method": "parameter_matched_lora",
+        "method": baseline_name,
         "validation": {
             "status": "passed",
-            "raw_problem_count": len(all_ids),
+            "raw_problem_count": len(raw_records),
             "oof_problem_count": len(merged),
             "unique_problem_count": len(set(merged)),
             "fold_counts": fold_counts,
+            "selected_folds": folds,
             "eligible_counts": {variant: len(ids) for variant, ids in eligible.items()},
             "noneligible_counts": {
                 variant: len(all_ids - ids) for variant, ids in eligible.items()
@@ -350,9 +369,9 @@ def main() -> int:
         "paired_comparisons": comparisons,
     }
     common.write_json(metrics_path, report)
-    write_metrics_csv(csv_path, metrics, comparisons)
+    write_metrics_csv(csv_path, metrics, comparisons, baseline_name)
 
-    print("LoRA OOF validation passed")
+    print(f"{baseline_name.upper()} OOF validation passed")
     for variant in VARIANTS:
         metric = metrics["full"][variant]
         print(

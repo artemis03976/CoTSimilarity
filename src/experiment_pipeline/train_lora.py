@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import random
 from pathlib import Path
@@ -11,7 +12,10 @@ from typing import Any
 
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-Math-7B-Instruct"
-DEFAULT_DSPR_BUDGET = 1_025_537
+DEFAULT_DSPR_BUDGET = 337_025
+DEFAULT_RANK = 1
+DEFAULT_LORA_ALPHA = 2
+DEFAULT_RUN_NAME = "qwen_lora_qv_r1_seed42"
 DEFAULT_HIDDEN_SIZE = 3584
 DEFAULT_KV_SIZE = 512
 DEFAULT_LAYERS = 28
@@ -44,19 +48,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--train_data_path", required=True)
     parser.add_argument("--val_data_path", required=True)
     parser.add_argument("--output_path", required=True)
-    parser.add_argument("--rank", type=int, default=3)
-    parser.add_argument("--lora_alpha", type=int, default=6)
+    parser.add_argument("--rank", type=int, default=DEFAULT_RANK)
+    parser.add_argument("--lora_alpha", type=int, default=DEFAULT_LORA_ALPHA)
     parser.add_argument("--target_modules", nargs="+", default=["q_proj", "v_proj"])
     parser.add_argument("--lora_dropout", type=float, default=0.05)
     parser.add_argument("--learning_rate", type=float, default=4e-5)
+    parser.add_argument("--weight_decay", type=float, default=0.0)
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--num_epochs", type=float, default=15)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
-    parser.add_argument("--warmup_steps", type=int, default=100)
+    parser.add_argument("--warmup_steps", type=int, default=0)
+    parser.add_argument("--warmup_ratio", type=float, default=0.05)
     parser.add_argument("--max_seq_length", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="float16")
+    parser.add_argument("--attention_implementation", default="flash_attention_2")
     parser.add_argument(
         "--gradient_checkpointing",
         action=argparse.BooleanOptionalAction,
@@ -64,8 +72,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--logging_steps", type=int, default=10)
     parser.add_argument("--save_total_limit", type=int, default=3)
+    parser.add_argument("--early_stopping_patience", type=int, default=3)
+    parser.add_argument("--early_stopping_threshold", type=float, default=0.0)
     parser.add_argument("--dspr_parameter_budget", type=int, default=DEFAULT_DSPR_BUDGET)
     parser.add_argument("--budget_tolerance", type=float, default=0.10)
+    parser.add_argument(
+        "--enforce_parameter_budget",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Disable explicitly to train a larger, unmatched LoRA baseline",
+    )
     return parser.parse_args()
 
 
@@ -79,6 +95,10 @@ def main() -> int:
         raise ValueError("--lora_dropout must be in [0, 1)")
     if args.dspr_parameter_budget < 1 or not 0.0 <= args.budget_tolerance < 1.0:
         raise ValueError("Invalid parameter-budget settings")
+    if args.warmup_steps < 0 or not 0.0 <= args.warmup_ratio < 1.0:
+        raise ValueError("Invalid warmup settings")
+    if args.early_stopping_patience < 0 or args.early_stopping_threshold < 0:
+        raise ValueError("Invalid early-stopping settings")
 
     try:
         import numpy as np
@@ -87,6 +107,7 @@ def main() -> int:
         from transformers import (
             AutoModelForCausalLM,
             AutoTokenizer,
+            EarlyStoppingCallback,
             Trainer,
             TrainingArguments,
             default_data_collator,
@@ -123,9 +144,12 @@ def main() -> int:
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     base_model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.float32 if args.device.startswith("cpu") else getattr(torch, args.dtype),
         trust_remote_code=True,
-        attn_implementation="flash_attention_2",
+        attn_implementation=(
+            "eager" if args.device.startswith("cpu") and args.attention_implementation == "flash_attention_2"
+            else args.attention_implementation
+        ),
     )
     base_model.config.use_cache = False
     if args.gradient_checkpointing:
@@ -147,7 +171,7 @@ def main() -> int:
     )
     total_parameters = sum(parameter.numel() for parameter in model.parameters())
     budget_gap = (trainable_parameters - args.dspr_parameter_budget) / args.dspr_parameter_budget
-    if abs(budget_gap) > args.budget_tolerance:
+    if args.enforce_parameter_budget and abs(budget_gap) > args.budget_tolerance:
         raise ValueError(
             "LoRA trainable-parameter budget is outside tolerance: "
             f"LoRA={trainable_parameters:,}, DSPR={args.dspr_parameter_budget:,}, "
@@ -165,7 +189,7 @@ def main() -> int:
     eval_strategy = "epoch" if len(val_dataset) > 0 else "no"
     output_path = Path(args.output_path).resolve()
     budget_manifest = {
-        "method": "parameter_matched_lora",
+        "method": "parameter_matched_lora" if args.enforce_parameter_budget else "lora",
         "model_name": args.model_name,
         "rank": args.rank,
         "lora_alpha": args.lora_alpha,
@@ -178,24 +202,26 @@ def main() -> int:
         "dspr_reference_parameters": args.dspr_parameter_budget,
         "relative_budget_gap": budget_gap,
         "budget_tolerance": args.budget_tolerance,
+        "parameter_budget_enforced": args.enforce_parameter_budget,
         "train_records": len(train_dataset),
         "validation_records": len(val_dataset),
         "training_arguments": vars(args),
     }
     write_json(output_path / "budget_manifest.json", budget_manifest)
 
-    training_args = TrainingArguments(
+    training_kwargs = dict(
         output_dir=str(output_path),
         learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         num_train_epochs=args.num_epochs,
         warmup_steps=args.warmup_steps,
+        warmup_ratio=args.warmup_ratio if args.warmup_steps == 0 else 0.0,
         max_grad_norm=args.max_grad_norm,
         logging_strategy="steps",
         logging_steps=args.logging_steps,
-        evaluation_strategy=eval_strategy,
         save_strategy=eval_strategy,
         save_total_limit=args.save_total_limit,
         load_best_model_at_end=(eval_strategy != "no"),
@@ -204,17 +230,31 @@ def main() -> int:
         remove_unused_columns=False,
         dataloader_pin_memory=True,
         report_to="none",
-        fp16=(args.device.startswith("cuda") and torch.cuda.is_available()),
+        fp16=(args.device.startswith("cuda") and args.dtype == "float16" and torch.cuda.is_available()),
+        bf16=(args.device.startswith("cuda") and args.dtype == "bfloat16" and torch.cuda.is_available()),
         gradient_checkpointing=False,
         label_names=["labels"],
         seed=args.seed,
     )
+    supported_args = inspect.signature(TrainingArguments.__init__).parameters
+    strategy_argument = "eval_strategy" if "eval_strategy" in supported_args else "evaluation_strategy"
+    training_kwargs[strategy_argument] = eval_strategy
+    if args.device.startswith("cpu"):
+        training_kwargs["use_cpu" if "use_cpu" in supported_args else "no_cuda"] = True
+    training_args = TrainingArguments(**training_kwargs)
+    callbacks = []
+    if eval_strategy != "no" and args.early_stopping_patience > 0:
+        callbacks.append(EarlyStoppingCallback(
+            early_stopping_patience=args.early_stopping_patience,
+            early_stopping_threshold=args.early_stopping_threshold,
+        ))
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset if len(val_dataset) > 0 else None,
         data_collator=default_data_collator,
+        callbacks=callbacks,
     )
     print("Starting LoRA training...")
     trainer.train()

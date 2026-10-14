@@ -24,7 +24,7 @@ from .kfold_dspr import (
     validate_inputs,
     write_json,
 )
-from .train_lora import DEFAULT_DSPR_BUDGET
+from .train_lora import DEFAULT_DSPR_BUDGET, DEFAULT_RANK, DEFAULT_LORA_ALPHA, DEFAULT_RUN_NAME
 
 
 def build_train_command(
@@ -54,6 +54,8 @@ def build_train_command(
         str(args.lora_dropout),
         "--learning_rate",
         str(args.learning_rate),
+        "--weight_decay",
+        str(args.weight_decay),
         "--batch_size",
         str(args.batch_size),
         "--num_epochs",
@@ -64,6 +66,8 @@ def build_train_command(
         str(args.max_grad_norm),
         "--warmup_steps",
         str(args.warmup_steps),
+        "--warmup_ratio",
+        str(args.warmup_ratio),
         "--max_seq_length",
         str(args.max_seq_length),
         "--seed",
@@ -74,6 +78,14 @@ def build_train_command(
         str(args.logging_steps),
         "--save_total_limit",
         str(args.save_total_limit),
+        "--early_stopping_patience",
+        str(args.early_stopping_patience),
+        "--early_stopping_threshold",
+        str(args.early_stopping_threshold),
+        "--dtype",
+        args.dtype,
+        "--attention_implementation",
+        args.attention_implementation,
         "--dspr_parameter_budget",
         str(args.dspr_parameter_budget),
         "--budget_tolerance",
@@ -81,6 +93,9 @@ def build_train_command(
     ]
     command.append(
         "--gradient_checkpointing" if args.gradient_checkpointing else "--no-gradient_checkpointing"
+    )
+    command.append(
+        "--enforce_parameter_budget" if args.enforce_parameter_budget else "--no-enforce_parameter_budget"
     )
     return command
 
@@ -90,7 +105,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fold-root", default="output/qwen-2.5/kfold")
     parser.add_argument(
         "--output-root",
-        default="checkpoints/qwen_lora_qv_r3_seed42",
+        default=f"checkpoints/{DEFAULT_RUN_NAME}",
     )
     parser.add_argument("--train-script", default="scripts/train.py")
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
@@ -100,19 +115,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-existing", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
 
-    parser.add_argument("--rank", type=int, default=3)
-    parser.add_argument("--lora-alpha", type=int, default=6)
+    parser.add_argument("--rank", type=int, default=DEFAULT_RANK)
+    parser.add_argument("--lora-alpha", type=int, default=DEFAULT_LORA_ALPHA)
     parser.add_argument("--target-modules", nargs="+", default=["q_proj", "v_proj"])
     parser.add_argument("--lora-dropout", type=float, default=0.05)
     parser.add_argument("--learning-rate", type=float, default=4e-5)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-epochs", type=float, default=15)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
-    parser.add_argument("--warmup-steps", type=int, default=100)
+    parser.add_argument("--warmup-steps", type=int, default=0)
+    parser.add_argument("--warmup-ratio", type=float, default=0.05)
     parser.add_argument("--max-seq-length", type=int, default=2048)
     parser.add_argument("--logging-steps", type=int, default=10)
     parser.add_argument("--save-total-limit", type=int, default=3)
+    parser.add_argument("--early-stopping-patience", type=int, default=3)
+    parser.add_argument("--early-stopping-threshold", type=float, default=0.0)
+    parser.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="float16")
+    parser.add_argument("--attention-implementation", default="flash_attention_2")
     parser.add_argument(
         "--gradient-checkpointing",
         action=argparse.BooleanOptionalAction,
@@ -120,6 +141,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dspr-parameter-budget", type=int, default=DEFAULT_DSPR_BUDGET)
     parser.add_argument("--budget-tolerance", type=float, default=0.10)
+    parser.add_argument("--enforce-parameter-budget", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
 
@@ -163,7 +185,7 @@ def main() -> int:
 
     manifest = {
         "created_at": utc_now(),
-        "method": "parameter_matched_lora",
+        "method": "parameter_matched_lora" if args.enforce_parameter_budget else "lora",
         "repo_root": str(REPO_ROOT),
         "model_name": args.model_name,
         "seed": args.seed,

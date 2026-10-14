@@ -34,6 +34,7 @@ from .evaluate_dspr import (
     utc_now,
     write_json,
 )
+from .train_lora import DEFAULT_RUN_NAME
 
 
 VARIANTS = ("original", "simple", "hard")
@@ -144,7 +145,9 @@ def build_inference_command(
         sys.executable,
         str(inference_script),
         "--baseline",
-        "lora",
+        args.baseline,
+        "--backend",
+        "transformers",
         "--checkpoint",
         spec.checkpoint,
         "--model_name",
@@ -164,6 +167,13 @@ def build_inference_command(
         "--device",
         "cuda",
     ]
+    if args.baseline == "spt":
+        prefix_length = spec.checkpoint_selection["prefix_length"]
+        if args.prefix_length is not None and args.prefix_length != prefix_length:
+            raise ValueError(
+                f"SPT checkpoint prefix length is {prefix_length}; requested {args.prefix_length}"
+            )
+        command.extend(["--prefix_length", str(prefix_length)])
     if args.problem_id is not None:
         command.extend(["--id", str(args.problem_id)])
     return command
@@ -290,12 +300,14 @@ def run_dynamic_schedule(
     return sorted(completed, key=lambda item: item.fold)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(baseline_name: str = "lora") -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint-root", default="checkpoints/qwen_lora_qv_r3_seed42")
+    run_name = DEFAULT_RUN_NAME if baseline_name == "lora" else f"qwen_{baseline_name}_seed42"
+    parser.set_defaults(baseline=baseline_name)
+    parser.add_argument("--checkpoint-root", default=f"checkpoints/{run_name}")
     parser.add_argument("--test-root", default="output/qwen-2.5/kfold")
     parser.add_argument("--id-root", default="output/qwen-2.5/kfold")
-    parser.add_argument("--output-root", default="output/qwen_lora_qv_r3_seed42")
+    parser.add_argument("--output-root", default=f"output/{run_name}")
     parser.add_argument("--inference-script", default="scripts/inference.py")
     parser.add_argument("--checkpoint-selection", choices=("best", "latest"), default="best")
     parser.add_argument("--folds", nargs="+", type=int, default=None)
@@ -308,11 +320,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--samples-per-problem", type=int, default=1)
     parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--prefix-length", type=int, default=None)
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
+def main(baseline_name: str = "lora", checkpoint_resolver=None) -> int:
+    args = parse_args(baseline_name)
+    checkpoint_resolver = checkpoint_resolver or resolve_adapter_checkpoint
     if args.temperature != 0.0 or args.top_p != 1.0 or args.samples_per_problem != 1:
         raise ValueError(
             "Held-out evaluation is deterministic-only: require temperature=0, "
@@ -332,7 +346,7 @@ def main() -> int:
 
     specs: list[FoldSpec] = []
     for index, fold in enumerate(folds):
-        checkpoint, selection = resolve_adapter_checkpoint(
+        checkpoint, selection = checkpoint_resolver(
             checkpoint_root / f"fold_{fold}",
             args.checkpoint_selection,
         )
@@ -368,7 +382,7 @@ def main() -> int:
 
     manifest = {
         "created_at": utc_now(),
-        "method": "parameter_matched_lora",
+        "method": baseline_name,
         "model_name": args.model_name,
         "checkpoint_root": str(checkpoint_root),
         "test_root": str(test_root),
@@ -398,7 +412,7 @@ def main() -> int:
                 file=sys.stderr,
             )
         return 1
-    print(f"All {len(results)} LoRA fold inference jobs passed validation.")
+    print(f"All {len(results)} {baseline_name.upper()} fold inference jobs passed validation.")
     print(f"Manifest: {manifest_path}")
     return 0
 

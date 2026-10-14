@@ -8,7 +8,7 @@ from .config import SPTConfig
 class StaticPromptModel(nn.Module):
     """Single static soft prompt baseline — no router, no dual prefix.
 
-    Uses the same frozen LLM and prefix length as DSPR, but replaces the
+    Uses the same frozen LLM as DSPR, but replaces the
     dual-prefix + router mechanism with a single learnable prefix that is
     shared across all inputs regardless of difficulty.
     """
@@ -23,7 +23,7 @@ class StaticPromptModel(nn.Module):
 
         llm_hidden_dim = self.frozen_llm.config.hidden_size
 
-        # Single learnable soft prompt (same size as each of DSPR's dual prefixes)
+        # Single learnable soft prompt with the configured prefix length
         self.soft_prompt = nn.Parameter(
             torch.randn(config.prefix_length, llm_hidden_dim) * 0.02
         )
@@ -37,9 +37,9 @@ class StaticPromptModel(nn.Module):
         tokenizer = AutoTokenizer.from_pretrained(self.config.model_name, trust_remote_code=True)
 
         model_kwargs = {
-            "torch_dtype": torch.float16,
+            "torch_dtype": torch.float16 if self.config.device.startswith("cuda") else torch.float32,
             "trust_remote_code": True,
-            "attn_implementation": "flash_attention_2",
+            "attn_implementation": "flash_attention_2" if self.config.device.startswith("cuda") else "sdpa",
         }
         model = AutoModelForCausalLM.from_pretrained(self.config.model_name, **model_kwargs)
 

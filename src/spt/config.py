@@ -12,7 +12,7 @@ class SPTConfig:
     # Training
     learning_rate: float = 4e-5
     batch_size: int = 4
-    num_epochs: int = 15
+    num_epochs: float = 15
     gradient_accumulation_steps: int = 4
     max_grad_norm: float = 1.0
     warmup_steps: int = 100
