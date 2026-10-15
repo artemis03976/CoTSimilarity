@@ -12,9 +12,13 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from tqdm import tqdm
+from utils.inference_progress import parse_progress
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -134,6 +138,9 @@ class FoldSpec:
     return_code: int | None = None
     elapsed_seconds: float | None = None
     error: str | None = None
+    stage: str = "waiting"
+    completed_generations: int = 0
+    total_generations: int = 0
 
 
 def build_inference_command(
@@ -166,6 +173,7 @@ def build_inference_command(
         str(args.max_new_tokens),
         "--device",
         "cuda",
+        "--emit-progress-events",
     ]
     if args.baseline == "spt":
         prefix_length = spec.checkpoint_selection["prefix_length"]
@@ -211,6 +219,7 @@ def run_fold(
     spec: FoldSpec,
     expected_samples: int,
     lock: threading.Lock,
+    progress_position: int = 0,
 ) -> FoldSpec:
     output_dir = Path(spec.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -221,25 +230,30 @@ def run_fold(
     env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
     with lock:
         spec.status = "running"
+        spec.stage = "starting"
+        spec.total_generations = len(spec.expected_problem_ids) * len(VARIANTS)
         spec.started_at = utc_now()
         write_json(output_dir / "run_status.json", asdict(spec))
 
+    tqdm.write(f"[fold {spec.fold}] starting on GPU {spec.gpu}; "
+               f"{len(spec.expected_problem_ids)} problems / {spec.total_generations} answers")
+    tqdm.write(f"[fold {spec.fold}] checkpoint: {spec.checkpoint}")
+    tqdm.write(f"[fold {spec.fold}] log: {spec.log_path}")
     started = time.monotonic()
-    with Path(spec.log_path).open("w", encoding="utf-8", newline="") as handle:
-        handle.write(f"Command: {json.dumps(spec.command, ensure_ascii=False)}\n")
-        handle.write(f"CUDA_VISIBLE_DEVICES={spec.gpu}\n\n")
-        handle.flush()
-        process = subprocess.Popen(
-            spec.command,
-            cwd=str(REPO_ROOT),
-            env=env,
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-        )
-        return_code = process.wait()
+    error_tail: deque[str] = deque(maxlen=12)
+    progress = tqdm(total=spec.total_generations,
+                    desc=f"fold {spec.fold} | GPU {spec.gpu}", unit="answer",
+                    position=progress_position, dynamic_ncols=True, leave=False)
+    progress.set_postfix(stage="starting")
+    try:
+        return_code = stream_inference(spec, env, progress, lock, error_tail)
+    finally:
+        progress.close()
 
     validation_error = None
     if return_code == 0:
+        spec.stage = "validating_output"
+        tqdm.write(f"[fold {spec.fold}] checking output completeness...")
         try:
             validate_generated_output(spec, expected_samples)
         except Exception as exc:
@@ -252,9 +266,60 @@ def run_fold(
         spec.error = validation_error or (
             None if return_code == 0 else f"Inference exited with code {return_code}"
         )
+        spec.stage = "completed" if spec.status == "succeeded" else "failed"
         write_json(output_dir / "run_status.json", asdict(spec))
-    print(f"[fold {spec.fold}] {spec.status} on GPU {spec.gpu}", flush=True)
+    tqdm.write(f"[fold {spec.fold}] {spec.status} on GPU {spec.gpu}; "
+               f"answers={spec.completed_generations}/{spec.total_generations}; "
+               f"elapsed={spec.elapsed_seconds / 60:.1f} min")
+    if spec.error:
+        tqdm.write(f"[fold {spec.fold}] {spec.error}; log: {spec.log_path}")
+        if return_code != 0:
+            for line in error_tail:
+                tqdm.write(f"[fold {spec.fold}] {line}")
     return spec
+
+
+def stream_inference(spec, env, progress, lock, error_tail) -> int:
+    """Keep full worker output in its log and display structured progress."""
+    with Path(spec.log_path).open("w", encoding="utf-8", newline="") as handle:
+        handle.write(f"Command: {json.dumps(spec.command, ensure_ascii=False)}\n")
+        handle.write(f"CUDA_VISIBLE_DEVICES={spec.gpu}\n\n")
+        handle.flush()
+        process = subprocess.Popen(
+            spec.command,
+            cwd=str(REPO_ROOT),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            handle.write(line)
+            handle.flush()
+            event = parse_progress(line)
+            if event is None:
+                if line.strip():
+                    error_tail.append(line.rstrip())
+                continue
+            stage = event["stage"]
+            if stage != spec.stage:
+                spec.stage = stage
+                tqdm.write(f"[fold {spec.fold}] {stage.replace('_', ' ')}")
+                with lock:
+                    write_json(Path(spec.output_dir) / "run_status.json", asdict(spec))
+            completed = int(event.get("completed", spec.completed_generations))
+            spec.completed_generations = completed
+            progress.update(max(0, completed - progress.n))
+            details = {"stage": stage}
+            if "problem_id" in event:
+                details.update(problem=event["problem_id"], variant=event["variant"])
+            progress.set_postfix(details, refresh=False)
+        process.stdout.close()
+        return process.wait()
 
 
 def run_dynamic_schedule(
@@ -269,20 +334,27 @@ def run_dynamic_schedule(
     completed: list[FoldSpec] = []
     completed_lock = threading.Lock()
 
-    def worker(gpu: str) -> None:
+    def worker(gpu: str, position: int) -> None:
         while True:
             try:
                 spec = pending.get_nowait()
             except queue.Empty:
                 return
+            result = spec
             try:
                 spec.gpu = gpu
-                result = run_fold(spec, expected_samples, state_lock)
+                result = run_fold(spec, expected_samples, state_lock, position)
             except Exception as exc:
                 spec.status = "failed"
                 spec.return_code = -1
                 spec.error = repr(exc)
                 spec.finished_at = utc_now()
+                spec.stage = "failed"
+                try:
+                    write_json(Path(spec.output_dir) / "run_status.json", asdict(spec))
+                except OSError:
+                    pass
+                tqdm.write(f"[fold {spec.fold}] failed: {exc}; log: {spec.log_path}")
                 result = spec
             finally:
                 with completed_lock:
@@ -290,8 +362,8 @@ def run_dynamic_schedule(
                 pending.task_done()
 
     threads = [
-        threading.Thread(target=worker, args=(gpu,), name=f"lora-eval-gpu-{gpu}")
-        for gpu in gpu_ids[: min(len(gpu_ids), len(specs))]
+        threading.Thread(target=worker, args=(gpu, position), name=f"baseline-eval-gpu-{gpu}")
+        for position, gpu in enumerate(gpu_ids[: min(len(gpu_ids), len(specs))])
     ]
     for thread in threads:
         thread.start()
@@ -335,17 +407,22 @@ def main(baseline_name: str = "lora", checkpoint_resolver=None) -> int:
     folds = parse_fold_list(args.folds)
     if args.problem_id is not None and len(folds) != 1:
         raise ValueError("--problem-id requires exactly one selected fold")
+    print(f"{baseline_name.upper()} held-out evaluation: model={args.model_name}; folds={folds}", flush=True)
+    print("Resolving GPUs and checkpoints...", flush=True)
     gpu_ids = parse_gpu_list(args.gpus)
     checkpoint_root = resolve_path(REPO_ROOT, args.checkpoint_root).resolve()
     test_root = resolve_path(REPO_ROOT, args.test_root).resolve()
     id_root = resolve_path(REPO_ROOT, args.id_root).resolve()
     output_root = resolve_path(REPO_ROOT, args.output_root).resolve()
+    print(f"GPUs: {gpu_ids}; checkpoint selection: {args.checkpoint_selection}", flush=True)
+    print(f"Output root: {output_root}", flush=True)
     inference_script = resolve_path(REPO_ROOT, args.inference_script).resolve()
     if not inference_script.is_file():
         raise FileNotFoundError(f"Inference entrypoint not found: {inference_script}")
 
     specs: list[FoldSpec] = []
     for index, fold in enumerate(folds):
+        print(f"[fold {fold}] checking checkpoint and test IDs...", flush=True)
         checkpoint, selection = checkpoint_resolver(
             checkpoint_root / f"fold_{fold}",
             args.checkpoint_selection,
@@ -379,6 +456,8 @@ def main(baseline_name: str = "lora", checkpoint_resolver=None) -> int:
         )
         spec.command = build_inference_command(inference_script, spec, args)
         specs.append(spec)
+        print(f"[fold {fold}] ready: {len(expected_ids)} problems; "
+              f"checkpoint={checkpoint}; selection={selection['method']}", flush=True)
 
     manifest = {
         "created_at": utc_now(),
@@ -400,6 +479,8 @@ def main(baseline_name: str = "lora", checkpoint_resolver=None) -> int:
 
     manifest_path = output_root / "inference_manifest.json"
     write_json(manifest_path, manifest)
+    print(f"Starting {len(specs)} folds on {min(len(gpu_ids), len(specs))} GPUs. "
+          f"Manifest: {manifest_path}", flush=True)
     results = run_dynamic_schedule(specs, gpu_ids, args.samples_per_problem)
     manifest["finished_at"] = utc_now()
     manifest["folds"] = [asdict(spec) for spec in results]
@@ -411,6 +492,7 @@ def main(baseline_name: str = "lora", checkpoint_resolver=None) -> int:
                 "Failed folds: " + ", ".join(str(spec.fold) for spec in failed),
                 file=sys.stderr,
             )
+        print(f"See inference.log and run_status.json under {output_root}", flush=True)
         return 1
     print(f"All {len(results)} {baseline_name.upper()} fold inference jobs passed validation.")
     print(f"Manifest: {manifest_path}")

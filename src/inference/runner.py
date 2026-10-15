@@ -9,6 +9,7 @@ from time import perf_counter
 from typing import Any
 
 from tqdm import tqdm
+from utils.inference_progress import emit_progress
 
 from .common import (
     VARIANTS,
@@ -30,6 +31,7 @@ def run_greedy_evaluation(
     save_token_ids: bool = False,
     run_metadata: dict[str, Any] | None = None,
     batch_size: int = 128,
+    emit_progress_events: bool = False,
 ) -> tuple[Path, Path]:
     """Run exactly one deterministic continuation for every selected triplet variant."""
 
@@ -97,7 +99,10 @@ def run_greedy_evaluation(
 
     with output_path.open("w", encoding="utf-8", newline="\n") as handle:
         write_qc("running", 0)
-        progress = tqdm(records, desc=f"Greedy inference ({generator.baseline})")
+        progress = tqdm(records, desc=f"Greedy inference ({generator.baseline})",
+                        disable=emit_progress_events)
+        if emit_progress_events:
+            emit_progress("generating", completed=0, total=len(records) * len(VARIANTS))
         for record_index, record in enumerate(progress):
             if batched and record_index % effective_batch_size == 0:
                 batch = records[record_index : record_index + effective_batch_size]
@@ -173,6 +178,10 @@ def run_greedy_evaluation(
                     result["alpha"] = float(generated.metadata["alpha"])
                 results[variant] = result
                 all_correct = all_correct and correct
+                if emit_progress_events:
+                    emit_progress("generating", completed=total_generations,
+                                  total=len(records) * len(VARIANTS),
+                                  problem_id=problem_id, variant=variant)
 
             fully_correct += int(all_correct)
             progress.set_postfix(
@@ -191,6 +200,9 @@ def run_greedy_evaluation(
                 write_qc("running", record_index + 1)
 
     write_qc("completed", len(records))
+    if emit_progress_events:
+        emit_progress("completed", completed=total_generations,
+                      total=len(records) * len(VARIANTS))
     print(
         f"Generated {generated_tokens} tokens in {generation_seconds:.1f}s "
         f"({generated_tokens / generation_seconds if generation_seconds else 0.0:.1f} tokens/s); "

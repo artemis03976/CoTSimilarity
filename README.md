@@ -576,6 +576,10 @@ One GPU runs folds sequentially; `GPUS=0,1,2,3,4` enables parallel folds.
 The terminal displays an optimizer-step progress bar for each active fold,
 including its method, GPU, epoch, and estimated remaining time. Detailed logs
 are saved in `checkpoints/<run_name>/fold_N/train.log`.
+Held-out SPT/LoRA evaluation prints checkpoint selection and reference/model-loading
+stages, then shows a progress bar for each active fold with completed answers,
+problem ID, variant, and estimated remaining time. Inference failures print the
+last log lines; complete logs remain in `output/<run_name>/fold_N/inference.log`.
 For an initial fold-0 run, use `FOLDS=0`. Set `STAGE=train` or `STAGE=eval` to
 run only that stage; `DRY_RUN=1` validates the training commands. `RUN_NAME`,
 `CHECKPOINT_ROOT`, and `OUTPUT_ROOT` can select separate experiment directories.

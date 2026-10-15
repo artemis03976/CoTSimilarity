@@ -21,6 +21,7 @@ from inference.common import VARIANTS, read_math_records, run_evaluator_self_tes
 from inference.greedy import BACKENDS, BASELINES, GreedyModelConfig, load_greedy_generator
 from inference.quality import CoTValidationConfig
 from inference.runner import run_greedy_evaluation
+from utils.inference_progress import emit_progress
 
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-Math-7B-Instruct"
@@ -54,6 +55,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--system-prompt", default=None)
     parser.add_argument("--save-token-ids", action="store_true")
+    parser.add_argument("--emit-progress-events", "--emit_progress_events", action="store_true",
+                        help="Send inference progress to the K-fold parent process")
 
     vllm_group = parser.add_argument_group("Single-GPU vLLM base inference")
     vllm_group.add_argument(
@@ -148,6 +151,9 @@ def set_seed(seed: int) -> None:
 def main() -> int:
     args = parse_args()
     validate_args(args)
+    print(f"[{args.baseline}] Checking evaluator and references: {args.data_path}", flush=True)
+    if args.emit_progress_events:
+        emit_progress("checking_references")
     set_seed(args.seed)
     run_evaluator_self_test()
     records = read_math_records(
@@ -157,6 +163,8 @@ def main() -> int:
     )
     if not records:
         raise ValueError("No evaluation records selected")
+    print(f"[{args.baseline}] References ready: {len(records)} problems, "
+          f"{len(records) * len(VARIANTS)} answers", flush=True)
     checkpoint = Path(args.checkpoint).resolve() if args.checkpoint is not None else None
     model_config = GreedyModelConfig(
         baseline=args.baseline,
@@ -188,7 +196,9 @@ def main() -> int:
         max_ngram_repeats=args.max_ngram_repeats,
         min_repeat_span_tokens=args.min_repeat_span_tokens,
     )
-    print(f"Loading {args.baseline} model with {args.backend}...")
+    print(f"Loading {args.baseline} model with {args.backend}...", flush=True)
+    if args.emit_progress_events:
+        emit_progress("loading_model")
     generator = load_greedy_generator(
         model_config,
         problems=[record[variant]["problem"] for record in records for variant in VARIANTS]
@@ -222,13 +232,14 @@ def main() -> int:
             save_token_ids=args.save_token_ids,
             run_metadata=run_metadata,
             batch_size=args.batch_size,
+            emit_progress_events=args.emit_progress_events,
         )
     finally:
         close = getattr(generator, "close", None)
         if callable(close):
             close()
-    print(f"Predictions: {output_path}")
-    print(f"Generation QC: {qc_path}")
+    print(f"Predictions: {output_path}", flush=True)
+    print(f"Generation QC: {qc_path}", flush=True)
     return 0
 
 

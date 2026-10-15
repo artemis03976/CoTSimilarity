@@ -260,6 +260,8 @@ def main(baseline_name: str = "lora") -> int:
     raw_path = resolve_path(args.raw_data)
     expected_samples = args.expected_samples or None
     folds = common.parse_fold_list(args.folds)
+    print(f"{baseline_name.upper()} aggregation: folds={folds}; results={result_root}", flush=True)
+    print("Checking held-out IDs and reference dataset...", flush=True)
     fold_ids, eligible = common.load_fold_expectations(id_root, folds)
     raw_records = common.load_id_map(common.read_jsonl(raw_path), raw_path)
     all_ids = set().union(*fold_ids.values())
@@ -283,6 +285,7 @@ def main(baseline_name: str = "lora") -> int:
     fold_counts: dict[str, int] = {}
     for fold in folds:
         path = result_root / f"fold_{fold}" / "all_records.jsonl"
+        print(f"[fold {fold}] validating predictions: {path}", flush=True)
         if not path.is_file():
             raise FileNotFoundError(f"Missing Fold {fold} {baseline_name.upper()} result: {path}")
         fold_records = common.load_id_map(common.read_jsonl(path), path)
@@ -299,6 +302,7 @@ def main(baseline_name: str = "lora") -> int:
         for problem_id, record in fold_records.items():
             merged[problem_id] = {**record, "outer_fold": fold}
         fold_counts[str(fold)] = len(fold_records)
+        print(f"[fold {fold}] passed: {len(fold_records)} problems", flush=True)
     common.validate_records(
         merged,
         all_ids,
@@ -307,6 +311,7 @@ def main(baseline_name: str = "lora") -> int:
         require_alpha=False,
     )
 
+    print(f"OOF coverage complete: {len(merged)} unique problems. Computing metrics...", flush=True)
     metrics = build_metrics(merged, all_ids, eligible, baseline_name)
     comparator_paths = {
         name: resolve_path(value)
@@ -315,6 +320,8 @@ def main(baseline_name: str = "lora") -> int:
     }
     comparisons: dict[str, dict[str, Any]] = {}
     for name, path in comparator_paths.items():
+        print(f"Comparing {baseline_name.upper()} against {name}: "
+              f"{args.bootstrap_samples} paired bootstrap draws per comparison...", flush=True)
         comparator = common.load_id_map(common.read_jsonl(path), path)
         if not all_ids <= set(comparator):
             raise ValueError(f"{path}: comparator is missing selected held-out IDs")
@@ -337,6 +344,7 @@ def main(baseline_name: str = "lora") -> int:
             name,
             baseline_name,
         )
+        print(f"Comparison against {name} complete.", flush=True)
 
     merged_path = result_root / "oof_all_records.jsonl"
     metrics_path = result_root / "oof_metrics.json"
