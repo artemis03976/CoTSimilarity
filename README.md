@@ -573,6 +573,9 @@ GPUS=0 bash scripts/run_baseline_pipeline.sh lora
 ```
 
 One GPU runs folds sequentially; `GPUS=0,1,2,3,4` enables parallel folds.
+The terminal displays an optimizer-step progress bar for each active fold,
+including its method, GPU, epoch, and estimated remaining time. Detailed logs
+are saved in `checkpoints/<run_name>/fold_N/train.log`.
 For an initial fold-0 run, use `FOLDS=0`. Set `STAGE=train` or `STAGE=eval` to
 run only that stage; `DRY_RUN=1` validates the training commands. `RUN_NAME`,
 `CHECKPOINT_ROOT`, and `OUTPUT_ROOT` can select separate experiment directories.

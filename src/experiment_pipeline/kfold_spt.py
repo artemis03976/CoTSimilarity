@@ -19,7 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def build_train_command(train_script: Path, spec: FoldSpec, args: argparse.Namespace) -> list[str]:
     command = [sys.executable, str(train_script), "spt",
                "--train_data_path", spec.train_data, "--val_data_path", spec.val_data,
-               "--output_path", spec.output_path, "--device", "cuda"]
+               "--output_path", spec.output_path, "--device", "cuda",
+               "--emit_progress_events"]
     for name in ("model_name", "prefix_length", "learning_rate", "weight_decay", "batch_size",
                  "num_epochs", "gradient_accumulation_steps", "max_grad_norm", "max_seq_length",
                  "seed", "logging_steps", "save_total_limit", "trajectory_sampling",

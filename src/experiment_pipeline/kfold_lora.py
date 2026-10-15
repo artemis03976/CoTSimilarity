@@ -90,6 +90,7 @@ def build_train_command(
         str(args.dspr_parameter_budget),
         "--budget_tolerance",
         str(args.budget_tolerance),
+        "--emit_progress_events",
     ]
     command.append(
         "--gradient_checkpointing" if args.gradient_checkpointing else "--no-gradient_checkpointing"

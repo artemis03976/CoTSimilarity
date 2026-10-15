@@ -36,6 +36,10 @@ def parse_args() -> argparse.Namespace:
                         default=config.gradient_checkpointing)
     parser.add_argument("--output_path", default="checkpoints_baseline")
     parser.add_argument("--logging_steps", type=int, default=10)
+    parser.add_argument(
+        "--emit_progress_events", "--emit-progress-events", action="store_true",
+        help="Send optimizer-step progress to the K-fold parent process",
+    )
     parser.add_argument("--save_total_limit", type=int, default=3)
     parser.add_argument("--trajectory_sampling", choices=("flat", "random_one"), default="flat")
     parser.add_argument("--early_stopping_patience", type=int, default=3)
@@ -118,7 +122,7 @@ def main() -> int:
         remove_unused_columns=False,
         dataloader_pin_memory=config.device.startswith("cuda"),
         report_to="none",
-        disable_tqdm=True,
+        disable_tqdm=args.emit_progress_events,
         fp16=(config.device.startswith("cuda") and torch.cuda.is_available()),
         gradient_checkpointing=False,
         label_names=["labels"],
@@ -131,8 +135,10 @@ def main() -> int:
     if config.device == "cpu":
         kwargs["use_cpu" if "use_cpu" in parameters else "no_cuda"] = True
     training_args = TrainingArguments(**kwargs)
-    callbacks = [TrainingHistoryCallback(write_train_log=False, resampled_dataset=resampled),
-                 ProgressEventCallback(stage="spt")]
+    callbacks = [TrainingHistoryCallback(write_train_log=not args.emit_progress_events,
+                                          resampled_dataset=resampled)]
+    if args.emit_progress_events:
+        callbacks.append(ProgressEventCallback(stage="spt"))
     if args.early_stopping_patience > 0:
         callbacks.append(EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience,
                                               early_stopping_threshold=args.early_stopping_threshold))

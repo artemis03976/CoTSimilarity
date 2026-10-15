@@ -71,6 +71,10 @@ def parse_args() -> argparse.Namespace:
         default=True,
     )
     parser.add_argument("--logging_steps", type=int, default=10)
+    parser.add_argument(
+        "--emit_progress_events", "--emit-progress-events", action="store_true",
+        help="Send optimizer-step progress to the K-fold parent process",
+    )
     parser.add_argument("--save_total_limit", type=int, default=3)
     parser.add_argument("--early_stopping_patience", type=int, default=3)
     parser.add_argument("--early_stopping_threshold", type=float, default=0.0)
@@ -230,6 +234,7 @@ def main() -> int:
         remove_unused_columns=False,
         dataloader_pin_memory=True,
         report_to="none",
+        disable_tqdm=args.emit_progress_events,
         fp16=(args.device.startswith("cuda") and args.dtype == "float16" and torch.cuda.is_available()),
         bf16=(args.device.startswith("cuda") and args.dtype == "bfloat16" and torch.cuda.is_available()),
         gradient_checkpointing=False,
@@ -243,6 +248,10 @@ def main() -> int:
         training_kwargs["use_cpu" if "use_cpu" in supported_args else "no_cuda"] = True
     training_args = TrainingArguments(**training_kwargs)
     callbacks = []
+    if args.emit_progress_events:
+        from experiment_pipeline.train_dspr import ProgressEventCallback
+
+        callbacks.append(ProgressEventCallback(stage="lora"))
     if eval_strategy != "no" and args.early_stopping_patience > 0:
         callbacks.append(EarlyStoppingCallback(
             early_stopping_patience=args.early_stopping_patience,
