@@ -1,29 +1,8 @@
 #!/usr/bin/env python3
-"""Train staged DSPR on the prepared Qwen K-fold splits.
+"""Shared GPU scheduling, progress reporting, and K-fold training for DSPR, SPT, and LoRA.
 
-This is an orchestration layer around ``scripts/train.py staged_dspr``. Each fold
-trains a prompt-only router, then freezes it while training the dual prefix.
-Router prompts come from canonical_math_paired.jsonl and prefix trajectories from the fold.
-It keeps the actual training pipeline in one place and runs one process per GPU.
-When fewer GPUs than folds are available, each GPU takes the next fold as soon
-as its previous fold finishes (a small dynamic work queue).
-
-Examples
---------
-Dry-run the five-fold schedule without importing the model::
-
-    python scripts/train_kfold.py dspr --dry-run
-
-Run all folds on five GPUs::
-
-    python scripts/train_kfold.py dspr --gpus 0,1,2,3,4
-
-Run on two GPUs; folds are assigned dynamically::
-
-    python scripts/train_kfold.py dspr --gpus 0,1
-
-The GPU identifiers are physical IDs.  Each child process receives one ID in
-``CUDA_VISIBLE_DEVICES`` and therefore sees that GPU as ``cuda:0`` internally.
+Each GPU worker claims the next fold when free. Child training remains in
+scripts/train.py, with method-specific options assembled by this module.
 """
 
 from __future__ import annotations
@@ -42,11 +21,19 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from tqdm import tqdm
+from utils.training_progress import parse_progress_event
 
+from .train_lora import DEFAULT_DSPR_BUDGET, DEFAULT_RANK, DEFAULT_LORA_ALPHA, DEFAULT_RUN_NAME
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OUTPUT_ROOTS = {
+    "dspr": "checkpoints/qwen_staged_kfold_seed42",
+    "spt": "checkpoints/qwen_spt_seed42",
+    "lora": f"checkpoints/{DEFAULT_RUN_NAME}",
+}
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-Math-7B-Instruct"
 DEFAULT_FOLDS = tuple(range(5))
-PROGRESS_EVENT_PREFIX = "__DSPR_TRAIN_PROGRESS__"
 
 
 def utc_now() -> str:
@@ -128,19 +115,6 @@ def resolve_path(repo_root: Path, value: str) -> Path:
     return path if path.is_absolute() else repo_root / path
 
 
-def parse_progress_event(line: str) -> dict[str, Any] | None:
-    stripped = line.strip()
-    if not stripped.startswith(PROGRESS_EVENT_PREFIX):
-        return None
-    try:
-        payload = json.loads(stripped[len(PROGRESS_EVENT_PREFIX) :])
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return payload
-
-
 @dataclass
 class FoldSpec:
     fold: int
@@ -164,94 +138,6 @@ class FoldSpec:
     stage_results: dict[str, Any] = field(default_factory=dict)
 
 
-def build_train_command(
-    train_script: Path,
-    spec: FoldSpec,
-    args: argparse.Namespace,
-) -> list[str]:
-    """Build one structured subprocess argument list; no shell quoting needed."""
-    command = [
-        sys.executable,
-        str(train_script),
-        "staged_dspr",
-        "--run-stage",
-        "all",
-        "--joint-epochs",
-        "0",
-        "--problem-dataset",
-        args.problem_dataset,
-        "--kfold-root",
-        args.fold_root,
-        "--fold",
-        str(spec.fold),
-        "--model_name",
-        args.model_name,
-        "--context_layer_idx",
-        str(args.context_layer_idx),
-        "--prefix_length",
-        str(args.prefix_length),
-        "--router_intermediate_dim",
-        str(args.router_intermediate_dim),
-        "--router_dropout",
-        str(args.router_dropout),
-        "--router_learning_rate",
-        str(args.router_learning_rate),
-        "--prefix_learning_rate",
-        str(args.prefix_learning_rate),
-        "--router_weight_decay",
-        str(args.router_weight_decay),
-        "--prefix_weight_decay",
-        str(args.prefix_weight_decay),
-        "--router_target_smoothing",
-        str(args.router_target_smoothing),
-        "--batch_size",
-        str(args.batch_size),
-        "--router_epochs",
-        str(args.router_epochs),
-        "--prefix_epochs",
-        str(args.prefix_epochs),
-        "--gradient_accumulation_steps",
-        str(args.gradient_accumulation_steps),
-        "--max_grad_norm",
-        str(args.max_grad_norm),
-        "--prefix_train_data_path",
-        spec.train_data,
-        "--prefix_val_data_path",
-        spec.val_data,
-        "--max_seq_length",
-        str(args.max_seq_length),
-        "--seed",
-        str(args.seed),
-        "--device",
-        "cuda",
-        "--output_path",
-        spec.output_path,
-        "--logging_steps",
-        str(args.logging_steps),
-        "--save_total_limit",
-        str(args.save_total_limit),
-        "--emit_progress_events",
-        "--prefix_trajectory_sampling",
-        args.prefix_trajectory_sampling,
-        "--router_early_stopping_patience",
-        str(args.router_early_stopping_patience),
-        "--prefix_early_stopping_patience",
-        str(args.prefix_early_stopping_patience),
-        "--early_stopping_threshold",
-        str(args.early_stopping_threshold),
-    ]
-    command.append(
-        "--gradient_checkpointing" if args.gradient_checkpointing else "--no-gradient_checkpointing"
-    )
-    if args.router_positive_weight is not None:
-        command.extend(["--router_positive_weight", str(args.router_positive_weight)])
-    if args.warmup_ratio is None:
-        command.extend(["--warmup_steps", str(args.warmup_steps)])
-    else:
-        command.extend(["--warmup_ratio", str(args.warmup_ratio)])
-    return command
-
-
 def validate_inputs(
     train_script: Path,
     fold_root: Path,
@@ -260,7 +146,7 @@ def validate_inputs(
     allow_existing: bool,
 ) -> None:
     if not train_script.is_file():
-        raise FileNotFoundError(f"DSPR training entrypoint not found: {train_script}")
+        raise FileNotFoundError(f"Training entrypoint not found: {train_script}")
     if not fold_root.is_dir():
         raise FileNotFoundError(f"Qwen K-fold directory not found: {fold_root}")
 
@@ -280,95 +166,6 @@ def validate_inputs(
                 f"Output directory is not empty: {fold_output}. "
                 "Choose a new --output-root or pass --allow-existing explicitly."
             )
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fold-root", default="output/qwen-2.5/kfold", help="Prepared Qwen K-fold data directory")
-    parser.add_argument(
-        "--output-root",
-        default="checkpoints/qwen_staged_kfold_seed42",
-        help="Root directory; each fold is written to <output-root>/fold_N",
-    )
-    parser.add_argument("--train-script", default="scripts/train.py")
-    parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
-    parser.add_argument(
-        "--problem-dataset", "--problem_dataset", default="data/canonical_math_paired.jsonl",
-        help="Canonical source of router prompts; fold manifests select problem IDs",
-    )
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--folds", nargs="+", type=int, default=None, help="Subset of folds, e.g. --folds 0 1")
-    parser.add_argument(
-        "--gpus",
-        default=None,
-        help="Comma-separated physical GPU IDs, e.g. 0,1,2. Default: auto-detect; use --gpus 0 for one GPU.",
-    )
-    parser.add_argument("--allow-existing", action="store_true", help="Allow non-empty fold output directories")
-    parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print the schedule only")
-
-    # These defaults match the staged DSPR settings. They are forwarded
-    # explicitly so a later change to DSPRConfig cannot silently alter a fold.
-    parser.add_argument("--context-layer-idx", type=int, default=15)
-    parser.add_argument("--prefix-length", type=int, default=15)
-    parser.add_argument("--router-intermediate-dim", type=int, default=64)
-    parser.add_argument("--router-dropout", type=float, default=0.10)
-    parser.add_argument(
-        "--prefix-learning-rate", "--learning-rate",
-        type=float,
-        default=4e-5,
-        help="Dual-prefix learning rate for the frozen-router stage.",
-    )
-    parser.add_argument(
-        "--router-learning-rate",
-        type=float,
-        default=1e-5,
-        help="Router learning rate for the prompt-only stage.",
-    )
-    parser.add_argument("--router-weight-decay", type=float, default=1e-3)
-    parser.add_argument("--prefix-weight-decay", type=float, default=0.0)
-    parser.add_argument("--router-target-smoothing", type=float, default=0.05)
-    parser.add_argument("--router-positive-weight", type=float, default=None)
-    parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--router-epochs", type=int, default=20)
-    parser.add_argument("--prefix-epochs", "--num-epochs", type=int, default=15)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
-    parser.add_argument("--max-grad-norm", type=float, default=1.0)
-    warmup = parser.add_mutually_exclusive_group()
-    warmup.add_argument("--warmup-steps", type=int, default=None)
-    warmup.add_argument(
-        "--warmup-ratio",
-        type=float,
-        default=None,
-        help="Warmup fraction in [0, 1); default: 0.05 unless --warmup-steps is set.",
-    )
-    parser.add_argument("--max-seq-length", type=int, default=2048)
-    parser.add_argument("--logging-steps", type=int, default=10)
-    parser.add_argument("--save-total-limit", type=int, default=3)
-    parser.add_argument(
-        "--prefix-trajectory-sampling", "--trajectory-sampling",
-        choices=("flat", "random_one"),
-        default="flat",
-        help="Use all trajectories or resample one trajectory per problem each sampling epoch.",
-    )
-    parser.add_argument(
-        "--early-stopping-patience",
-        type=int,
-        default=None,
-        help="Set early stopping patience for both stages; 0 disables it.",
-    )
-    parser.add_argument("--router-early-stopping-patience", type=int, default=3)
-    parser.add_argument("--prefix-early-stopping-patience", type=int, default=3)
-    parser.add_argument("--early-stopping-threshold", type=float, default=0.0)
-    parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True)
-    args = parser.parse_args()
-    if args.warmup_steps is None:
-        args.warmup_steps = 100
-        if args.warmup_ratio is None:
-            args.warmup_ratio = 0.05
-    if args.early_stopping_patience is not None:
-        args.router_early_stopping_patience = args.early_stopping_patience
-        args.prefix_early_stopping_patience = args.early_stopping_patience
-    return args
-
 
 def run_fold(
     spec: FoldSpec,
@@ -537,7 +334,7 @@ def run_dynamic_schedule(specs: list[FoldSpec], repo_root: Path, gpu_ids: list[s
 
     worker_count = min(len(gpu_ids), len(specs))
     threads = [
-        threading.Thread(target=worker, args=(gpu, position), name=f"dSPR-gpu-{gpu}")
+        threading.Thread(target=worker, args=(gpu, position), name=f"kfold-gpu-{gpu}")
         for position, gpu in enumerate(gpu_ids[:worker_count])
     ]
     for thread in threads:
@@ -547,8 +344,151 @@ def run_dynamic_schedule(specs: list[FoldSpec], repo_root: Path, gpu_ids: list[s
     return sorted(completed, key=lambda item: item.fold)
 
 
-def main() -> int:
-    args = parse_args()
+# Preserve each training entrypoint's option spellings and argument order.
+COMMAND_ARGUMENTS = {
+    "dspr": """
+        run-stage problem-dataset kfold-root fold model_name
+        context_layer_idx prefix_length router_intermediate_dim router_dropout
+        router_learning_rate prefix_learning_rate router_weight_decay prefix_weight_decay
+        router_target_smoothing batch_size router_epochs prefix_epochs
+        gradient_accumulation_steps max_grad_norm prefix_train_data_path prefix_val_data_path
+        max_seq_length seed device output_path logging_steps save_total_limit emit_progress_events
+        prefix_trajectory_sampling router_early_stopping_patience prefix_early_stopping_patience
+        early_stopping_threshold
+    """.split(),
+    "spt": """
+        train_data_path val_data_path output_path device emit_progress_events
+        model_name prefix_length learning_rate weight_decay batch_size num_epochs
+        gradient_accumulation_steps max_grad_norm max_seq_length seed logging_steps
+        save_total_limit trajectory_sampling early_stopping_patience early_stopping_threshold
+    """.split(),
+    "lora": """
+        model_name train_data_path val_data_path output_path rank lora_alpha target_modules
+        lora_dropout learning_rate weight_decay batch_size num_epochs gradient_accumulation_steps
+        max_grad_norm warmup_steps warmup_ratio max_seq_length seed device logging_steps
+        save_total_limit early_stopping_patience early_stopping_threshold dtype
+        attention_implementation dspr_parameter_budget budget_tolerance emit_progress_events
+    """.split(),
+}
+
+
+def build_train_command(
+    train_script: Path, spec: FoldSpec, args: argparse.Namespace, method: str = "dspr",
+) -> list[str]:
+    """Serialize method options into one subprocess command without shell quoting."""
+    command = [sys.executable, str(train_script), method]
+    values = {
+        **vars(args),
+        "run_stage": "all", "kfold_root": args.fold_root,
+        "fold": spec.fold, "train_data_path": spec.train_data, "val_data_path": spec.val_data,
+        "prefix_train_data_path": spec.train_data, "prefix_val_data_path": spec.val_data,
+        "output_path": spec.output_path, "device": "cuda", "emit_progress_events": True,
+    }
+    for option in COMMAND_ARGUMENTS[method]:
+        command.append(f"--{option}")
+        if option == "emit_progress_events":
+            continue
+        value = values[option.replace("-", "_")]
+        if isinstance(value, list):
+            command.extend(str(item) for item in value)
+        else:
+            command.append(str(value))
+
+    if method == "spt":
+        name = "warmup_steps" if args.warmup_steps is not None else "warmup_ratio"
+        command.extend([f"--{name}", str(getattr(args, name))])
+    command.append("--gradient_checkpointing" if args.gradient_checkpointing else "--no-gradient_checkpointing")
+    if method == "dspr":
+        if args.router_positive_weight is not None:
+            command.extend(["--router_positive_weight", str(args.router_positive_weight)])
+        name = "warmup_steps" if args.warmup_ratio is None else "warmup_ratio"
+        command.extend([f"--{name}", str(getattr(args, name))])
+    elif method == "lora":
+        command.append("--enforce_parameter_budget" if args.enforce_parameter_budget else "--no-enforce_parameter_budget")
+    return command
+
+
+def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.Namespace:
+    if method not in DEFAULT_OUTPUT_ROOTS:
+        raise ValueError(f"Unsupported K-fold method: {method}")
+    parser = argparse.ArgumentParser(description=f"Train {method.upper()} on the prepared Qwen folds")
+    parser.add_argument("--fold-root", default="output/qwen-2.5/kfold")
+    parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOTS[method])
+    parser.add_argument("--train-script", default="scripts/train.py")
+    parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--folds", nargs="+", type=int, default=None)
+    parser.add_argument("--gpus", default=None, help="Physical GPU IDs, e.g. 0,1; default: auto-detect")
+    parser.add_argument("--allow-existing", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument("--max-seq-length", type=int, default=2048)
+    parser.add_argument("--logging-steps", type=int, default=10)
+    parser.add_argument("--save-total-limit", type=int, default=3)
+    parser.add_argument("--early-stopping-threshold", type=float, default=0.0)
+    parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True)
+
+    # LoRA's child accepts both values and lets explicit steps take precedence.
+    # DSPR/SPT retain their mutually exclusive step/ratio CLI.
+    warmup = parser if method == "lora" else parser.add_mutually_exclusive_group()
+    warmup.add_argument("--warmup-steps", type=int, default=0 if method == "lora" else None)
+    warmup.add_argument("--warmup-ratio", type=float, default=0.05 if method == "lora" else None)
+    if method == "dspr":
+        parser.add_argument("--problem-dataset", "--problem_dataset", default="data/canonical_math_paired.jsonl")
+        parser.add_argument("--context-layer-idx", type=int, default=15)
+        parser.add_argument("--prefix-length", type=int, default=15)
+        parser.add_argument("--router-intermediate-dim", type=int, default=64)
+        parser.add_argument("--router-dropout", type=float, default=0.10)
+        parser.add_argument("--prefix-learning-rate", "--learning-rate", type=float, default=4e-5)
+        parser.add_argument("--router-learning-rate", type=float, default=1e-5)
+        parser.add_argument("--router-weight-decay", type=float, default=1e-3)
+        parser.add_argument("--prefix-weight-decay", type=float, default=0.0)
+        parser.add_argument("--router-target-smoothing", type=float, default=0.05)
+        parser.add_argument("--router-positive-weight", type=float, default=None)
+        parser.add_argument("--router-epochs", type=int, default=20)
+        parser.add_argument("--prefix-epochs", "--num-epochs", type=int, default=15)
+        parser.add_argument("--prefix-trajectory-sampling", "--trajectory-sampling", choices=("flat", "random_one"), default="flat")
+        parser.add_argument("--early-stopping-patience", type=int, default=None)
+        parser.add_argument("--router-early-stopping-patience", type=int, default=3)
+        parser.add_argument("--prefix-early-stopping-patience", type=int, default=3)
+    else:
+        parser.add_argument("--learning-rate", type=float, default=4e-5)
+        parser.add_argument("--weight-decay", type=float, default=0.0)
+        parser.add_argument("--num-epochs", type=float, default=15)
+        parser.add_argument("--early-stopping-patience", type=int, default=3)
+        if method == "spt":
+            parser.add_argument("--prefix-length", type=int, default=50)
+            parser.add_argument("--trajectory-sampling", choices=("flat", "random_one"), default="flat")
+        else:
+            parser.add_argument("--rank", type=int, default=DEFAULT_RANK)
+            parser.add_argument("--lora-alpha", type=int, default=DEFAULT_LORA_ALPHA)
+            parser.add_argument("--target-modules", nargs="+", default=["q_proj", "v_proj"])
+            parser.add_argument("--lora-dropout", type=float, default=0.05)
+            parser.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="float16")
+            parser.add_argument("--attention-implementation", default="flash_attention_2")
+            parser.add_argument("--dspr-parameter-budget", type=int, default=DEFAULT_DSPR_BUDGET)
+            parser.add_argument("--budget-tolerance", type=float, default=0.10)
+            parser.add_argument("--enforce-parameter-budget", action=argparse.BooleanOptionalAction, default=True)
+    args = parser.parse_args(argv)
+    if method == "dspr":
+        if args.warmup_steps is None:
+            args.warmup_steps = 100
+            if args.warmup_ratio is None:
+                args.warmup_ratio = 0.05
+        if args.early_stopping_patience is not None:
+            args.router_early_stopping_patience = args.early_stopping_patience
+            args.prefix_early_stopping_patience = args.early_stopping_patience
+    elif method == "spt" and args.warmup_steps is None and args.warmup_ratio is None:
+        args.warmup_ratio = 0.05
+    return args
+
+
+def validate_training_args(args: argparse.Namespace, method: str) -> None:
+    """Retain staged-DSPR validation; baseline trainers validate their own options."""
+    if method != "dspr":
+        return
     if args.warmup_steps < 0:
         raise ValueError("--warmup-steps must be non-negative")
     if args.prefix_learning_rate is not None and args.prefix_learning_rate <= 0.0:
@@ -569,91 +509,79 @@ def main() -> int:
         raise ValueError("--router-positive-weight must be positive")
     if args.early_stopping_threshold < 0.0:
         raise ValueError("--early-stopping-threshold must be non-negative")
-    repo_root = Path(__file__).resolve().parents[2]
+
+
+def main(method: str = "dspr", argv: list[str] | None = None) -> int:
+    args = parse_args(method, argv)
+    validate_training_args(args, method)
     folds = parse_fold_list(args.folds)
     gpu_ids = parse_gpu_list(args.gpus)
-    fold_root = resolve_path(repo_root, args.fold_root).resolve()
-    output_root = resolve_path(repo_root, args.output_root).resolve()
-    train_script = resolve_path(repo_root, args.train_script).resolve()
-    args.fold_root = str(fold_root)
-    args.problem_dataset = str(resolve_path(repo_root, args.problem_dataset).resolve())
-    if not Path(args.problem_dataset).is_file():
-        raise FileNotFoundError(f"Canonical router source not found: {args.problem_dataset}")
+    fold_root = resolve_path(REPO_ROOT, args.fold_root).resolve()
+    output_root = resolve_path(REPO_ROOT, args.output_root).resolve()
+    train_script = resolve_path(REPO_ROOT, args.train_script).resolve()
+    if method == "dspr":
+        args.fold_root = str(fold_root)
+        args.problem_dataset = str(resolve_path(REPO_ROOT, args.problem_dataset).resolve())
+        if not Path(args.problem_dataset).is_file():
+            raise FileNotFoundError(f"Canonical router source not found: {args.problem_dataset}")
+    validate_inputs(train_script, fold_root, output_root, folds, allow_existing=args.allow_existing or args.dry_run)
 
-    validate_inputs(
-        train_script,
-        fold_root,
-        output_root,
-        folds,
-        allow_existing=args.allow_existing or args.dry_run,
-    )
-
-    specs: list[FoldSpec] = []
+    specs = []
     for index, fold in enumerate(folds):
-        gpu = gpu_ids[index % len(gpu_ids)]
         fold_dir = fold_root / f"fold_{fold}"
         fold_output = output_root / f"fold_{fold}"
         spec = FoldSpec(
-            fold=fold,
-            gpu=gpu,
+            fold=fold, gpu=gpu_ids[index % len(gpu_ids)],
             train_data=str((fold_dir / "train.jsonl").resolve()),
             val_data=str((fold_dir / "val.jsonl").resolve()),
-            output_path=str(fold_output.resolve()),
-            log_path=str((fold_output / "train.log").resolve()),
+            output_path=str(fold_output.resolve()), log_path=str((fold_output / "train.log").resolve()),
             command=[],
         )
-        spec.command = build_train_command(train_script, spec, args)
+        spec.command = build_train_command(train_script, spec, args, method)
         specs.append(spec)
 
-    print(f"Model: {args.model_name}")
-    print(f"Seed: {args.seed}; folds: {folds}; GPUs: {gpu_ids}")
-    print(f"Output root: {output_root}")
+    print(f"Method: {method}; model: {args.model_name}; seed: {args.seed}")
+    print(f"Folds: {folds}; GPUs: {gpu_ids}; output: {output_root}")
     for spec in specs:
         print(f"[fold {spec.fold}] GPU {spec.gpu} -> {spec.output_path}")
-
-    run_manifest = {
-        "created_at": utc_now(),
-        "repo_root": str(repo_root),
-        "model_name": args.model_name,
-        "training_method": "staged_dspr",
-        "seed": args.seed,
-        "fold_root": str(fold_root),
-        "output_root": str(output_root),
-        "gpus": gpu_ids,
-        "folds": [asdict(spec) for spec in specs],
-        "hyperparameters": {
-            key.replace("-", "_"): value
-            for key, value in vars(args).items()
-            if key not in {"folds", "gpus", "dry_run", "allow_existing"}
-        },
+    manifest = {
+        "created_at": utc_now(), "model_name": args.model_name, "seed": args.seed,
+        "fold_root": str(fold_root), "output_root": str(output_root), "gpus": gpu_ids,
+        "folds": [asdict(spec) for spec in specs], "hyperparameters": vars(args),
     }
-    manifest_path = output_root / "run_manifest.json"
-
+    if method == "dspr":
+        manifest.update(repo_root=str(REPO_ROOT), training_method="staged_dspr")
+        manifest["hyperparameters"] = {
+            key: value for key, value in vars(args).items()
+            if key not in {"folds", "gpus", "dry_run", "allow_existing"}
+        }
+    elif method == "spt":
+        manifest["method"] = "static_prompt_tuning"
+    else:
+        manifest.update(
+            repo_root=str(REPO_ROOT),
+            method="parameter_matched_lora" if args.enforce_parameter_budget else "lora",
+        )
     if args.dry_run:
         print("Dry run: no training processes started.")
         for spec in specs:
             print(json.dumps(spec.command, ensure_ascii=False))
         return 0
 
-    write_json(manifest_path, run_manifest)
-    results = run_dynamic_schedule(specs, repo_root, gpu_ids)
-    run_manifest["finished_at"] = utc_now()
-    run_manifest["folds"] = [asdict(spec) for spec in results]
-    write_json(manifest_path, run_manifest)
-
-    failed = [spec for spec in results if spec.status != "succeeded"]
+    manifest_path = output_root / "run_manifest.json"
+    write_json(manifest_path, manifest)
+    results = run_dynamic_schedule(specs, REPO_ROOT, gpu_ids)
+    manifest.update(finished_at=utc_now(), folds=[asdict(spec) for spec in results])
+    write_json(manifest_path, manifest)
     if len(results) != len(specs):
         missing = sorted(set(folds) - {spec.fold for spec in results})
         print(f"No result was recorded for folds: {missing}", file=sys.stderr)
         return 1
+    failed = [spec for spec in results if spec.status != "succeeded"]
     if failed:
         print("Failed folds: " + ", ".join(str(spec.fold) for spec in failed), file=sys.stderr)
         print(f"See per-fold logs under {output_root}", file=sys.stderr)
         return 1
-    print(f"All {len(results)} fold trainings completed successfully.")
+    print(f"All {len(results)} {method.upper()} fold trainings completed successfully.")
     print(f"Run manifest: {manifest_path}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

@@ -75,7 +75,7 @@ for LAYER_IDX in "${LAYER_INDICES[@]}"; do
         continue
     fi
 
-    python scripts/train.py staged_dspr \
+    python scripts/train.py dspr \
         --run-stage router \
         --model-name "${MODEL_NAME}" \
         --context-layer-idx "${LAYER_IDX}" \

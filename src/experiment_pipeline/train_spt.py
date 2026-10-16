@@ -68,7 +68,7 @@ def main() -> int:
     from transformers import EarlyStoppingCallback, TrainingArguments, default_data_collator
 
     from dspr_training.dataset import DSPRDataset, ProblemResampledDSPRDataset
-    from experiment_pipeline.train_dspr import ProgressEventCallback, TrainingHistoryCallback, update_steps_per_epoch
+    from utils.training import ProgressEventCallback, TrainingHistoryCallback, update_steps_per_epoch
     from spt import StaticPromptModel
     from spt_training import BaselineTrainer
 

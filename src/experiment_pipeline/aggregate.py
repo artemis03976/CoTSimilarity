@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Validate, merge, and report DSPR K-fold out-of-fold predictions.
-
-The selected held-out folds are pooled into one OOF file. Metrics are
-reported for the full test universe and for variant-specific eligible and
-non-eligible slices.  An optional baseline enables paired bootstrap confidence
-intervals and exact McNemar tests on matching problem IDs.
-"""
+"""Shared OOF validation, aggregation, and paired statistics for DSPR, SPT, and LoRA."""
 
 from __future__ import annotations
 
@@ -20,11 +14,17 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from .evaluate_dspr import held_out_id_path, parse_fold_list
+from .evaluate import held_out_id_path, parse_fold_list
 
 
 FOLDS = tuple(range(5))
 VARIANTS = ("original", "simple", "hard")
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_RESULT_ROOTS = {
+    "dspr": "output/qwen_staged_kfold_seed42",
+    "spt": "output/qwen_spt_seed42",
+    "lora": "output/qwen_lora_qv_r1_seed42",
+}
 
 
 def read_json(path: Path) -> Any:
@@ -285,11 +285,11 @@ def percentile(sorted_values: list[float], quantile: float) -> float:
     return sorted_values[lower] * (1 - fraction) + sorted_values[upper] * fraction
 
 
-def exact_mcnemar_p(baseline_only: int, dspr_only: int) -> float:
-    discordant = baseline_only + dspr_only
+def exact_mcnemar_p(comparator_only: int, method_only: int) -> float:
+    discordant = comparator_only + method_only
     if discordant == 0:
         return 1.0
-    tail = min(baseline_only, dspr_only)
+    tail = min(comparator_only, method_only)
     probability = sum(math.comb(discordant, value) for value in range(tail + 1)) / (2**discordant)
     return min(1.0, 2.0 * probability)
 
@@ -301,8 +301,8 @@ def comparison_seed(seed: int, label: str) -> int:
 
 def paired_comparison(
     ids: Iterable[int],
-    dspr_outcome: Callable[[int], bool],
-    baseline_outcome: Callable[[int], bool],
+    method_outcome: Callable[[int], bool],
+    comparator_outcome: Callable[[int], bool],
     bootstrap_samples: int,
     seed: int,
     label: str,
@@ -310,9 +310,9 @@ def paired_comparison(
     selected = sorted(set(ids))
     if not selected:
         raise ValueError(f"Cannot compare an empty slice: {label}")
-    dspr_values = [int(dspr_outcome(pid)) for pid in selected]
-    baseline_values = [int(baseline_outcome(pid)) for pid in selected]
-    differences = [new - base for new, base in zip(dspr_values, baseline_values)]
+    method_values = [int(method_outcome(pid)) for pid in selected]
+    comparator_values = [int(comparator_outcome(pid)) for pid in selected]
+    differences = [new - base for new, base in zip(method_values, comparator_values)]
     delta = statistics.fmean(differences)
 
     rng = random.Random(comparison_seed(seed, label))
@@ -322,130 +322,150 @@ def paired_comparison(
         bootstrapped.append(statistics.fmean(differences[index] for index in indices))
     bootstrapped.sort()
 
-    baseline_only = sum(base == 1 and new == 0 for new, base in zip(dspr_values, baseline_values))
-    dspr_only = sum(new == 1 and base == 0 for new, base in zip(dspr_values, baseline_values))
-    both_correct = sum(new == 1 and base == 1 for new, base in zip(dspr_values, baseline_values))
-    both_wrong = len(selected) - baseline_only - dspr_only - both_correct
+    comparator_only = sum(base == 1 and new == 0 for new, base in zip(method_values, comparator_values))
+    method_only = sum(new == 1 and base == 0 for new, base in zip(method_values, comparator_values))
+    both_correct = sum(new == 1 and base == 1 for new, base in zip(method_values, comparator_values))
+    both_wrong = len(selected) - comparator_only - method_only - both_correct
     return {
         "total": len(selected),
-        "dspr_correct": sum(dspr_values),
-        "dspr_accuracy": statistics.fmean(dspr_values),
-        "baseline_correct": sum(baseline_values),
-        "baseline_accuracy": statistics.fmean(baseline_values),
+        "method_correct": sum(method_values),
+        "method_accuracy": statistics.fmean(method_values),
+        "comparator_correct": sum(comparator_values),
+        "comparator_accuracy": statistics.fmean(comparator_values),
         "delta": delta,
         "paired_bootstrap_95_ci": [percentile(bootstrapped, 0.025), percentile(bootstrapped, 0.975)],
         "bootstrap_samples": bootstrap_samples,
         "both_correct": both_correct,
         "both_wrong": both_wrong,
-        "baseline_only_correct": baseline_only,
-        "dspr_only_correct": dspr_only,
-        "mcnemar_exact_p": exact_mcnemar_p(baseline_only, dspr_only),
+        "comparator_only_correct": comparator_only,
+        "method_only_correct": method_only,
+        "mcnemar_exact_p": exact_mcnemar_p(comparator_only, method_only),
     }
 
 
-def build_comparisons(
-    dspr: dict[int, dict[str, Any]],
-    baseline: dict[int, dict[str, Any]],
+def resolve_path(value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else (REPO_ROOT / path).resolve()
+
+
+def metric_slices(
+    all_ids: set[int], eligible: dict[str, set[int]],
+) -> dict[str, dict[str, set[int]]]:
+    return {
+        "full": {variant: all_ids for variant in (*VARIANTS, "all_variants")},
+        "eligible": {variant: eligible[variant] for variant in ("simple", "hard")},
+        "noneligible": {variant: all_ids - eligible[variant] for variant in ("simple", "hard")},
+    }
+
+
+def build_metrics(
+    records: dict[int, dict[str, Any]],
+    all_ids: set[int],
+    eligible: dict[str, set[int]],
+    method: str,
+) -> dict[str, Any]:
+    label = f"{method.upper()} OOF"
+    return {
+        scope: {
+            variant: (
+                all_variants_metric(records, ids, label)
+                if variant == "all_variants"
+                else metric_for_variant(records, ids, variant, label)
+            )
+            for variant, ids in variants.items()
+        }
+        for scope, variants in metric_slices(all_ids, eligible).items()
+    }
+
+
+def first_outcome(records: dict[int, dict[str, Any]], pid: int, variant: str) -> bool:
+    variants = VARIANTS if variant == "all_variants" else (variant,)
+    return all(extract_flags(records[pid], current, "paired comparison")[0] for current in variants)
+
+
+def comparison_fields(method: str) -> dict[str, str]:
+    """Retain existing report column names while sharing all calculations."""
+    comparator = "baseline" if method == "dspr" else "comparator"
+    return {
+        "method_correct": f"{method}_correct",
+        "method_accuracy": f"{method}_accuracy",
+        "comparator_correct": f"{comparator}_correct",
+        "comparator_accuracy": f"{comparator}_accuracy",
+        "delta": "delta" if method == "dspr" else f"delta_{method}_minus_comparator",
+        "comparator_only_correct": f"{comparator}_only_correct",
+        "method_only_correct": f"{method}_only_correct",
+    }
+
+
+def compare_records(
+    records: dict[int, dict[str, Any]],
+    comparator: dict[int, dict[str, Any]],
     all_ids: set[int],
     eligible: dict[str, set[int]],
     bootstrap_samples: int,
     seed: int,
+    comparator_name: str,
+    method: str,
 ) -> dict[str, Any]:
-    result: dict[str, Any] = {"full": {}, "eligible": {}, "noneligible": {}}
-
-    def variant_outcome(records: dict[int, dict[str, Any]], pid: int, variant: str) -> bool:
-        return extract_flags(records[pid], variant, "paired comparison")[0]
-
-    for variant in VARIANTS:
-        result["full"][variant] = paired_comparison(
-            all_ids,
-            lambda pid, v=variant: variant_outcome(dspr, pid, v),
-            lambda pid, v=variant: variant_outcome(baseline, pid, v),
-            bootstrap_samples,
-            seed,
-            f"full/{variant}",
-        )
-    result["full"]["all_variants"] = paired_comparison(
-        all_ids,
-        lambda pid: all(variant_outcome(dspr, pid, variant) for variant in VARIANTS),
-        lambda pid: all(variant_outcome(baseline, pid, variant) for variant in VARIANTS),
-        bootstrap_samples,
-        seed,
-        "full/all_variants",
-    )
-    for variant in ("simple", "hard"):
-        result["eligible"][variant] = paired_comparison(
-            eligible[variant],
-            lambda pid, v=variant: variant_outcome(dspr, pid, v),
-            lambda pid, v=variant: variant_outcome(baseline, pid, v),
-            bootstrap_samples,
-            seed,
-            f"eligible/{variant}",
-        )
-        ineligible = all_ids - eligible[variant]
-        result["noneligible"][variant] = paired_comparison(
-            ineligible,
-            lambda pid, v=variant: variant_outcome(dspr, pid, v),
-            lambda pid, v=variant: variant_outcome(baseline, pid, v),
-            bootstrap_samples,
-            seed,
-            f"noneligible/{variant}",
-        )
+    result: dict[str, Any] = {}
+    fields = comparison_fields(method)
+    # Preserve historical seed labels so refactoring does not change the CIs.
+    prefix = "" if method == "dspr" else f"{comparator_name}/"
+    for scope, variants in metric_slices(all_ids, eligible).items():
+        result[scope] = {}
+        for variant, ids in variants.items():
+            raw = paired_comparison(
+                ids,
+                lambda pid, v=variant: first_outcome(records, pid, v),
+                lambda pid, v=variant: first_outcome(comparator, pid, v),
+                bootstrap_samples,
+                seed,
+                f"{prefix}{scope}/{variant}",
+            )
+            result[scope][variant] = {fields.get(key, key): value for key, value in raw.items()}
     return result
 
 
-def write_metrics_csv(path: Path, metrics: dict[str, Any], comparisons: dict[str, Any] | None) -> None:
-    fields = [
-        "scope",
-        "variant",
-        "total",
-        "dspr_correct",
-        "dspr_accuracy",
-        "baseline_correct",
-        "baseline_accuracy",
-        "delta",
-        "ci95_low",
-        "ci95_high",
-        "mcnemar_exact_p",
+def write_metrics_csv(
+    path: Path,
+    metrics: dict[str, Any],
+    comparisons: dict[str, dict[str, Any]],
+    method: str,
+) -> None:
+    names = comparison_fields(method)
+    fields = ([] if method == "dspr" else ["comparator"]) + [
+        "scope", "variant", "total", names["method_correct"], names["method_accuracy"],
+        names["comparator_correct"], names["comparator_accuracy"], names["delta"],
+        "ci95_low", "ci95_high", "mcnemar_exact_p",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        for scope, variants in metrics.items():
-            for variant, metric in variants.items():
-                comparison = comparisons.get(scope, {}).get(variant) if comparisons else None
-                if variant == "all_variants":
-                    correct = metric["correct"]
-                    accuracy = metric["accuracy"]
-                else:
-                    correct = metric["first_correct"]
-                    accuracy = metric["first_accuracy"]
-                row = {
-                    "scope": scope,
-                    "variant": variant,
-                    "total": metric["total"],
-                    "dspr_correct": correct,
-                    "dspr_accuracy": accuracy,
-                    "baseline_correct": "",
-                    "baseline_accuracy": "",
-                    "delta": "",
-                    "ci95_low": "",
-                    "ci95_high": "",
-                    "mcnemar_exact_p": "",
-                }
-                if comparison:
-                    row.update(
-                        {
-                            "baseline_correct": comparison["baseline_correct"],
-                            "baseline_accuracy": comparison["baseline_accuracy"],
-                            "delta": comparison["delta"],
+        for comparator_name, scopes in (comparisons or {"": {}}).items():
+            for scope, variants in metrics.items():
+                for variant, metric in variants.items():
+                    correct = "correct" if variant == "all_variants" else "first_correct"
+                    accuracy = "accuracy" if variant == "all_variants" else "first_accuracy"
+                    row = {
+                        "scope": scope, "variant": variant, "total": metric["total"],
+                        names["method_correct"]: metric[correct],
+                        names["method_accuracy"]: metric[accuracy],
+                    }
+                    if method != "dspr":
+                        row["comparator"] = comparator_name
+                    comparison = scopes.get(scope, {}).get(variant)
+                    if comparison:
+                        row.update({
+                            names[key]: comparison[names[key]]
+                            for key in ("comparator_correct", "comparator_accuracy", "delta")
+                        })
+                        row.update({
                             "ci95_low": comparison["paired_bootstrap_95_ci"][0],
                             "ci95_high": comparison["paired_bootstrap_95_ci"][1],
                             "mcnemar_exact_p": comparison["mcnemar_exact_p"],
-                        }
-                    )
-                writer.writerow(row)
+                        })
+                    writer.writerow(row)
 
 
 def write_alpha_csv(path: Path, summaries: dict[str, dict[str, Any]]) -> None:
@@ -458,205 +478,157 @@ def write_alpha_csv(path: Path, summaries: dict[str, dict[str, Any]]) -> None:
             writer.writerow({"variant": variant, **summary})
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--result-root", default="output/qwen_staged_kfold_seed42")
+def parse_args(method: str, argv: list[str] | None = None) -> argparse.Namespace:
+    if method not in DEFAULT_RESULT_ROOTS:
+        raise ValueError(f"Unsupported aggregation method: {method}")
+    parser = argparse.ArgumentParser(description=f"Aggregate {method.upper()} K-fold OOF predictions")
+    parser.add_argument("--result-root", default=DEFAULT_RESULT_ROOTS[method])
     parser.add_argument("--id-root", default="output/qwen-2.5/kfold")
     parser.add_argument("--raw-data", default="data/canonical_math_paired.jsonl")
-    parser.add_argument("--baseline", default=None, help="Optional matched baseline all_records.jsonl")
+    parser.add_argument(
+        "--baseline", "--base", dest="base",
+        default=None if method == "dspr" else "output/qwen-2.5/base/all_records.jsonl",
+        help="Matched base-model all_records.jsonl; use an empty string to skip",
+    )
+    if method != "dspr":
+        parser.add_argument(
+            "--dspr", default="output/qwen_staged_kfold_seed42/oof_all_records.jsonl",
+            help="DSPR OOF comparator; use an empty string to skip",
+        )
     parser.add_argument("--expected-samples", type=int, default=1, help="Use 0 to accept any positive sample count")
-    parser.add_argument("--folds", nargs="+", type=int, default=None, help="Selected folds to pool; default: all five")
-    parser.add_argument(
-        "--expected-problems", type=int, default=None,
-        help="Optional assertion on the selected OOF problem count; otherwise inferred from held-out IDs",
-    )
-    parser.add_argument(
-        "--expected-simple-eligible",
-        type=int,
-        default=None,
-        help=(
-            "Optional consistency assertion. By default the count is inferred "
-            "from <id-root>/fold_*/test_ids.json."
-        ),
-    )
-    parser.add_argument(
-        "--expected-hard-eligible",
-        type=int,
-        default=None,
-        help=(
-            "Optional consistency assertion. By default the count is inferred "
-            "from <id-root>/fold_*/test_ids.json."
-        ),
-    )
+    parser.add_argument("--folds", nargs="+", type=int, default=None, help="Selected folds; default: all five")
+    parser.add_argument("--expected-problems", type=int, default=None)
+    for variant in ("simple", "hard"):
+        parser.add_argument(
+            f"--expected-{variant}-eligible", type=int, default=None,
+            help="Optional count assertion; otherwise inferred from held-out ID manifests",
+        )
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     parser.add_argument("--bootstrap-seed", type=int, default=42)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(method: str = "dspr", argv: list[str] | None = None) -> int:
+    args = parse_args(method, argv)
     if args.expected_samples < 0:
         raise ValueError("--expected-samples cannot be negative")
     if args.bootstrap_samples < 1:
         raise ValueError("--bootstrap-samples must be positive")
-
-    repo_root = Path(__file__).resolve().parents[2]
-    result_root = (repo_root / args.result_root).resolve() if not Path(args.result_root).is_absolute() else Path(args.result_root)
-    id_root = (repo_root / args.id_root).resolve() if not Path(args.id_root).is_absolute() else Path(args.id_root)
-    raw_path = (repo_root / args.raw_data).resolve() if not Path(args.raw_data).is_absolute() else Path(args.raw_data)
-    expected_sample_count = args.expected_samples or None
-
+    result_root = resolve_path(args.result_root)
+    id_root = resolve_path(args.id_root)
+    raw_path = resolve_path(args.raw_data)
+    expected_samples = args.expected_samples or None
+    require_alpha = method == "dspr"
     folds = parse_fold_list(args.folds)
+    print(f"{method.upper()} aggregation: folds={folds}; results={result_root}", flush=True)
+    print("Checking held-out IDs and reference dataset...", flush=True)
     fold_ids, eligible = load_fold_expectations(id_root, folds)
     raw_records = load_id_map(read_jsonl(raw_path), raw_path)
     all_ids = set().union(*fold_ids.values())
     if args.expected_problems is not None and len(all_ids) != args.expected_problems:
-        raise ValueError(
-            f"Selected OOF problem count is {len(all_ids)}; expected {args.expected_problems}. "
-            "Check --id-root and --folds or override --expected-problems explicitly."
-        )
-    missing = sorted(all_ids - set(raw_records))
+        raise ValueError(f"Selected OOF problem count is {len(all_ids)}; expected {args.expected_problems}")
+    missing = all_ids - set(raw_records)
     if missing:
-        raise ValueError(f"Fold held-out IDs are absent from raw data: {missing}")
-    expected_eligible_counts, eligible_count_sources = resolve_eligible_count_expectations(
-        eligible,
-        {
-            "simple": args.expected_simple_eligible,
-            "hard": args.expected_hard_eligible,
-        },
+        raise ValueError(f"Fold held-out IDs are absent from raw data: {sorted(missing)}")
+    expected_eligible, eligible_count_sources = resolve_eligible_count_expectations(
+        eligible, {"simple": args.expected_simple_eligible, "hard": args.expected_hard_eligible},
     )
 
     merged: dict[int, dict[str, Any]] = {}
     fold_counts: dict[str, int] = {}
     for fold in folds:
         path = result_root / f"fold_{fold}" / "all_records.jsonl"
+        print(f"[fold {fold}] validating predictions: {path}", flush=True)
         if not path.is_file():
-            raise FileNotFoundError(f"Missing Fold {fold} result: {path}")
+            raise FileNotFoundError(f"Missing Fold {fold} {method.upper()} result: {path}")
         fold_records = load_id_map(read_jsonl(path), path)
-        validate_records(
-            fold_records,
-            fold_ids[fold],
-            str(path),
-            expected_sample_count,
-            require_alpha=True,
-        )
+        validate_records(fold_records, fold_ids[fold], str(path), expected_samples, require_alpha)
         overlap = set(merged) & set(fold_records)
         if overlap:
             raise ValueError(f"OOF result overlap at IDs: {sorted(overlap)}")
         for pid, record in fold_records.items():
             merged[pid] = {**record, "outer_fold": fold}
         fold_counts[str(fold)] = len(fold_records)
+        print(f"[fold {fold}] passed: {len(fold_records)} problems", flush=True)
+    validate_records(merged, all_ids, f"merged {method.upper()} OOF", expected_samples, require_alpha)
 
-    validate_records(merged, all_ids, "merged DSPR OOF", expected_sample_count, require_alpha=True)
-
-    metrics = {
-        "full": {
-            **{
-                variant: metric_for_variant(merged, all_ids, variant, "DSPR OOF")
-                for variant in VARIANTS
-            },
-            "all_variants": all_variants_metric(merged, all_ids, "DSPR OOF"),
-        },
-        "eligible": {
-            variant: metric_for_variant(merged, eligible[variant], variant, "DSPR OOF")
-            for variant in ("simple", "hard")
-        },
-        "noneligible": {
-            variant: metric_for_variant(merged, all_ids - eligible[variant], variant, "DSPR OOF")
-            for variant in ("simple", "hard")
-        },
+    print(f"OOF coverage complete: {len(merged)} unique problems. Computing metrics...", flush=True)
+    metrics = build_metrics(merged, all_ids, eligible, method)
+    comparator_paths = {
+        name: resolve_path(value)
+        for name, value in (("base", args.base), ("dspr", getattr(args, "dspr", None)))
+        if value
     }
-    alpha = {variant: alpha_summary(merged, all_ids, variant) for variant in VARIANTS}
-    routing_diagnostics = {
-        "hard_minus_simple_mean_alpha": alpha["hard"]["mean"] - alpha["simple"]["mean"],
-        "simple_minus_original_mean_alpha": alpha["simple"]["mean"] - alpha["original"]["mean"],
-    }
-
-    baseline_map: dict[int, dict[str, Any]] | None = None
-    comparisons = None
-    baseline_path = None
-    if args.baseline:
-        baseline_path = (repo_root / args.baseline).resolve() if not Path(args.baseline).is_absolute() else Path(args.baseline)
-        baseline_map = load_id_map(read_jsonl(baseline_path), baseline_path)
-        baseline_map = {pid: record for pid, record in baseline_map.items() if pid in all_ids}
-        validate_records(
-            baseline_map,
-            all_ids,
-            str(baseline_path),
-            expected_samples=None,
-            require_alpha=False,
+    comparisons = {}
+    for name, path in comparator_paths.items():
+        print(f"Comparing {method.upper()} against {name}: "
+              f"{args.bootstrap_samples} paired bootstrap draws per comparison...", flush=True)
+        comparator = load_id_map(read_jsonl(path), path)
+        comparator = {pid: record for pid, record in comparator.items() if pid in all_ids}
+        validate_records(comparator, all_ids, str(path), expected_samples=None, require_alpha=False)
+        comparisons[name] = compare_records(
+            merged, comparator, all_ids, eligible, args.bootstrap_samples, args.bootstrap_seed, name, method,
         )
-        comparisons = build_comparisons(
-            merged,
-            baseline_map,
-            all_ids,
-            eligible,
-            args.bootstrap_samples,
-            args.bootstrap_seed,
-        )
+        print(f"Comparison against {name} complete.", flush=True)
 
-    merged_path = result_root / "oof_all_records.jsonl"
-    metrics_path = result_root / "oof_metrics.json"
-    metrics_csv_path = result_root / "oof_metrics.csv"
-    alpha_csv_path = result_root / "oof_alpha_summary.csv"
-    write_jsonl(merged_path, [merged[pid] for pid in sorted(merged)])
+    # Keep the existing DSPR/base and baseline/multiple-comparator report layouts.
     report = {
         "validation": {
             "status": "passed",
             "raw_problem_count": len(raw_records),
             "oof_problem_count": len(merged),
-            "unique_problem_count": len(set(merged)),
+            "unique_problem_count": len(merged),
             "fold_counts": fold_counts,
-            "eligible_counts": {variant: len(ids) for variant, ids in eligible.items()},
-            "noneligible_counts": {
-                variant: len(all_ids - ids) for variant, ids in eligible.items()
-            },
-            "expected_samples_per_variant": expected_sample_count,
-            "expected_problem_count": args.expected_problems if args.expected_problems is not None else len(all_ids),
             "selected_folds": folds,
-            "expected_eligible_counts": expected_eligible_counts,
+            "eligible_counts": {variant: len(ids) for variant, ids in eligible.items()},
+            "noneligible_counts": {variant: len(all_ids - ids) for variant, ids in eligible.items()},
+            "expected_samples_per_variant": expected_samples,
+            "expected_eligible_counts": expected_eligible,
             "eligible_count_sources": eligible_count_sources,
         },
         "sources": {
-            "result_root": str(result_root),
-            "id_root": str(id_root),
-            "raw_data": str(raw_path),
-            "baseline": str(baseline_path) if baseline_path else None,
+            "result_root": str(result_root), "id_root": str(id_root), "raw_data": str(raw_path),
         },
         "metrics": metrics,
-        "alpha_summary": alpha,
-        "routing_diagnostics": routing_diagnostics,
         "paired_comparisons": comparisons,
     }
-    write_json(metrics_path, report)
-    write_metrics_csv(metrics_csv_path, metrics, comparisons)
-    write_alpha_csv(alpha_csv_path, alpha)
+    if require_alpha:
+        alpha = {variant: alpha_summary(merged, all_ids, variant) for variant in VARIANTS}
+        report["alpha_summary"] = alpha
+        report["routing_diagnostics"] = {
+            "hard_minus_simple_mean_alpha": alpha["hard"]["mean"] - alpha["simple"]["mean"],
+            "simple_minus_original_mean_alpha": alpha["simple"]["mean"] - alpha["original"]["mean"],
+        }
+        report["validation"]["expected_problem_count"] = (
+            args.expected_problems if args.expected_problems is not None else len(all_ids)
+        )
+        baseline_path = comparator_paths.get("base")
+        report["sources"]["baseline"] = str(baseline_path) if baseline_path else None
+        report["paired_comparisons"] = comparisons.get("base")
+    else:
+        report["method"] = method
+        report["sources"]["comparators"] = {name: str(path) for name, path in comparator_paths.items()}
 
-    print("OOF validation passed")
+    merged_path = result_root / "oof_all_records.jsonl"
+    metrics_path = result_root / "oof_metrics.json"
+    csv_path = result_root / "oof_metrics.csv"
+    write_jsonl(merged_path, [merged[pid] for pid in sorted(merged)])
+    write_json(metrics_path, report)
+    write_metrics_csv(csv_path, metrics, comparisons, method)
+    if require_alpha:
+        write_alpha_csv(result_root / "oof_alpha_summary.csv", report["alpha_summary"])
+
+    print(f"{method.upper()} OOF validation passed")
     print(f"Fold counts: {fold_counts}; total unique problems: {len(merged)}")
-    print(
-        "Eligible counts: "
-        + ", ".join(f"{variant}={len(ids)}" for variant, ids in eligible.items())
-    )
-    for variant in VARIANTS:
-        metric = metrics["full"][variant]
-        print(
-            f"Full {variant}: {metric['first_correct']}/{metric['total']} "
-            f"({metric['first_accuracy'] * 100:.2f}%)"
-        )
-    for variant in ("simple", "hard"):
-        metric = metrics["eligible"][variant]
-        print(
-            f"Eligible {variant}: {metric['first_correct']}/{metric['total']} "
-            f"({metric['first_accuracy'] * 100:.2f}%)"
-        )
-    if comparisons:
-        print("Paired baseline comparisons and bootstrap CIs were written to the metrics files.")
+    for scope in ("full", "eligible"):
+        for variant, metric in metrics[scope].items():
+            if variant == "all_variants":
+                continue
+            accuracy = metric["first_accuracy"]
+            formatted = f"{accuracy * 100:.2f}%" if accuracy is not None else "n/a"
+            print(f"{scope.title()} {variant}: {metric['first_correct']}/{metric['total']} ({formatted})")
+    print(f"Comparators: {list(comparisons)}")
     print(f"Merged OOF: {merged_path}")
     print(f"Metrics JSON: {metrics_path}")
-    print(f"Metrics CSV: {metrics_csv_path}")
+    print(f"Metrics CSV: {csv_path}")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

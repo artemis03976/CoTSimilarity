@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build Qwen DSPR K-fold data from one raw dataset and one eligibility file.
+"""Build Qwen DSPR K-fold data using the shared GED trajectory selector.
 
-The outer folds cover every raw problem group.  The eligibility manifest only
-controls which raw trajectories become prefix-training examples; it never
-removes a problem from the outer test universe.
+The outer folds cover every raw problem group. Prefix trajectories come only
+from dspr_dataset.data_filter, using the saved eligibility protocol and GED
+results. Raw sample arrays are never used to reconstruct training examples.
 """
 
 from __future__ import annotations
@@ -21,10 +21,8 @@ from typing import Any, Iterable
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from utils.io import read_jsonl, read_manifest, write_json, write_jsonl  # noqa: E402
-
-
-VARIANTS = ("simple", "hard")
+from dspr_dataset.data_filter import VARIANTS, load_filtered_trajectories  # noqa: E402
+from utils.io import read_jsonl, write_json, write_jsonl  # noqa: E402
 
 
 def normalise_id(value: Any) -> int:
@@ -55,30 +53,6 @@ def load_raw_metadata(records: list[dict[str, Any]]) -> dict[int, dict[str, str]
         }
         for record in records
     }
-
-
-def load_eligibility(path: Path, raw_ids: set[int]) -> tuple[dict[str, set[int]], dict[str, Any]]:
-    payload = read_manifest(path)
-    if not payload:
-        raise ValueError(f"Eligibility manifest must be a non-empty JSON object: {path}")
-
-    problem_ids = payload.get("problem_ids")
-    if not isinstance(problem_ids, dict):
-        raise ValueError(f"Eligibility manifest has no problem_ids object: {path}")
-
-    eligibility: dict[str, set[int]] = {}
-    for variant in VARIANTS:
-        values = problem_ids.get(variant, [])
-        if not isinstance(values, list):
-            raise ValueError(f"Eligibility IDs for {variant} must be a list: {path}")
-        ids = {normalise_id(value) for value in values}
-        unknown = ids - raw_ids
-        if unknown:
-            raise ValueError(
-                f"{path}: {variant} contains IDs absent from raw dataset: {sorted(unknown)[:10]}"
-            )
-        eligibility[variant] = ids
-    return eligibility, payload
 
 
 def build_labels(
@@ -201,59 +175,6 @@ def eligible_slices(ids: Iterable[int], eligibility: dict[str, set[int]]) -> dic
     }
 
 
-def flatten_training_records(
-    raw_records: list[dict[str, Any]],
-    eligibility: dict[str, set[int]],
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Convert nested raw samples into the DSPR trajectory format."""
-    rows: list[dict[str, Any]] = []
-    skipped = Counter()
-    seen_sample_ids: set[str] = set()
-    for record in raw_records:
-        pid = normalise_id(record["problem_id"])
-        for variant in VARIANTS:
-            if pid not in eligibility[variant]:
-                continue
-            variant_data = record.get(variant)
-            if not isinstance(variant_data, dict):
-                skipped["missing_variant"] += 1
-                continue
-            problem = variant_data.get("problem")
-            samples = variant_data.get("samples", [])
-            if not isinstance(problem, str) or not isinstance(samples, list):
-                skipped["invalid_variant"] += 1
-                continue
-            for index, sample in enumerate(samples):
-                if not isinstance(sample, dict):
-                    skipped["invalid_sample"] += 1
-                    continue
-                if not sample.get("correct") or sample.get("valid", True) is False:
-                    skipped["not_correct_or_invalid"] += 1
-                    continue
-                if sample.get("timed_out", False):
-                    skipped["timed_out"] += 1
-                    continue
-                response = sample.get("response")
-                if not isinstance(response, str) or not response.strip():
-                    skipped["empty_response"] += 1
-                    continue
-                sample_id = str(sample.get("sample_id") or f"{pid}_{variant}_{index}")
-                if sample_id in seen_sample_ids:
-                    raise ValueError(f"Duplicate sample_id in raw dataset: {sample_id}")
-                seen_sample_ids.add(sample_id)
-                rows.append(
-                    {
-                        "problem_id": pid,
-                        "problem": problem,
-                        "response": response,
-                        "variant_type": variant,
-                        "target_alpha": 0.0 if variant == "simple" else 1.0,
-                        "sample_id": sample_id,
-                    }
-                )
-    return rows, dict(skipped)
-
-
 def write_balance_csv(
     path: Path,
     splits: dict[int, dict[str, list[int]]],
@@ -296,12 +217,12 @@ def write_balance_csv(
 
 def build_qwen_folds(
     raw_records: list[dict[str, Any]],
+    training_rows: list[dict[str, Any]],
     eligibility: dict[str, set[int]],
     splits: dict[int, dict[str, list[int]]],
     qwen_root: Path,
 ) -> dict[str, Any]:
     raw_by_id = {normalise_id(record["problem_id"]): record for record in raw_records}
-    training_rows, skipped = flatten_training_records(raw_records, eligibility)
     fold_summaries = []
 
     for fold, fold_split in splits.items():
@@ -343,7 +264,6 @@ def build_qwen_folds(
         "model": "qwen-2.5",
         "training_records": len(training_rows),
         "training_pairs": len({(row["problem_id"], row["variant_type"]) for row in training_rows}),
-        "skipped_raw_samples": skipped,
         "folds": fold_summaries,
     }
 
@@ -352,6 +272,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-data", required=True, help="Nested raw all_records.jsonl")
     parser.add_argument("--eligible", required=True, help="Single Qwen eligibility JSON manifest")
+    parser.add_argument(
+        "--ged-results",
+        help="GED JSONL source; defaults to the source recorded in --eligible",
+    )
     parser.add_argument(
         "--output-root",
         default="output/qwen-2.5",
@@ -372,10 +296,23 @@ def main() -> None:
     raw_path = Path(args.raw_data)
     eligibility_path = Path(args.eligible)
     output_root = Path(args.output_root)
+    qwen_root = output_root / "kfold"
+    if qwen_root.exists() and any(qwen_root.iterdir()):
+        raise FileExistsError(f"Existing folds are preserved: {qwen_root}. Choose a new --output-root.")
     raw_records = load_raw_records(raw_path)
     metadata = load_raw_metadata(raw_records)
     raw_ids = sorted(metadata)
-    eligibility, eligibility_payload = load_eligibility(eligibility_path, set(raw_ids))
+    curation = load_filtered_trajectories(eligibility_path, args.ged_results)
+    eligibility_payload = curation["eligibility"]
+    eligibility = {
+        variant: set(eligibility_payload["problem_ids"][variant]) for variant in VARIANTS
+    }
+    for variant, ids in eligibility.items():
+        unknown = ids - set(raw_ids)
+        if unknown:
+            raise ValueError(
+                f"{variant} contains IDs absent from raw dataset: {sorted(unknown)}"
+            )
 
     labels = build_labels(raw_ids, metadata, eligibility)
     outer_assignment = balanced_assign(raw_ids, labels, args.k, args.seed)
@@ -388,13 +325,14 @@ def main() -> None:
         args.validation_buckets,
     )
 
-    qwen_root = output_root / "kfold"
     qwen_summary = build_qwen_folds(
         raw_records,
+        curation["selected"],
         eligibility,
         splits,
         qwen_root,
     )
+    qwen_summary["filter_stats"] = curation["stats"]
 
     assignments = []
     for pid in raw_ids:
@@ -440,14 +378,16 @@ def main() -> None:
             "union": len(eligibility["simple"] | eligibility["hard"]),
         }),
         "training": {
-            "source": "raw-data nested simple/hard samples",
-            "filter": "eligible variant, correct, valid, non-timeout, non-empty response",
+            "source": curation["source_file"],
+            "filter": "dspr_dataset.data_filter.select_trajectories_by_ged",
+            "strategies": ["EligibilityStrategy", "GEDRangeStrategy", "TopKStrategy"],
             "target_alpha": {"simple": 0.0, "hard": 1.0},
         },
         "coverage": qwen_summary,
         "notes": [
             "Outer test folds cover all raw problem groups exactly once.",
-            "Eligibility masks prefix supervision and reporting slices; they do not change the raw fold universe.",
+            "Prefix trajectories use the shared eligibility, GED min-max and top-k strategies.",
+            "Eligibility labels do not change the raw fold universe.",
         ],
     }
     write_json(qwen_root / "manifest.json", manifest)

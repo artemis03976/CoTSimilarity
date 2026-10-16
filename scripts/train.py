@@ -17,7 +17,7 @@ def _usage() -> str:
     return (
         "Usage: python scripts/train.py METHOD [METHOD OPTIONS]\n"
         "\n"
-        "METHOD: dspr | staged_dspr | spt | lora\n"
+        "METHOD: dspr (router -> frozen-router prefix) | spt | lora\n"
         "Use 'python scripts/train.py METHOD --help' for method-specific options."
     )
 
@@ -30,8 +30,6 @@ def main() -> int:
     method = sys.argv[1].lower()
     if method == "dspr":
         from experiment_pipeline.train_dspr import main as method_main
-    elif method in {"staged_dspr", "staged-dspr"}:
-        from experiment_pipeline.train_staged_dspr import main as method_main
     elif method == "spt":
         from experiment_pipeline.train_spt import main as method_main
     elif method == "lora":

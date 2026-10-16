@@ -33,24 +33,17 @@ def main() -> int:
 
     method = sys.argv[1].lower()
     action = sys.argv[2].lower()
-    if (method, action) == ("dspr", "run"):
-        from experiment_pipeline.evaluate_dspr import main as action_main
-    elif (method, action) == ("dspr", "aggregate"):
-        from experiment_pipeline.aggregate_dspr import main as action_main
-    elif (method, action) == ("spt", "run"):
-        from experiment_pipeline.evaluate_spt import main as action_main
-    elif (method, action) == ("spt", "aggregate"):
-        from experiment_pipeline.aggregate_spt import main as action_main
-    elif (method, action) == ("lora", "run"):
-        from experiment_pipeline.evaluate_lora import main as action_main
-    elif (method, action) == ("lora", "aggregate"):
-        from experiment_pipeline.aggregate_lora import main as action_main
-    else:
+    if method not in {"dspr", "spt", "lora"} or action not in {"run", "aggregate"}:
         print(f"Unsupported evaluation target: {method} {action}\n\n{_usage()}", file=sys.stderr)
         return 2
 
+    if action == "run":
+        from experiment_pipeline.evaluate import main as action_main
+    else:
+        from experiment_pipeline.aggregate import main as action_main
+
     sys.argv = [sys.argv[0], *sys.argv[3:]]
-    return action_main()
+    return action_main(method)
 
 
 if __name__ == "__main__":

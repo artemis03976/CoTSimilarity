@@ -249,7 +249,7 @@ def main() -> int:
     training_args = TrainingArguments(**training_kwargs)
     callbacks = []
     if args.emit_progress_events:
-        from experiment_pipeline.train_dspr import ProgressEventCallback
+        from utils.training import ProgressEventCallback
 
         callbacks.append(ProgressEventCallback(stage="lora"))
     if eval_strategy != "no" and args.early_stopping_patience > 0:

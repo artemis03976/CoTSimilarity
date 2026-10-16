@@ -131,6 +131,49 @@ cleaned path explicitly and use a separate output directory for a new run.
 
 ## End-To-End DSPR Workflow
 
+### Shared filtering for new K-fold datasets
+
+`src/dspr_dataset/data_filter.py` owns trajectory selection. Three independent
+strategies are composed in order:
+
+| Strategy | Rule in the current Qwen eligibility manifest |
+| --- | --- |
+| `EligibilityStrategy` | Correct, non-timeout samples with a selection score; at least 3 per problem-variant |
+| `GEDRangeStrategy` | `max(ged_normalized) - min(ged_normalized) >= 0.10` on those candidates |
+| `TopKStrategy` | Up to 5 lowest-score Simple paths or highest-score Hard paths |
+
+The final eligible IDs reflect the first two strategies. Top-k selects the
+training trajectories without changing those IDs. Both dataset export and
+`scripts/build_kfold_splits.py` call `select_trajectories_by_ged`; the split
+builder does not select trajectories from raw sample arrays. It reads the
+protocol and GED source from `--eligible`, with an optional `--ged-results`
+source override, and checks that recomputed eligibility matches the manifest.
+
+Before DAG analysis, `scripts/cheap_screen.py` calls `CheapScreenStrategy` from
+the same module. It requires a valid original anchor and at least 3 valid
+correct paths on each perturbation variant, without requiring GED scores or
+original correctness. Its candidate counting reuses `EligibilityStrategy`
+with the pre-DAG conditions. `data_filter.py` is an importable library and has
+no command-line entrypoint.
+
+To build a separate dataset from existing GED results without rerunning
+generation or GED analysis:
+
+```bash
+python scripts/build_kfold_splits.py \
+  --raw-data output/qwen-2.5/multiple_n16/all_records.jsonl \
+  --eligible output/qwen-2.5/eligible_problem.json \
+  --output-root output/qwen-2.5_ged_top5 \
+  --k 5 --seed 42
+```
+
+This protocol selects 1,474 trajectories across 301 problem-variant pairs
+(165 eligible problem groups). Outer held-out folds still cover all 548 raw
+groups. Existing completed folds used 3,892 trajectories under the eligible
+ID mask and bypassed top-k selection; those experiment results therefore do
+not represent GED top-5 training. They are retained unchanged. The builder
+requires an empty destination `kfold` directory to preserve existing folds.
+
 ### Staged DSPR training
 
 For the staged training variant, first train the prompt-only router on one
@@ -138,7 +181,7 @@ deduplicated example per problem-variant, then train the dual prefix on all
 trajectory records while keeping the router fixed:
 
 ```bash
-python scripts/train.py staged_dspr \
+python scripts/train.py dspr \
   --problem-dataset data/canonical_math_paired.jsonl \
   --kfold-root output/qwen-2.5/kfold \
   --fold 0 \
@@ -154,9 +197,11 @@ python scripts/train.py staged_dspr \
 The router artifact is saved as
 `<output>/router/router_trainable.pt`; the prefix-stage artifact is saved as
 `<output>/prefix/dspr_trainable.pt`. To run the second stage separately, pass
-`--run-stage prefix --router-checkpoint <path-to-router_trainable.pt>`. An
-optional short joint calibration can be enabled with `--joint-epochs N`; it
-uses the small `--joint-router-learning-rate` rather than the main router rate.
+`--run-stage prefix --router-checkpoint <path-to-router_trainable.pt>`, or use
+`--run-stage router` for router training alone. `train_dspr.py` provides only
+router and frozen-router prefix training; joint training and joint calibration
+have been removed. The former `train_staged_dspr.py` module and `staged_dspr`
+command alias are removed; use `scripts/train.py dspr`.
 
 The staged pipeline treats `data/canonical_math_paired.jsonl` as the only canonical
 source of problem-variant prompts. K-fold `train_ids.json` and `val_ids.json`
@@ -382,8 +427,7 @@ python scripts/train_kfold.py dspr --folds 0 --gpus 0
 Each fold first trains the router on canonical problem-variant prompts from
 `data/canonical_math_paired.jsonl`, selected by its `train_ids.json` and `val_ids.json`.
 It then freezes the router and trains the dual prefix on that fold's
-`train.jsonl` and `val.jsonl` trajectories. Joint calibration is disabled in
-the K-fold entrypoint. Artifacts are saved separately:
+`train.jsonl` and `val.jsonl` trajectories. Artifacts are saved separately:
 
 ```text
 checkpoints/qwen_staged_kfold_seed42/fold_0/router/router_trainable.pt
@@ -401,6 +445,19 @@ also works when fewer than five GPUs are available:
 ```bash
 python scripts/train_kfold.py dspr --gpus 0,1,2,3,4
 ```
+
+All DSPR, SPT, and LoRA K-fold commands use `src/experiment_pipeline/kfold.py`
+for argument handling, command construction, GPU scheduling, progress bars,
+logs, and status manifests. Method-specific options preserve staged DSPR
+training, static-prompt SPT, and parameter-matched LoRA. Invoke them through
+`scripts/train_kfold.py METHOD`; method-specific legacy entrypoints are removed.
+
+Shared training callbacks, history logging, and update-step budgeting live in
+`src/utils/training.py`. The lightweight worker/parent training-event protocol
+and parser live in `src/utils/training_progress.py`; inference events use
+`src/utils/inference_progress.py`. All three trainers use these utilities
+without importing another method's training implementation. Existing progress
+event prefixes and log formats are unchanged.
 
 Use `--dry-run` to validate the fold files and print the exact child commands
 without loading a model. Outputs default to
@@ -532,6 +589,11 @@ python scripts/evaluate.py dspr aggregate \
 The aggregator requires exact fold-ID coverage and writes
 `oof_all_records.jsonl`, `oof_metrics.json`, `oof_metrics.csv`, and
 `oof_alpha_summary.csv` under the K-fold output root.
+All three methods use `src/experiment_pipeline/aggregate.py` for fold validation,
+OOF merging, accuracy slices, paired bootstrap intervals, and McNemar tests.
+DSPR additionally requires router alpha values and exports their statistics;
+SPT and LoRA select their own default paths and comparators. Invoke aggregation
+through `scripts/evaluate.py METHOD aggregate`; report field names are retained.
 The OOF problem count is inferred from the selected folds. Use `--folds 0` to
 report a single fold and `--expected-problems N` for an explicit count assertion.
 Canonical raw data and baseline files can cover a larger universe; metrics use
@@ -580,6 +642,12 @@ Held-out SPT/LoRA evaluation prints checkpoint selection and reference/model-loa
 stages, then shows a progress bar for each active fold with completed answers,
 problem ID, variant, and estimated remaining time. Inference failures print the
 last log lines; complete logs remain in `output/<run_name>/fold_N/inference.log`.
+All three methods use `src/experiment_pipeline/evaluate.py` for checkpoint
+selection, inference scheduling, progress reporting, and output validation.
+DSPR selects its prefix-stage checkpoint and requires router alpha values;
+SPT reads prompt dimensions from the checkpoint; LoRA loads its adapter directory.
+Run evaluation through `scripts/evaluate.py METHOD run`. The method-specific
+evaluate, aggregate, and K-fold compatibility modules have been removed.
 For an initial fold-0 run, use `FOLDS=0`. Set `STAGE=train` or `STAGE=eval` to
 run only that stage; `DRY_RUN=1` validates the training commands. `RUN_NAME`,
 `CHECKPOINT_ROOT`, and `OUTPUT_ROOT` can select separate experiment directories.

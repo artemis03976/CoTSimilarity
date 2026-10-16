@@ -28,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from utils.io import read_jsonl, write_json, write_jsonl  # noqa: E402
+from dspr_dataset.data_filter import CheapScreenStrategy  # noqa: E402
 
 
 def problem_id(row: dict[str, Any]) -> int:
@@ -35,41 +36,6 @@ def problem_id(row: dict[str, Any]) -> int:
         return int(row["problem_id"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"Invalid problem_id in input row: {row.get('problem_id')!r}") from exc
-
-
-def sample_stats(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize quality/correctness without re-running answer evaluation."""
-    valid = [sample for sample in samples if bool(sample.get("valid"))]
-    correct = [sample for sample in valid if bool(sample.get("correct"))]
-    unknown = [sample for sample in valid if sample.get("answer_correct") is None]
-    responses = {
-        " ".join(str(sample.get("response") or "").split())
-        for sample in valid
-    }
-    return {
-        "sample_count": len(samples),
-        "valid_count": len(valid),
-        "correct_count": len(correct),
-        "incorrect_count": len(valid) - len(correct) - len(unknown),
-        "answer_unknown_count": len(unknown),
-        "unique_valid_response_count": len(responses),
-    }
-
-
-def classify(original_valid: bool, simple_count: int, hard_count: int, minimum: int) -> str:
-    if not original_valid:
-        return "invalid_original"
-    simple_ok = simple_count >= minimum
-    hard_ok = hard_count >= minimum
-    if simple_ok and hard_ok:
-        return "pair_candidate"
-    if simple_ok:
-        return "simple_only"
-    if hard_ok:
-        return "hard_only"
-    if simple_count or hard_count:
-        return "insufficient_correct"
-    return "no_correct"
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,8 +68,7 @@ def main() -> int:
     input_path = Path(args.input)
     canonical_path = Path(args.canonical)
     output_dir = Path(args.output_dir)
-    if args.min_correct < 3:
-        raise ValueError("--min-correct must be at least 3")
+    screen_strategy = CheapScreenStrategy(min_correct_samples=args.min_correct)
 
     records = list(read_jsonl(input_path))
     if not records:
@@ -128,22 +93,21 @@ def main() -> int:
             raise ValueError(f"Duplicate problem_id {pid} in {input_path}")
         seen.add(pid)
 
-        original_stats = sample_stats(row.get("original", {}).get("samples", []))
-        simple_stats = sample_stats(row.get("simple", {}).get("samples", []))
-        hard_stats = sample_stats(row.get("hard", {}).get("samples", []))
-        original_valid = original_stats["valid_count"] > 0
+        screen = screen_strategy.evaluate(row)
+        original_stats = screen["original"]
+        simple_stats = screen["simple"]
+        hard_stats = screen["hard"]
+        original_valid = screen["original_valid"]
         simple_correct = simple_stats["correct_count"]
         hard_correct = hard_stats["correct_count"]
         source = source_by_id.get(pid, "unknown")
 
-        category = classify(original_valid, simple_correct, hard_correct, args.min_correct)
+        category = screen["category"]
         categories[category] += 1
         source_categories[source][category] += 1
         correct_histogram[f"simple={simple_correct},hard={hard_correct}"] += 1
         aggregate["original_valid"] += int(original_valid)
-        original_samples = row.get("original", {}).get("samples", [])
-        original_correct = bool(original_samples and original_samples[0].get("correct"))
-        aggregate["original_correct"] += int(original_valid and original_correct)
+        aggregate["original_correct"] += int(screen["original_correct"])
         aggregate["simple_valid_samples"] += simple_stats["valid_count"]
         aggregate["hard_valid_samples"] += hard_stats["valid_count"]
         aggregate["simple_correct_samples"] += simple_correct
@@ -163,11 +127,11 @@ def main() -> int:
             "original_valid": original_valid,
             "simple": simple_stats,
             "hard": hard_stats,
-            "pre_eligible": category == "pair_candidate",
+            "pre_eligible": screen["pre_eligible"],
         }
         summaries.append(summary)
 
-        if category == "pair_candidate":
+        if screen["pre_eligible"]:
             pre_eligible.append(row)
 
     output_dir.mkdir(parents=True, exist_ok=True)

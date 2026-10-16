@@ -1,9 +1,9 @@
 ﻿"""
-GED-based trajectory filtering for DSPR dataset construction.
+Shared pre-DAG screening and GED trajectory selection for DSPR datasets.
 """
 
 import json
-import argparse
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict
 
@@ -11,6 +11,157 @@ from typing import List, Dict
 VARIANTS = ("simple", "hard")
 DEFAULT_TOP_K = 5
 DEFAULT_MIN_GED_RANGE = 3.0
+
+
+@dataclass(frozen=True)
+class EligibilityStrategy:
+    """Keep correct candidates and require a minimum count.
+
+    This candidate qualification is independent of GED spread and ranking.
+    GED selection requires a score and excludes GED timeouts by default.
+    Pre-DAG screening explicitly disables these two unavailable conditions.
+    The default pipeline marks a variant eligible only after the range check
+    also passes; top-k selection never changes that eligibility label.
+    """
+
+    min_correct_samples: int = 1
+    score_field: str | None = 'ged'
+    exclude_timeouts: bool = True
+
+    def __post_init__(self):
+        if self.min_correct_samples < 1:
+            raise ValueError('min_correct_samples must be positive')
+        if self.score_field is not None and not self.score_field:
+            raise ValueError('score_field must be non-empty')
+
+    def candidates(self, samples: List[Dict]) -> List[Dict]:
+        return [
+            sample for sample in samples
+            if sample.get('correct')
+            and (self.score_field is None or sample.get(self.score_field) is not None)
+            and (not self.exclude_timeouts or not sample.get('timed_out', False))
+        ]
+
+    def accepts(self, candidates: List[Dict]) -> bool:
+        return self.accepts_count(len(candidates))
+
+    def accepts_count(self, count: int) -> bool:
+        return count >= self.min_correct_samples
+
+
+@dataclass(frozen=True)
+class CheapScreenStrategy:
+    """Require a valid original anchor and enough valid correct paths on both variants.
+
+    This pre-DAG screen neither requires original correctness nor applies GED
+    range/ranking. Records are summarized without modifying their contents.
+    """
+
+    min_correct_samples: int = 3
+
+    def __post_init__(self):
+        if self.min_correct_samples < 3:
+            raise ValueError('--min-correct must be at least 3')
+
+    @property
+    def eligibility(self) -> EligibilityStrategy:
+        return EligibilityStrategy(
+            self.min_correct_samples, score_field=None, exclude_timeouts=False,
+        )
+
+    def sample_stats(self, samples: List[Dict]) -> Dict:
+        """Summarize saved quality/correctness labels without answer evaluation."""
+        valid = [sample for sample in samples if bool(sample.get('valid'))]
+        correct = self.eligibility.candidates(valid)
+        unknown = [sample for sample in valid if sample.get('answer_correct') is None]
+        responses = {' '.join(str(sample.get('response') or '').split()) for sample in valid}
+        return {
+            'sample_count': len(samples),
+            'valid_count': len(valid),
+            'correct_count': len(correct),
+            'incorrect_count': len(valid) - len(correct) - len(unknown),
+            'answer_unknown_count': len(unknown),
+            'unique_valid_response_count': len(responses),
+        }
+
+    def classify(self, original_valid: bool, simple_count: int, hard_count: int) -> str:
+        if not original_valid:
+            return 'invalid_original'
+        simple_ok = self.eligibility.accepts_count(simple_count)
+        hard_ok = self.eligibility.accepts_count(hard_count)
+        if simple_ok and hard_ok:
+            return 'pair_candidate'
+        if simple_ok:
+            return 'simple_only'
+        if hard_ok:
+            return 'hard_only'
+        if simple_count or hard_count:
+            return 'insufficient_correct'
+        return 'no_correct'
+
+    def evaluate(self, record: Dict) -> Dict:
+        stats = {
+            variant: self.sample_stats(record.get(variant, {}).get('samples', []))
+            for variant in ('original', *VARIANTS)
+        }
+        original_valid = stats['original']['valid_count'] > 0
+        original_samples = record.get('original', {}).get('samples', [])
+        original_correct = bool(original_samples and original_samples[0].get('correct'))
+        category = self.classify(
+            original_valid, stats['simple']['correct_count'], stats['hard']['correct_count'],
+        )
+        return {
+            **stats,
+            'original_valid': original_valid,
+            'original_correct': original_valid and original_correct,
+            'category': category,
+            'pre_eligible': category == 'pair_candidate',
+        }
+
+
+@dataclass(frozen=True)
+class GEDRangeStrategy:
+    """Require max(score) - min(score) on the qualified candidates."""
+
+    min_ged_range: float = DEFAULT_MIN_GED_RANGE
+    score_field: str = 'ged'
+
+    def __post_init__(self):
+        if self.min_ged_range < 0:
+            raise ValueError('min_ged_range must be non-negative')
+        if not self.score_field:
+            raise ValueError('score_field must be non-empty')
+
+    def accepts(self, candidates: List[Dict]) -> bool:
+        if not candidates:
+            return False
+        scores = [sample[self.score_field] for sample in candidates]
+        return max(scores) - min(scores) >= self.min_ged_range
+
+
+@dataclass(frozen=True)
+class TopKStrategy:
+    """Select lowest-GED simple or highest-GED hard trajectories (default: 5)."""
+
+    top_k: int = DEFAULT_TOP_K
+    score_field: str = 'ged'
+
+    def __post_init__(self):
+        if self.top_k < 1:
+            raise ValueError('top_k must be positive')
+        if not self.score_field:
+            raise ValueError('score_field must be non-empty')
+
+    def select(self, candidates: List[Dict], variant: str) -> List[Dict]:
+        if variant not in VARIANTS:
+            raise ValueError(f'Unsupported variant: {variant}')
+        direction = 1 if variant == 'simple' else -1
+        return sorted(
+            candidates,
+            key=lambda sample: (
+                direction * sample[self.score_field], str(sample.get('sample_id', '')),
+            ),
+        )[:self.top_k]
 
 
 def load_ged_results(input_path: str) -> List[Dict]:
@@ -29,13 +180,7 @@ def valid_correct_samples(
 ) -> List[Dict]:
     """Return correct, non-timeout samples with a usable selection score."""
 
-    return [
-        sample
-        for sample in samples
-        if sample.get('correct')
-        and sample.get(score_field) is not None
-        and not sample.get('timed_out', False)
-    ]
+    return EligibilityStrategy(score_field=score_field).candidates(samples)
 
 
 def build_eligibility_payload(
@@ -88,41 +233,25 @@ def build_eligibility_payload(
     return payload
 
 
-def filter_trajectories_by_ged(
+def select_trajectories_by_ged(
     all_results: List[Dict],
-    output_path: str,
     top_k: int = DEFAULT_TOP_K,
     min_ged_range: float = DEFAULT_MIN_GED_RANGE,
-    eligibility_output_path: str | None = None,
     model_name: str | None = None,
     source_file: str | None = None,
     score_field: str = 'ged',
     min_correct_samples: int = 1,
+    verbose: bool = False,
 ) -> Dict:
-    """
-    Filter trajectories using GED to create D_reuse and D_adapt datasets.
+    """Compose candidate eligibility, GED min-max screening, then top-k selection.
 
-    Args:
-        all_results: All GED analysis results
-        output_path: Path to output filtered dataset
-        top_k: Number of top samples to select per problem-variant (default: 5)
-        min_ged_range: Minimum within-group GED range (default: 3.0)
-        score_field: Field used for range computation and ranking. The legacy
-            default is ``ged``; use ``ged_normalized`` for scale-free curation.
-        min_correct_samples: Minimum number of correct, non-timeout samples
-            required before applying the range test.
-        eligibility_output_path: Optional k-fold eligibility manifest output
+    This is the shared, in-memory implementation for dataset export and k-fold
+    construction. No files are written here. ``ged`` defaults retain the legacy
+    protocol; normalized GED runs specify their score field and thresholds.
     """
-    if top_k < 1:
-        raise ValueError('top_k must be positive')
-    if min_ged_range < 0:
-        raise ValueError('min_ged_range must be non-negative')
-    if not score_field:
-        raise ValueError('score_field must be non-empty')
-    if min_correct_samples < 1:
-        raise ValueError('min_correct_samples must be positive')
-
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    eligibility_strategy = EligibilityStrategy(min_correct_samples, score_field)
+    range_strategy = GEDRangeStrategy(min_ged_range, score_field)
+    top_k_strategy = TopKStrategy(top_k, score_field)
 
     # Group by problem_id and variant
     problems = {}
@@ -148,49 +277,35 @@ def filter_trajectories_by_ged(
         stats['total_problem_variants'] += 1
 
         # Step 1: keep correct, non-timeout trajectories with a GED value.
-        correct_samples = valid_correct_samples(samples, score_field=score_field)
+        correct_samples = eligibility_strategy.candidates(samples)
 
         if not correct_samples:
             stats['skipped_no_correct'] += 1
-            print(f"  Problem {problem_id} {variant}: No correct samples, skipped")
+            if verbose:
+                print(f"  Problem {problem_id} {variant}: No correct samples, skipped")
             continue
 
-        if len(correct_samples) < min_correct_samples:
+        if not eligibility_strategy.accepts(correct_samples):
             stats['skipped_insufficient_correct'] += 1
-            print(
-                f"  Problem {problem_id} {variant}: Only "
-                f"{len(correct_samples)} correct samples "
-                f"(< {min_correct_samples}), skipped"
-            )
+            if verbose:
+                print(
+                    f"  Problem {problem_id} {variant}: Only "
+                    f"{len(correct_samples)} correct samples "
+                    f"(< {min_correct_samples}), skipped"
+                )
             continue
 
         # Step 2: require the shared within-group GED range threshold.
-        scores = [s[score_field] for s in correct_samples]
-        ged_range = max(scores) - min(scores)
-
-        if ged_range < min_ged_range:
+        if not range_strategy.accepts(correct_samples):
             stats['skipped_low_ged_range'] += 1
-            print(
-                f"  Problem {problem_id} {variant}: Low GED range "
-                f"({ged_range:.2f} < {min_ged_range:.2f}), skipped"
-            )
+            if verbose:
+                print(f"  Problem {problem_id} {variant}: Low GED range, skipped")
             continue
 
         eligible[variant].append(problem_id)
 
         # Step 3: Relative ranking - select top-k
-        if variant == 'simple':
-            sorted_samples = sorted(
-                correct_samples,
-                key=lambda x: (x[score_field], str(x.get('sample_id', ''))),
-            )
-        else:
-            sorted_samples = sorted(
-                correct_samples,
-                key=lambda x: (-x[score_field], str(x.get('sample_id', ''))),
-            )
-
-        selected = sorted_samples[:top_k]
+        selected = top_k_strategy.select(correct_samples, variant)
 
         for sample in selected:
             dspr_data.append({
@@ -208,10 +323,6 @@ def filter_trajectories_by_ged(
             })
             stats['selected'] += 1
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for item in dspr_data:
-            f.write(json.dumps(item, ensure_ascii=False) + '\n')
-
     eligibility_payload = build_eligibility_payload(
         all_results,
         eligible,
@@ -222,15 +333,98 @@ def filter_trajectories_by_ged(
         model_name=model_name,
         source_file=source_file,
     )
+    return {
+        'stats': stats,
+        'eligibility': eligibility_payload,
+        'selected': dspr_data,
+    }
+
+
+def load_filtered_trajectories(
+    eligibility_path: str | Path,
+    ged_results_path: str | Path | None = None,
+) -> Dict:
+    """Apply a saved protocol to its GED source; never expand a mask to raw samples.
+
+    The saved IDs are checked against recomputed eligibility, rather than used
+    as a second filter. Callers receive the same selected records as exports.
+    """
+    eligibility_path = Path(eligibility_path)
+    payload = json.loads(eligibility_path.read_text(encoding='utf-8'))
+    required = ('score_field', 'ged_range_threshold', 'min_correct_samples', 'top_k')
+    if not isinstance(payload, dict) or any(key not in payload for key in required):
+        raise ValueError(f'Eligibility manifest must specify the full filtering protocol: {eligibility_path}')
+    if ged_results_path is None:
+        ged_results_path = payload.get('source', {}).get('ged_results')
+        if not ged_results_path:
+            sources = payload.get('source_files', [])
+            if len(sources) == 1:
+                ged_results_path = sources[0]
+    if not ged_results_path:
+        raise ValueError('GED source is missing; pass --ged-results or record it in the eligibility manifest')
+    source_path = Path(ged_results_path)
+    if not source_path.is_absolute() and not source_path.is_file():
+        for base in (eligibility_path.parent, Path(__file__).resolve().parents[2]):
+            candidate = base / source_path
+            if candidate.is_file():
+                source_path = candidate
+                break
+    result = select_trajectories_by_ged(
+        load_ged_results(str(source_path)),
+        top_k=payload['top_k'],
+        min_ged_range=payload['ged_range_threshold'],
+        score_field=payload['score_field'],
+        min_correct_samples=payload['min_correct_samples'],
+        model_name=payload.get('model'),
+        source_file=str(source_path),
+    )
+    saved_ids = payload.get('problem_ids', {})
+    for variant in VARIANTS:
+        if not isinstance(saved_ids.get(variant), list):
+            raise ValueError(f'Eligibility IDs for {variant} must be a list: {eligibility_path}')
+        expected = {int(pid) for pid in saved_ids[variant]}
+        actual = set(result['eligibility']['problem_ids'][variant])
+        if expected != actual:
+            raise ValueError(
+                f'Eligibility manifest disagrees with GED filtering for {variant}: '
+                f'manifest-only IDs {sorted(expected - actual)}, '
+                f'GED-only IDs {sorted(actual - expected)}'
+            )
+    result['source_file'] = str(source_path)
+    return result
+
+
+def filter_trajectories_by_ged(
+    all_results: List[Dict],
+    output_path: str,
+    top_k: int = DEFAULT_TOP_K,
+    min_ged_range: float = DEFAULT_MIN_GED_RANGE,
+    eligibility_output_path: str | None = None,
+    model_name: str | None = None,
+    source_file: str | None = None,
+    score_field: str = 'ged',
+    min_correct_samples: int = 1,
+) -> Dict:
+    """Write the shared selector's trajectories and optional eligibility manifest."""
+    result = select_trajectories_by_ged(
+        all_results, top_k=top_k, min_ged_range=min_ged_range,
+        model_name=model_name, source_file=source_file, score_field=score_field,
+        min_correct_samples=min_correct_samples, verbose=True,
+    )
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        for item in result['selected']:
+            f.write(json.dumps(item, ensure_ascii=False) + '\n')
     if eligibility_output_path:
         eligibility_path = Path(eligibility_output_path)
         eligibility_path.parent.mkdir(parents=True, exist_ok=True)
         eligibility_path.write_text(
-            json.dumps(eligibility_payload, ensure_ascii=False, indent=2) + '\n',
+            json.dumps(result['eligibility'], ensure_ascii=False, indent=2) + '\n',
             encoding='utf-8',
         )
 
-    print(f"\n=== DSPR Dataset Statistics ===")
+    stats = result['stats']
+    print("\n=== DSPR Dataset Statistics ===")
     print(f"Total problem variants: {stats['total_problem_variants']}")
     print(f"Skipped (no correct): {stats['skipped_no_correct']}")
     print(
@@ -246,83 +440,4 @@ def filter_trajectories_by_ged(
     if eligibility_output_path:
         print(f"Eligibility: {eligibility_output_path}")
 
-    return {
-        'stats': stats,
-        'eligibility': eligibility_payload,
-        'selected': dspr_data,
-    }
-
-
-def main():
-    parser = argparse.ArgumentParser(description='Filter GED results to create DSPR training dataset')
-    parser.add_argument('--input', required=True, help='Input JSONL file with GED results')
-    parser.add_argument('--output', help='Output JSONL file (default: data/dspr_dataset.jsonl)')
-    parser.add_argument(
-        '--top-k',
-        type=int,
-        default=DEFAULT_TOP_K,
-        help=f'Top-k samples per problem-variant (default: {DEFAULT_TOP_K})',
-    )
-    parser.add_argument(
-        '--min-ged-range',
-        '--min-variance',
-        dest='min_ged_range',
-        type=float,
-        default=DEFAULT_MIN_GED_RANGE,
-        help=(
-            'Minimum range of correct, non-timeout GEDs; --min-variance is a '
-            f'legacy alias (default: {DEFAULT_MIN_GED_RANGE:g})'
-        ),
-    )
-    parser.add_argument(
-        '--score-field',
-        choices=('ged', 'ged_normalized'),
-        default='ged',
-        help=(
-            'Field used for within-problem range and ranking. Use '
-            'ged_normalized for scale-free curation (default: ged).'
-        ),
-    )
-    parser.add_argument(
-        '--min-correct-samples',
-        type=int,
-        default=1,
-        help=(
-            'Minimum correct, non-timeout trajectories per problem-variant '
-            'before the range test (default: 1).'
-        ),
-    )
-    parser.add_argument(
-        '--eligibility-output',
-        help='Optional eligibility JSON used by k-fold construction',
-    )
-    parser.add_argument('--model-name', help='Optional model label stored in eligibility JSON')
-    args = parser.parse_args()
-
-    output_path = args.output or 'data/dspr_dataset.jsonl'
-
-    print(f"Loading GED results from {args.input}...")
-    all_results = load_ged_results(args.input)
-    print(f"Loaded {len(all_results)} samples")
-
-    print(
-        f"\nFiltering with top_k={args.top_k}, "
-        f"score_field={args.score_field}, "
-        f"min_range={args.min_ged_range}, "
-        f"min_correct_samples={args.min_correct_samples}..."
-    )
-    filter_trajectories_by_ged(
-        all_results,
-        output_path,
-        top_k=args.top_k,
-        min_ged_range=args.min_ged_range,
-        score_field=args.score_field,
-        min_correct_samples=args.min_correct_samples,
-        eligibility_output_path=args.eligibility_output,
-        model_name=args.model_name,
-        source_file=args.input,
-    )
-
-
-if __name__ == '__main__':
-    main()
+    return result

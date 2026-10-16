@@ -28,18 +28,14 @@ def main() -> int:
         return 0
 
     method = sys.argv[1].lower()
-    if method == "dspr":
-        from experiment_pipeline.kfold_dspr import main as method_main
-    elif method == "spt":
-        from experiment_pipeline.kfold_spt import main as method_main
-    elif method == "lora":
-        from experiment_pipeline.kfold_lora import main as method_main
-    else:
+    if method not in {"dspr", "spt", "lora"}:
         print(f"Unknown K-fold method: {method}\n\n{_usage()}", file=sys.stderr)
         return 2
 
+    from experiment_pipeline.kfold import main as method_main
+
     sys.argv = [sys.argv[0], *sys.argv[2:]]
-    return method_main()
+    return method_main(method)
 
 
 if __name__ == "__main__":

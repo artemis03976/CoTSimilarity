@@ -1,9 +1,21 @@
-from .data_filter import filter_trajectories_by_ged, load_ged_results
+from .data_filter import (
+    CheapScreenStrategy,
+    EligibilityStrategy,
+    GEDRangeStrategy,
+    TopKStrategy,
+    filter_trajectories_by_ged,
+    load_filtered_trajectories,
+    load_ged_results,
+    select_trajectories_by_ged,
+)
 
 __all__ = [
-    "dump_jsonl",
+    "CheapScreenStrategy",
+    "EligibilityStrategy",
+    "GEDRangeStrategy",
+    "TopKStrategy",
     "filter_trajectories_by_ged",
+    "load_filtered_trajectories",
     "load_ged_results",
-    "load_jsonl",
-    "variant_stats",
+    "select_trajectories_by_ged",
 ]
