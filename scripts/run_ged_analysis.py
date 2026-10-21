@@ -5,6 +5,7 @@ import argparse
 import multiprocessing as mp
 import math
 import sys
+from collections import Counter
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +18,7 @@ from data_analysis.measurement.checkpoints import load_problem_checkpoint, probl
 from data_analysis.measurement.analysis import analyze_problem  # noqa: E402
 from data_analysis.measurement.export import write_results_to_csv  # noqa: E402
 from data_analysis.graph.cache import build_graph_cache, load_graph_cache  # noqa: E402
-from data_analysis.records import load_correctness_data, load_dag_records  # noqa: E402
+from data_analysis.records import iter_samples, load_correctness_data, load_dag_records  # noqa: E402
 from data_analysis.metrics.text import DEFAULT_TEXT_SIMILARITY_MODEL, TextSimilarityEncoder  # noqa: E402
 
 
@@ -36,6 +37,7 @@ def _init_worker(original_records, variant_records, correctness_data, options):
 
 def _run_problem(problem_id):
     stats = {}
+    failures = []
     try:
         results = analyze_problem(
             problem_id,
@@ -43,13 +45,28 @@ def _run_problem(problem_id):
             variant_records=_WORKER_STATE["variant_records"],
             correctness_data=_WORKER_STATE["correctness_data"],
             stats=stats,
+            failures=failures,
             **_WORKER_STATE["options"],
         )
     except Exception as exc:
-        stats["problem_error"] = 1
+        stats = {"problem_error": 1}
         print(f"Warning: Problem {problem_id} failed: {exc}")
         results = []
-    return problem_id, results, stats
+        failures = []
+        problem = _WORKER_STATE['correctness_data'].get(problem_id, {})
+        for variant in ('simple', 'hard'):
+            samples = sorted(
+                iter_samples([dict(problem, problem_id=problem_id)], [variant]),
+                key=lambda item: item[0].sample_index,
+            )[:_WORKER_STATE['options']['num_samples']]
+            for key, _, sample in samples:
+                failures.append({
+                    'problem_id': problem_id, 'sample_id': str(key), 'variant': variant,
+                    'reference_sample_id': f'{problem_id}_original_0',
+                    'status': 'problem_error', 'error': str(exc), 'kept': False,
+                    'correct': sample.get('correct'), 'valid': sample.get('valid'),
+                })
+    return problem_id, results, stats, failures
 
 
 def merge_stats(target, source):
@@ -362,12 +379,14 @@ def main(argv=None):
     signature = fingerprint(identity)
     checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else results_path.parent / f"{results_path.stem}_checkpoints"
     results = []
+    failures = []
+    failures_path = results_path.with_suffix('.failures.jsonl')
     completed_ids = set()
     failed_ids = set()
     run_stats = {}
     if not args.no_checkpoint and args.resume:
         for problem_id in problem_ids:
-            checkpoint = load_problem_checkpoint(checkpoint_dir, problem_id, signature)
+            checkpoint = load_problem_checkpoint(checkpoint_dir, problem_id, signature, failures=failures)
             if checkpoint is not None:
                 rows, stats = checkpoint
                 results.extend(rows)
@@ -381,15 +400,16 @@ def main(argv=None):
         print("Warning: fork is unavailable; falling back to serial GED analysis.")
         workers = 1
 
-    def consume(problem_id, rows, stats):
+    def consume(problem_id, rows, stats, problem_failures):
         results.extend(rows)
+        failures.extend(problem_failures)
         merge_stats(run_stats, stats)
         if problem_status(rows, stats) == "failed":
             failed_ids.add(problem_id)
         else:
             completed_ids.add(problem_id)
         if not args.no_checkpoint:
-            write_problem_checkpoint(checkpoint_dir, problem_id, rows, stats, signature)
+            write_problem_checkpoint(checkpoint_dir, problem_id, rows, stats, signature, failures=problem_failures)
         if args.save_csv and rows:
             write_results_to_csv(rows, problem_id, str(output_root / "similarity_check"))
         print(f"Processed problem {problem_id} ({len(completed_ids) + len(failed_ids)}/{len(problem_ids)}); kept {len(rows)} rows")
@@ -402,13 +422,16 @@ def main(argv=None):
                 consume(*_run_problem(problem_id))
         else:
             with mp.get_context("fork").Pool(workers, initializer=_init_worker, initargs=state) as pool:
-                for problem_id, rows, stats in pool.imap_unordered(_run_problem, pending):
-                    consume(problem_id, rows, stats)
+                for item in pool.imap_unordered(_run_problem, pending):
+                    consume(*item)
     finally:
         _WORKER_STATE.clear()
 
     results.sort(key=lambda item: (item.get("problem_id", 0), item.get("variant", ""), item.get("sample_id", "")))
     write_jsonl(results_path, results)
+    failures.sort(key=lambda item: (item['problem_id'], item['variant'], item['sample_id']))
+    write_jsonl(failures_path, failures)
+    failure_counts = dict(Counter(item['status'] for item in failures))
     write_json(results_path.with_suffix(".config.json"), {
         "signature": signature,
         "inputs": identity,
@@ -424,10 +447,13 @@ def main(argv=None):
         "completed_problem_ids": sorted(completed_ids),
         "failed_problem_ids": sorted(failed_ids),
         "run_stats": run_stats,
+        "failure_details": file_identity(failures_path),
+        "failure_counts": failure_counts,
         "graph_cache_metadata": cache_metadata,
     })
     print(f"All GED results saved to {results_path}; kept {len(results)} rows")
     print(f"GED run statistics: {run_stats}")
+    print(f"Failure details saved to {failures_path}; {len(failures)} rows: {failure_counts}")
 
 
 if __name__ == "__main__":

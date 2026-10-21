@@ -495,6 +495,8 @@ def parse_args(method: str, argv: list[str] | None = None) -> argparse.Namespace
             "--dspr", default="output/qwen_staged_kfold_seed42/oof_all_records.jsonl",
             help="DSPR OOF comparator; use an empty string to skip",
         )
+    if method == "spt":
+        parser.add_argument("--lora", default=None, help="Optional LoRA OOF comparator")
     parser.add_argument("--expected-samples", type=int, default=1, help="Use 0 to accept any positive sample count")
     parser.add_argument("--folds", nargs="+", type=int, default=None, help="Selected folds; default: all five")
     parser.add_argument("--expected-problems", type=int, default=None)
@@ -556,7 +558,10 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
     metrics = build_metrics(merged, all_ids, eligible, method)
     comparator_paths = {
         name: resolve_path(value)
-        for name, value in (("base", args.base), ("dspr", getattr(args, "dspr", None)))
+        for name, value in (
+            ("base", args.base), ("dspr", getattr(args, "dspr", None)),
+            ("lora", getattr(args, "lora", None)),
+        )
         if value
     }
     comparisons = {}

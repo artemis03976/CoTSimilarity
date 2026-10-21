@@ -311,6 +311,7 @@ def compute_ged_similarity(
     roots = (0, 0) if 0 in G1 and 0 in G2 else None
 
     computation_start = time.perf_counter()
+    error = None
     try:
         ged, timed_out, elapsed = _run_ged_with_timeout(
             lambda: nx.graph_edit_distance(
@@ -325,6 +326,7 @@ def compute_ged_similarity(
             hard_timeout,
         )
     except Exception as e:
+        error = str(e)
         logger.warning(f"GED computation error: {e}")
         elapsed = time.perf_counter() - computation_start
 
@@ -337,6 +339,7 @@ def compute_ged_similarity(
 
     result = {
         "ged": ged,
+        "error": error,
         "timed_out": timed_out,
         "status": status,
         "approximate": bool(timed_out and ged is not None),

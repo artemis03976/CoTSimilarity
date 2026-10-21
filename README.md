@@ -658,7 +658,7 @@ The individual entrypoints are also available:
 ```bash
 python scripts/train_kfold.py spt --gpus 0
 python scripts/evaluate.py spt run --gpus 0
-python scripts/evaluate.py spt aggregate
+python scripts/evaluate.py spt aggregate --lora output/qwen_lora_qv_r1_seed42/oof_all_records.jsonl
 
 python scripts/train_kfold.py lora --gpus 0
 python scripts/evaluate.py lora run --gpus 0

@@ -58,6 +58,12 @@ in `utils/visualization/dag_records.py` and use the same annotation validator.
   sample. Preparing and merging batch files requires no API credentials.
 - `python scripts/run_ged_analysis.py ...`: compute GED with the existing flags.
 
+GED also writes `<results-stem>.failures.jsonl` beside the result JSONL. Each
+entry identifies the problem, variant, sample and reference, failure reason,
+graph sizes, limits and elapsed time when available. Missing DAGs are included;
+`kept=true` identifies approximate timeout values retained with `--keep-timeouts`.
+Failure details are checkpointed and restored on resume, with counts in the run config.
+
 Known provider expansions of the `Conclude` tag, such as `Draw` and `Draw
 intermediate and final conclusions`, are normalized to `Conclude` by the shared
 parser. Existing normal-mode failures can be recovered without new API calls

@@ -67,6 +67,7 @@ def analyze_problem(
     hard_timeout: bool = True,
     skip_timeouts: bool = True,
     stats: Optional[Dict[str, int]] = None,
+    failures: Optional[List[Dict]] = None,
 ) -> List[Dict]:
     """Analyze GED for one problem's simple/hard variants.
 
@@ -77,8 +78,59 @@ def analyze_problem(
 
     if stats is None:
         stats = {}
+    if failures is None:
+        failures = []
+
+    problem_data = correctness_data.get(problem_id, {})
+    variant_samples = {
+        variant: get_variant_samples(variant_records, problem_id, variant, num_samples)
+        for variant in ('simple', 'hard')
+    }
+    labels = {
+        variant: {
+            str(key): sample
+            for key, _, sample in iter_samples(
+                [{'problem_id': problem_id, variant: problem_data.get(variant, {})}], [variant]
+            )
+        }
+        for variant in ('simple', 'hard')
+    }
+    # Include input samples whose DAG is missing; iterating only loaded graphs
+    # would silently omit these comparisons from the failure report.
+    expected_ids = {
+        variant: sorted(values, key=lambda sid: int(sid.rsplit('_', 1)[-1]))[:num_samples]
+        for variant, values in labels.items()
+    }
 
     original_graph = None
+
+    def record_failure(variant, sample_id, status, error=None, graph=None, result=None, kept=False):
+        result = result or {}
+        label = labels[variant].get(sample_id, {})
+        failures.append({
+            'problem_id': problem_id,
+            'sample_id': sample_id,
+            'variant': variant,
+            'reference_sample_id': f'{problem_id}_original_0',
+            'status': status,
+            'error': error or result.get('error'),
+            'kept': kept,
+            'correct': label.get('correct'),
+            'valid': label.get('valid'),
+            'original_nodes': len(original_graph) if original_graph is not None else None,
+            'original_edges': original_graph.number_of_edges() if original_graph is not None else None,
+            'variant_nodes': len(graph) if graph is not None else None,
+            'variant_edges': graph.number_of_edges() if graph is not None else None,
+            'max_ged_nodes': max_ged_nodes,
+            'max_ged_edges': max_ged_edges,
+            'ged_timeout': ged_timeout,
+            'elapsed_seconds': result.get('elapsed_seconds'),
+            'timed_out': result.get('timed_out', False),
+            'approximate': result.get('approximate', False),
+            'ged': result.get('ged'),
+            'ged_normalizer': result.get('ged_normalizer'),
+        })
+
     if original_records:
         original_graph = get_original_graph(original_records, problem_id)
     if original_graph is None:
@@ -88,6 +140,10 @@ def analyze_problem(
 
     if not original_graph:
         stats["missing_original"] = stats.get("missing_original", 0) + 1
+        for variant, samples in variant_samples.items():
+            sample_ids = set(expected_ids[variant]) | {s['custom_id'] for s in samples}
+            for sample_id in sorted(sample_ids):
+                record_failure(variant, sample_id, 'missing_original', 'Original reference DAG is unavailable')
         print(f"No original graph found for problem {problem_id}")
         return []
 
@@ -98,21 +154,18 @@ def analyze_problem(
             stats["original_compression_error"] = stats.get("original_compression_error", 0) + 1
             print(f"Warning: Compression failed for {problem_id}_original, using uncompressed graph: {exc}")
 
-    problem_data = correctness_data.get(problem_id, {})
-    variant_samples = {}
-    for variant in ['simple', 'hard']:
-        variant_samples[variant] = get_variant_samples(variant_records, problem_id, variant, num_samples)
-
     total_samples = sum(len(samples) for samples in variant_samples.values())
     processed_samples = 0
     results = []
     for variant in ['simple', 'hard']:
         samples = variant_samples[variant]
         variant_info = problem_data.get(variant, {})
-        correct_labels = {
-            str(key): sample
-            for key, _, sample in iter_samples([{'problem_id': problem_id, variant: variant_info}], [variant])
-        }
+        correct_labels = labels[variant]
+        available_ids = {s['custom_id'] for s in samples}
+        for sample_id in expected_ids[variant]:
+            if sample_id not in available_ids:
+                stats['missing_variant'] = stats.get('missing_variant', 0) + 1
+                record_failure(variant, sample_id, 'missing_variant', 'Variant DAG is unavailable')
 
         for sample_idx, sample in enumerate(samples, start=1):
             processed_samples += 1
@@ -128,6 +181,7 @@ def analyze_problem(
                     sample_graph_compressed, _ = compress_dag_combined(sample_graph)
             except Exception as exc:
                 stats["graph_error"] = stats.get("graph_error", 0) + 1
+                record_failure(variant, sample['custom_id'], 'graph_error', str(exc))
                 print(f"Warning: Skip {sample['custom_id']} due to graph build/compression error: {exc}")
                 continue
 
@@ -144,6 +198,7 @@ def analyze_problem(
                 )
             except Exception as exc:
                 stats["error"] = stats.get("error", 0) + 1
+                record_failure(variant, sample['custom_id'], 'error', str(exc), graph=sample_graph_compressed)
                 print(f"Warning: Skip {sample['custom_id']} due to GED computation error: {exc}")
                 continue
 
@@ -153,23 +208,27 @@ def analyze_problem(
                 if status == "timeout" and not skip_timeouts and ged_result.get("ged") is not None:
                     pass
                 else:
+                    record_failure(variant, sample['custom_id'], status, graph=sample_graph_compressed, result=ged_result)
                     print(f"Warning: Skip {sample['custom_id']} because GED status is {status}")
                     continue
 
             if ged_result.get('ged') is None:
                 stats["invalid"] = stats.get("invalid", 0) + 1
+                record_failure(variant, sample['custom_id'], 'invalid', 'GED returned no distance', graph=sample_graph_compressed, result=ged_result)
                 print(f"Warning: Skip {sample['custom_id']} because GED result is invalid")
                 continue
 
             label = correct_labels.get(sample['custom_id'])
             if label is None:
                 stats['sample_mismatch'] = stats.get('sample_mismatch', 0) + 1
+                record_failure(variant, sample['custom_id'], 'sample_mismatch', 'Correctness sample is missing', graph=sample_graph_compressed, result=ged_result)
                 print(f"Warning: Missing correctness sample {sample['custom_id']}")
                 continue
             response = label.get('response', '')
             expected_hash = sample_graph_compressed.graph.get('response_hash')
             if expected_hash and expected_hash != response_hash(response):
                 stats['sample_mismatch'] = stats.get('sample_mismatch', 0) + 1
+                record_failure(variant, sample['custom_id'], 'sample_mismatch', 'DAG response differs from correctness input', graph=sample_graph_compressed, result=ged_result)
                 print(f"Warning: Response changed for sample {sample['custom_id']}")
                 continue
             correct = label.get('correct')
@@ -193,5 +252,7 @@ def analyze_problem(
                 'ged_max_edges': ged_result.get('max_edges'),
             })
             stats['kept'] = stats.get('kept', 0) + 1
+            if status != 'ok':
+                record_failure(variant, sample['custom_id'], status, graph=sample_graph_compressed, result=ged_result, kept=True)
 
     return results
