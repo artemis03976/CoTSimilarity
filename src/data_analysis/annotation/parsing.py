@@ -4,6 +4,7 @@ import json
 import logging
 
 from ..schemas import DAGNode, Step, VALID_TAGS
+from .protocols import response_content
 
 
 logger = logging.getLogger(__name__)
@@ -82,19 +83,25 @@ def parse_dag_response(text: str, steps: list[Step] | None = None) -> list[DAGNo
     return validate_dag(normalize_macro_action_tags(json.loads(text)), steps)
 
 
-def batch_response_content(record: dict) -> str:
+def batch_response_body(record: dict) -> dict:
     if record.get("error"):
         raise ValueError(f"Provider error: {record['error']}")
+    if "result" in record:  # Anthropic Message Batches result JSONL
+        result = record["result"] or {}
+        if result.get("type") != "succeeded":
+            raise ValueError(f"Provider error: {result}")
+        return result.get("message") or {}
     response = record.get("response") or {}
     if not isinstance(response, dict):
         raise ValueError("Invalid batch response envelope")
     status = response.get("status_code", 200)
     if status != 200:
         raise ValueError(f"Provider HTTP status: {status}")
-    try:
-        return response["body"]["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ValueError("Missing batch response content") from exc
+    return response.get("body") or {}
+
+
+def batch_response_content(record: dict) -> str:
+    return response_content(batch_response_body(record))[0]
 
 
 def extract_dag_from_batch_response(record: dict):

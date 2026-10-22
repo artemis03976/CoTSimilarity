@@ -20,10 +20,11 @@ from typing import Dict, List, Optional
 
 from .client import LLMClient, RateLimiter
 from ..config import LLMConfig
-from utils.artifacts import file_identity, fingerprint, response_hash
+from utils.artifacts import fingerprint, response_hash
 from utils.io import read_manifest, write_json, write_jsonl
 from ..records import sample_key
 from .parsing import validate_dag
+from .protocols import annotation_settings
 from ..schemas import VARIANTS
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,7 @@ def _analyze_task(
             dag, error = None, f"Unexpected error: {exc}"
         for api_attempt, record in enumerate(client.take_raw_response_records()):
             raw_responses.append({
+                **record,
                 "sample_id": task.sample_id,
                 "outer_retry": retry_index,
                 "api_attempt": record.get("api_attempt", api_attempt),
@@ -179,16 +181,13 @@ def process_normal_mode(
         {"sample_id": task.sample_id, "problem": task.problem, "steps": task.steps, "response_hash": task.response_hash}
         for task in tasks
     ], key=lambda value: value["sample_id"])
-    settings = {
-        "inputs": fingerprint(inputs),
-        "provider": config.provider, "model": config.model, "base_url": config.base_url,
-        "temperature": config.temperature, "top_p": config.top_p, "max_tokens": config.max_tokens,
-        "prompt": file_identity(Path(__file__).with_name("prompts.py"))["sha256"],
-        "parser": file_identity(Path(__file__).with_name("parsing.py"))["sha256"],
-    }
+    settings = {"inputs": fingerprint(inputs), **annotation_settings(config)}
     signature = fingerprint(settings)
     restored = {}
     tasks_by_id = {task.sample_id: task for task in tasks}
+    previous = read_manifest(manifest_file)
+    if previous and (previous.get("provider"), previous.get("model")) != (config.provider, config.model):
+        raise ValueError("Output directory belongs to another annotator; use a separate --output-dir")
     if resume and checkpoint_file.is_file():
         if read_manifest(manifest_file).get("signature") != signature:
             raise ValueError("DAG checkpoint inputs or annotation settings changed; run without --resume")
@@ -250,7 +249,11 @@ def process_normal_mode(
                 "error": result.error,
                 "metadata": {
                     "analyzed_at": datetime.now().isoformat(), "model": config.model,
+                    "provider": config.provider, "annotation_signature": signature,
                     "processing_time_ms": result.processing_time_ms,
+                    **({key: result.raw_responses[-1].get(key) for key in
+                        ("response_model", "request_id", "usage", "finish_reason")}
+                       if result.raw_responses else {}),
                 },
             }
             for record in result.raw_responses:
@@ -276,6 +279,10 @@ def process_normal_mode(
                     )
                     + "\n"
                 )
+            completed = total_processed + total_failed
+            if completed % 10 == 0 or completed == len(tasks):
+                logger.info("DAG progress: %s/%s; succeeded=%s failed=%s",
+                            completed, len(tasks), total_processed, total_failed)
 
     write_jsonl(output_file, enriched_records)
     write_jsonl(output_dir / "analyzed_records.jsonl", enriched_records)

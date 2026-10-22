@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Normal-mode DAG annotation
+# ANNOTATOR=deepseek|gpt|haiku|qwen|volcengine; qwen prepares a Bailian batch file.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,32 +7,19 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
 PYTHON="${PYTHON:-python}"
-PROVIDER="${PROVIDER:-volcengine}"
-MODEL="${MODEL:-${LLM_MODEL:-ep-20261001103240-d9m5m}}"
+ANNOTATOR="${ANNOTATOR:-deepseek}"
 RAW_INPUT="${RAW_INPUT:-output/qwen-2.5/base/all_records.jsonl}"
-OUTPUT_DIR="${OUTPUT_DIR:-output/qwen-2.5/base/dag_analysis}"
-CONCURRENCY="${CONCURRENCY:-8}"
-MAX_RETRIES="${MAX_RETRIES:-3}"
-
-if [[ ! -f "${RAW_INPUT}" ]]; then
-  echo "Input JSONL does not exist: ${RAW_INPUT}" >&2
-  exit 1
+args=(--annotator "${ANNOTATOR}"
+      --concurrency "${CONCURRENCY:-8}" --max-retries "${MAX_RETRIES:-3}")
+if [[ -n "${SEGMENTED_INPUT:-}" ]]; then
+  args+=(--input "${SEGMENTED_INPUT}")
+else
+  args+=(--raw-input "${RAW_INPUT}")
 fi
+[[ -n "${MODE:-}" ]] && args+=(--mode "${MODE}")
+[[ -n "${OUTPUT_DIR:-}" ]] && args+=(--output-dir "${OUTPUT_DIR}")
+[[ -n "${MODEL:-}" ]] && args+=(--model "${MODEL}")
+[[ -n "${PROVIDER:-}" ]] && args+=(--provider "${PROVIDER}")
 
-echo "Provider: ${PROVIDER}"
-echo "Model: ${MODEL}"
-echo "Input: ${RAW_INPUT}"
-echo "Output: ${OUTPUT_DIR}"
-echo "Concurrency: ${CONCURRENCY}; retries per chain: ${MAX_RETRIES}"
-
-# Credentials and base URL are loaded from .env by the Python configuration.
-exec "${PYTHON}" "${SCRIPT_DIR}/run_dag_analysis.py" \
-  --mode normal \
-  --raw-input "${RAW_INPUT}" \
-  --output-dir "${OUTPUT_DIR}" \
-  --provider "${PROVIDER}" \
-  --model "${MODEL}" \
-  --concurrency "${CONCURRENCY}" \
-  --max-retries "${MAX_RETRIES}" \
-  --resume \
-  "$@"
+# Python loads provider-specific credentials from .env and isolates output by annotator.
+exec "${PYTHON}" "${SCRIPT_DIR}/run_dag_analysis.py" "${args[@]}" "$@"

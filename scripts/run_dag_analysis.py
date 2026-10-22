@@ -25,7 +25,8 @@ from data_analysis.annotation.normal import (  # noqa: E402
     DEFAULT_MAX_RETRIES,
     process_normal_mode,
 )
-from data_analysis.config import LLMConfig  # noqa: E402
+from data_analysis.config import ANNOTATORS, LLMConfig  # noqa: E402
+from data_analysis.annotation.protocols import annotation_settings  # noqa: E402
 from utils.artifacts import file_identity, fingerprint  # noqa: E402
 from utils.io import read_jsonl, read_manifest, write_json  # noqa: E402
 
@@ -142,14 +143,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir",
-        default=DEFAULT_OUTPUT_DIR,
-        help="Output directory for results",
+        help="Output directory; annotator presets default to a separate directory beside the input",
     )
     parser.add_argument(
         "--mode",
         choices=["normal", "batch", "merge-batch"],
-        default="normal",
-        help="Processing mode: normal, batch, or merge-batch",
+        help="Processing mode; qwen defaults to batch, other annotators to normal",
     )
     parser.add_argument(
         "--concurrency",
@@ -172,16 +171,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--batch-results-file",
         help="Downloaded batch results JSONL file (for --mode merge-batch)",
     )
-    parser.add_argument("--resume", action="store_true", help="Reuse successful normal-mode sample checkpoints")
+    parser.add_argument("--batch-errors-file", help="Optional downloaded batch errors JSONL")
+    parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None,
+                        help="Reuse successful normal-mode checkpoints (default: enabled for annotator presets)")
     parser.add_argument(
         "--provider",
-        default="deepseek",
-        help="LLM provider (deepseek, openai, etc.)",
+        help="Override API provider: deepseek, openai, anthropic, dashscope, volcengine",
     )
-    parser.add_argument("--model", default="deepseek-chat", help="Model name")
+    parser.add_argument("--annotator", choices=list(ANNOTATORS), help="Named annotator preset")
+    parser.add_argument("--model", help="Override the preset's model ID")
+    parser.add_argument("--base-url", help="Override the provider API base URL")
+    parser.add_argument("--max-tokens", type=int, default=4096, help="Output token budget (includes reasoning where applicable)")
+    parser.add_argument("--timeout", type=int, default=60, help="API timeout in seconds")
+    parser.add_argument("--requests-per-minute", type=int, default=60, help="Shared normal-mode rate limit")
+    parser.add_argument("--reasoning-effort", choices=["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                        help="Provider reasoning effort; use with --thinking on")
     parser.add_argument(
         "--include-model-in-batch",
         action="store_true",
+        default=None,
         help="Include the configured model in each request body",
     )
     parser.add_argument(
@@ -192,10 +200,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--batch-url",
         help="Optional top-level endpoint path, e.g. /v1/chat/completions",
     )
-    parser.add_argument(
+    thinking = parser.add_mutually_exclusive_group()
+    thinking.add_argument("--thinking", choices=["on", "off"],
+                          help="Explicit thinking mode (new annotator presets default to off)")
+    thinking.add_argument(
         "--disable-thinking",
-        action="store_true",
-        help="Emit enable_thinking=false in every batch request body",
+        dest="thinking", action="store_const", const="off",
+        help="Disable thinking using the selected provider's parameter",
     )
     parser.add_argument(
         "--limit",
@@ -215,12 +226,42 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.mode = args.mode or ("batch" if args.annotator == "qwen" else "normal")
+    if args.resume is None:
+        args.resume = bool(args.annotator and args.mode == "normal")
     if args.resume and args.mode != "normal":
         parser.error("--resume is only supported in normal mode")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
-    output_dir = Path(args.output_dir)
+    if args.mode == "merge-batch" and not args.batch_results_file:
+        parser.error("--batch-results-file is required for --mode merge-batch")
+    if args.max_tokens <= 0 or args.timeout <= 0 or args.requests_per_minute <= 0:
+        parser.error("--max-tokens, --timeout and --requests-per-minute must be positive")
+    settings = {
+        "provider": args.provider, "model": args.model, "base_url": args.base_url,
+        "max_tokens": args.max_tokens, "timeout": args.timeout,
+        "requests_per_minute": args.requests_per_minute,
+        "thinking": None if args.thinking is None else args.thinking == "on",
+        "reasoning_effort": args.reasoning_effort,
+    }
+    config = (LLMConfig.for_annotator(args.annotator, **settings) if args.annotator else
+              LLMConfig(**{key: value for key, value in settings.items() if value is not None}))
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    elif args.annotator:
+        parent = Path(args.raw_input).parent / "dag_analysis" if args.raw_input else Path(args.input).parent
+        output_dir = parent / args.annotator
+    else:
+        output_dir = Path(DEFAULT_OUTPUT_DIR)
     try:
+        effective = annotation_settings(config)
+        for relative in ("normal/analysis.config.json", "batch/batch_requests.config.json"):
+            previous = read_manifest(output_dir / relative)
+            if previous and (previous.get("model") != config.model or
+                             previous.get("provider", config.provider) != config.provider):
+                raise ValueError("Output directory belongs to another annotator; use a separate --output-dir")
+        if args.mode == "normal" and not config.api_key:
+            raise ValueError(f"Set {config.provider.upper()}_API_KEY for normal mode")
         segmented_input = resolve_segmented_input(
             args.input,
             args.raw_input,
@@ -235,7 +276,8 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     records = list(islice(read_jsonl(segmented_input), args.limit))
     logger.info("Loaded %s records from %s", len(records), segmented_input)
-    config = LLMConfig(provider=args.provider, model=args.model)
+    logger.info("Annotator: %s; provider=%s model=%s mode=%s", args.annotator or "custom", config.provider, config.model, args.mode)
+    logger.info("Output: %s; generation parameters: %s", output_dir, effective["parameters"])
 
     if args.mode == "normal":
         process_normal_mode(
@@ -256,17 +298,15 @@ def main(argv: Optional[List[str]] = None) -> None:
             include_model=args.include_model_in_batch,
             batch_method=args.batch_method,
             batch_url=args.batch_url,
-            enable_thinking=False if args.disable_thinking else None,
         )
     else:
-        if not args.batch_results_file:
-            parser.error("--batch-results-file is required for --mode merge-batch")
         merge_batch_results(
             records,
             config,
             output_dir,
             args.batch_results_file,
             variants=args.variants,
+            batch_errors_file=args.batch_errors_file,
         )
 
 

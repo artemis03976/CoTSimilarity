@@ -6,10 +6,11 @@ import threading
 from collections import deque
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-import litellm
+import httpx
 from ..config import LLMConfig
 from .prompts import build_prompt
 from .parsing import parse_dag_response
+from .protocols import request_body, response_content
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class RateLimiter:
 
 
 class LLMClient:
-    """Wrapper for LiteLLM API calls with retry logic."""
+    """Native OpenAI-compatible and Anthropic Messages calls with shared retries."""
 
     def __init__(self, config: LLMConfig, rate_limiter: RateLimiter | None = None):
         if not config.api_key:
@@ -46,12 +47,23 @@ class LLMClient:
         self.config = config
         self.rate_limiter = rate_limiter or RateLimiter(config.requests_per_minute)
 
-        # Build full model name with provider prefix for LiteLLM
-        if '/' not in config.model:
-            self.model_name = f"{config.provider}/{config.model}"
-        else:
-            self.model_name = config.model
+        if not config.base_url:
+            raise ValueError(f"A base URL is required for provider {config.provider}")
         self._raw_response_records: List[Dict] = []
+
+    def _request(self, body: dict) -> dict:
+        base = self.config.base_url.rstrip("/")
+        if self.config.provider == "anthropic":
+            if not base.endswith("/v1"):
+                base += "/v1"
+            url = base + "/messages"
+            headers = {"x-api-key": self.config.api_key, "anthropic-version": "2023-06-01"}
+        else:
+            url = base + "/chat/completions"
+            headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        response = httpx.post(url, headers=headers, json=body, timeout=self.config.timeout)
+        response.raise_for_status()
+        return response.json()
 
     def _rate_limit(self):
         self.rate_limiter.acquire()
@@ -74,6 +86,7 @@ class LLMClient:
         *,
         parse_error: Optional[str] = None,
         provider_error: Optional[str] = None,
+        metadata: Optional[dict] = None,
     ) -> None:
         """Keep only JSON-serializable response content and safe error text."""
         if response is not None and not isinstance(response, (str, int, float, bool, list, dict)):
@@ -95,6 +108,7 @@ class LLMClient:
             "response": response,
             "parse_error": redact(parse_error),
             "provider_error": redact(provider_error),
+            **(metadata or {}),
         })
 
     def _parse_json_response(self, response_text: str) -> Optional[List[Dict]]:
@@ -125,50 +139,37 @@ class LLMClient:
             - error_message: Error description if failed
         """
         system_prompt, user_prompt = build_prompt(problem, steps)
+        body = request_body(self.config, system_prompt, user_prompt)
 
         for attempt in range(self.config.max_retries):
             try:
                 self._rate_limit()
 
-                response = litellm.completion(
-                    model=self.model_name,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=self.config.temperature,
-                    top_p=self.config.top_p,
-                    max_tokens=self.config.max_tokens,
-                    timeout=self.config.timeout,
-                    api_key=self.config.api_key,
-                    base_url=self.config.base_url
-                )
-
-                response_text = response.choices[0].message.content
+                response = self._request(body)
+                response_text, metadata = None, {}
                 try:
+                    response_text, metadata = response_content(response)
                     dag = parse_dag_response(response_text, steps)
-                    self._record_raw_response(attempt, response_text)
+                    self._record_raw_response(attempt, response_text, metadata=metadata)
                     return dag, None
                 except ValueError as exc:
-                    self._record_raw_response(attempt, response_text, parse_error=str(exc))
+                    self._record_raw_response(attempt, response_text or response, parse_error=str(exc), metadata=metadata)
                     return None, str(exc)
 
-            except litellm.exceptions.RateLimitError as e:
-                self._record_raw_response(attempt, provider_error=str(e))
-                logger.warning(f"Rate limit hit (attempt {attempt+1}): {e}")
-                time.sleep(self.config.retry_delay * (attempt + 1))
-
-            except litellm.exceptions.APIError as e:
-                self._record_raw_response(attempt, provider_error=str(e))
-                logger.error(f"API error (attempt {attempt+1}): {e}")
+            except (httpx.HTTPError, ValueError) as e:
+                detail = e.response.text[:2000] if isinstance(e, httpx.HTTPStatusError) else str(e)
+                error = f"{e}: {detail}".replace(self.config.api_key, "[REDACTED]")
+                self._record_raw_response(attempt, provider_error=error)
+                logger.error("API error (attempt %s): %s", attempt + 1, error)
                 if attempt < self.config.max_retries - 1:
-                    time.sleep(self.config.retry_delay)
+                    time.sleep(self.config.retry_delay * (attempt + 1))
                 else:
-                    return None, f"API error after {self.config.max_retries} attempts: {str(e)}"
+                    return None, f"API error after {self.config.max_retries} attempts: {error}"
 
             except Exception as e:
-                self._record_raw_response(attempt, provider_error=str(e))
-                logger.error(f"Unexpected error (attempt {attempt+1}): {e}")
-                return None, f"Unexpected error: {str(e)}"
+                error = str(e).replace(self.config.api_key, "[REDACTED]")
+                self._record_raw_response(attempt, provider_error=error)
+                logger.error("Unexpected error (attempt %s): %s", attempt + 1, error)
+                return None, f"Unexpected error: {error}"
 
         return None, f"Failed after {self.config.max_retries} attempts"
