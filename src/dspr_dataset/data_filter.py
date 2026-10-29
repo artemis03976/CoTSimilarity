@@ -186,7 +186,7 @@ def valid_correct_samples(
 def build_eligibility_payload(
     all_results: List[Dict],
     eligible: Dict[str, List[int]],
-    top_k: int,
+    top_k: int | None,
     min_ged_range: float,
     model_name: str | None = None,
     source_file: str | None = None,
@@ -235,7 +235,7 @@ def build_eligibility_payload(
 
 def select_trajectories_by_ged(
     all_results: List[Dict],
-    top_k: int = DEFAULT_TOP_K,
+    top_k: int | None = DEFAULT_TOP_K,
     min_ged_range: float = DEFAULT_MIN_GED_RANGE,
     model_name: str | None = None,
     source_file: str | None = None,
@@ -243,15 +243,16 @@ def select_trajectories_by_ged(
     min_correct_samples: int = 1,
     verbose: bool = False,
 ) -> Dict:
-    """Compose candidate eligibility, GED min-max screening, then top-k selection.
+    """Compose eligibility, GED min-max screening, and optional top-k selection.
 
     This is the shared, in-memory implementation for dataset export and k-fold
     construction. No files are written here. ``ged`` defaults retain the legacy
     protocol; normalized GED runs specify their score field and thresholds.
+    ``top_k=None`` retains every qualified candidate in an eligible variant.
     """
     eligibility_strategy = EligibilityStrategy(min_correct_samples, score_field)
     range_strategy = GEDRangeStrategy(min_ged_range, score_field)
-    top_k_strategy = TopKStrategy(top_k, score_field)
+    top_k_strategy = TopKStrategy(top_k, score_field) if top_k is not None else None
 
     # Group by problem_id and variant
     problems = {}
@@ -304,8 +305,9 @@ def select_trajectories_by_ged(
 
         eligible[variant].append(problem_id)
 
-        # Step 3: Relative ranking - select top-k
-        selected = top_k_strategy.select(correct_samples, variant)
+        # Step 3: Apply a ranking cutoff only when the protocol requests it.
+        selected = (top_k_strategy.select(correct_samples, variant) if top_k_strategy
+                    else sorted(correct_samples, key=lambda sample: str(sample.get('sample_id', ''))))
 
         for sample in selected:
             dspr_data.append({

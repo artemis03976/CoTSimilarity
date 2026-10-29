@@ -54,6 +54,16 @@ in `utils/visualization/dag_records.py` and use the same annotation validator.
   responses; provider errors, invalid DAGs, and missing results are recorded per
   sample. Preparing and merging batch files requires no API credentials.
 - `python scripts/run_ged_analysis.py ...`: compute GED with the existing flags.
+- `python scripts/analyze_annotator_reliability.py`: audit the four saved base
+  annotators and compare roles, directed dependencies and GED values offline.
+  Saves all six pairwise comparisons, problem-cluster bootstrap CIs, coverage,
+  failure records, confusion matrices, case figures and a LaTeX table under
+  `output/qwen-2.5/reliability_audit/base_four_annotators/`. Uses the four-way
+  common-success set; root and External edges are reported separately and
+  both-empty edge sets are undefined. The base greedy data have one response
+  per variant; within-variant ranking and eligibility stability are measured
+  separately on the n16 candidate pool without a top-k cutoff. See the construction section of
+  [the unified Section 4.1 report](../../docs/SECTION_4_1_RESULTS_QWEN25.md#construction-consistency).
 
 ### Annotator selection
 
@@ -107,6 +117,46 @@ Alternatively set `RAW_INPUT` to generate a separate segmentation cache. Both
 variables apply to all modes; `SEGMENTED_INPUT` takes precedence if both are set.
 For the supervision candidate pool, use
 `output/qwen-2.5/multiple_n16/dag_analysis/segmented_records.jsonl` instead.
+
+The existing n16 DeepSeek annotations are stored at
+`output/qwen-2.5/multiple_n16/dag_analysis/deepseek/analyzed_records.jsonl`, with
+their logs and normal-mode checkpoints in the same annotator directory. Its GED
+artifacts are under `output/qwen-2.5/multiple_n16/ged/deepseek/`.
+`output/qwen-2.5/multiple_n16/artifact_layout.json` records the relocation of the
+historical artifacts, whose contents and original run manifests were preserved.
+
+Generate the n16 Qwen batch using the frozen shared segmentation:
+
+```bash
+SEGMENTED_INPUT=output/qwen-2.5/multiple_n16/dag_analysis/segmented_records.jsonl \
+ANNOTATOR=qwen MODE=batch bash scripts/run_dag_analysis.sh \
+  --model qwen3.8-flash --max-tokens 4096 --thinking off
+```
+
+This writes `output/qwen-2.5/multiple_n16/dag_analysis/qwen/batch/batch_requests.jsonl`.
+The current input contains 167 problem groups and 5,490 trajectories: 167 original
+anchors, 2,663 simple samples and 2,660 hard samples. All stored samples are
+included, matching the DeepSeek annotation input before GED-based selection.
+
+After all four n16 GED runs are available, compare their supervision selections:
+
+```bash
+python scripts/analyze_selection_consistency.py
+```
+
+This offline analysis uses the shared strategies in `dspr_dataset/data_filter.py`:
+the saved score field, minimum correct count and GED range threshold from
+`output/qwen-2.5/eligible_problem.json`, with `top_k=None` to match the
+user-confirmed current experiment. All qualified candidates in eligible
+variants are retained. It compares eligible problem sets and retained path
+sets on common and actual candidate pools, including coverage losses;
+rank correlations are auxiliary. Outputs are isolated in
+`output/qwen-2.5/reliability_audit/n16_selection_no_topk/`; its per-run report is
+`report.md` in that output directory (override with `--report`). The consolidated
+interpretation is maintained in
+[the unified Section 4.1 report](../../docs/SECTION_4_1_RESULTS_QWEN25.md#selection-stability).
+Existing training manifests,
+annotation data and GED results are not rewritten.
 
 ### Bailian batch workflow
 

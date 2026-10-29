@@ -114,7 +114,7 @@ excludes paired groups containing proof tasks or questions that cannot be
 reliably repaired or graded. Corrections use each record's existing fields;
 worked solutions retain boxed final answers and multipart answer labels use
 ordinary text. Original problem IDs and source coordinates are preserved.
-The original four source files and existing experiment inputs remain unchanged.
+Keep source files and experiment inputs separate from the cleaned dataset.
 Audit records and exclusions are stored under `output/problem_answer_repair/`.
 
 Validate the cleaned dataset without loading a model:
@@ -126,7 +126,7 @@ python scripts/validate_problem_answers.py
 This checks reference extraction, evaluator round trips, and preservation of
 the original field layouts and source coordinates. It does not establish
 mathematical correctness. Existing scripts continue to default to
-`data/canonical_math_paired.jsonl` for the completed experiment. Select the
+`data/canonical_math_paired.jsonl`. Select the
 cleaned path explicitly and use a separate output directory for a new run.
 
 ## End-To-End DSPR Workflow
@@ -136,7 +136,7 @@ cleaned path explicitly and use a separate output directory for a new run.
 `src/dspr_dataset/data_filter.py` owns trajectory selection. Three independent
 strategies are composed in order:
 
-| Strategy | Rule in the current Qwen eligibility manifest |
+| Strategy | Example selection rule |
 | --- | --- |
 | `EligibilityStrategy` | Correct, non-timeout samples with a selection score; at least 3 per problem-variant |
 | `GEDRangeStrategy` | `max(ged_normalized) - min(ged_normalized) >= 0.10` on those candidates |
@@ -167,12 +167,8 @@ python scripts/build_kfold_splits.py \
   --k 5 --seed 42
 ```
 
-This protocol selects 1,474 trajectories across 301 problem-variant pairs
-(165 eligible problem groups). Outer held-out folds still cover all 548 raw
-groups. Existing completed folds used 3,892 trajectories under the eligible
-ID mask and bypassed top-k selection; those experiment results therefore do
-not represent GED top-5 training. They are retained unchanged. The builder
-requires an empty destination `kfold` directory to preserve existing folds.
+Outer held-out folds cover all raw problem groups. The builder requires an
+empty destination `kfold` directory to preserve existing folds.
 
 ### Staged DSPR training
 
@@ -234,7 +230,7 @@ python scripts/plot_router_layer_ablation.py \
 This produces `router_layer_curves.png`, `router_layer_summary.png`, and CSV/
 JSON summaries under `<root>/plots`.
 
-The example commands below use Qwen2.5-Math-7B-Instruct and write new artifacts under `output/qwen-2.5`, `data/qwen`, and `checkpoints/qwen`. Results from the earlier pipeline are archived under `output/qwen_legacy`.
+The example commands below use Qwen2.5-Math-7B-Instruct and write artifacts under `output/qwen-2.5`, `data/qwen`, and `checkpoints/qwen`.
 
 ### 1. Generate Base Model Responses
 
@@ -387,7 +383,7 @@ re-estimated before dataset curation.
 bash scripts/prepare_qwen_dspr_data.sh
 ```
 
-This reads `output/qwen-2.5/multiple_n16/ged/all_ged_results.jsonl` and writes
+This reads `output/qwen-2.5/multiple_n16/ged/deepseek/all_ged_results.jsonl` and writes
 `data/qwen/dspr_dataset.jsonl`, `data/qwen/eligibility.json`, and the five folds
 under `output/qwen-2.5/kfold/`. Set `PYTHON`, `GED_RESULTS`, or `DATA_ROOT` to override
 the interpreter, input, or output root.
@@ -575,9 +571,8 @@ the selected output directory's prediction/QC files.
 The CLI defaults to `--backend transformers` for compatibility with existing
 DSPR/SPT/LoRA commands. When omitted, `--max-new-tokens` defaults to 2048 for
 vLLM and retains the previous 4096 default for Transformers. The base shell
-wrapper explicitly selects vLLM and a 2048-token output budget matching the
-completed staged K-fold inference;
-set the same output budget on both sides when comparing another experiment.
+wrapper explicitly selects vLLM and a 2048-token output budget. Set the same
+output budget on both sides when comparing experiments.
 
 Then pass the resulting baseline file to the aggregator:
 
@@ -610,15 +605,10 @@ LM loss selects the best checkpoint, with early-stopping patience 3. These
 defaults match the current staged prefix configuration; historical overrides
 should be checked against the corresponding training manifest.
 
-SPT defaults to one 50-token static prompt: **179,200** parameters for
-Qwen2.5-Math-7B. This is about 53.2% of the completed DSPR parameter count;
-50 tokens brings its capacity closer while respecting the chosen prompt-length
-limit. Use `--prefix-length` to select a shorter prompt.
-The completed DSPR configuration has two 15-token prefixes and a 64-unit router,
-for **337,025** trainable parameters. Parameter-matched LoRA uses rank **1**,
-alpha **2**, and `q_proj`/`v_proj` adapters: **315,392** parameters, 6.42% fewer
-than DSPR. Its training entrypoint enforces the 10% budget tolerance. The older
-1,025,537-parameter reference corresponds to a 256-unit router.
+SPT defaults to one 50-token static prompt. Use `--prefix-length` to select a
+shorter prompt. Parameter-matched LoRA uses rank **1**, alpha **2**, and
+`q_proj`/`v_proj` adapters. Its training entrypoint enforces a 10% parameter-budget
+tolerance relative to the configured DSPR model.
 
 Validate both five-fold training schedules without loading model weights:
 
@@ -675,8 +665,8 @@ against `output/qwen-2.5/base/all_records.jsonl` and
 
 Outputs are separate: `checkpoints/qwen_spt_seed42` / `output/qwen_spt_seed42`
 and `checkpoints/qwen_lora_qv_r1_seed42` / `output/qwen_lora_qv_r1_seed42`.
-This comparison uses the original 548-group folds. A cleaned-dataset experiment
-requires separately rebuilt training records and folds.
+A cleaned-dataset experiment requires separately rebuilt training records and
+folds.
 
 To run a larger LoRA configuration, explicitly disable parameter matching and
 use its own output directory:
