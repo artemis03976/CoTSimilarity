@@ -1,14 +1,13 @@
-"""Visualize GED similarity examples with percentile-based filtering."""
+"""Browse GED examples selected by percentiles or an absolute threshold."""
 
 import json
 import argparse
 import csv
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from utils import extract_numeric_id
 from utils.io import atomic_text
 from utils.visualization.dag_records import compress_dag_analysis, load_segmented_records, load_dag_analysis
 from utils.web_report import (
@@ -22,66 +21,32 @@ from utils.web_report import (
 )
 
 
-def load_ged_problem_ids_by_percentile(
-    csv_path: str,
-    low_percentile: float = 10.0,
-    high_percentile: float = 10.0,
-    comparisons: Optional[List[str]] = None
-) -> Dict[str, Dict[str, List[str]]]:
-    """Load problem IDs by GED percentile for multiple comparisons.
+COMPARISONS = ("original_vs_simple", "original_vs_hard")
 
-    Args:
-        csv_path: Path to similarity_results.csv
-        low_percentile: Percentage of lowest GED to include (e.g., 10 = bottom 10%)
-        high_percentile: Percentage of highest GED to include (e.g., 10 = top 10%)
-        comparisons: Comparison list to filter on
 
-    Returns:
-        Dict mapping comparison to {'low': [...], 'high': [...]} problem_ids
-    """
-    if comparisons is None:
-        comparisons = ["original_vs_simple", "original_vs_hard"]
+def select_ged_problem_ids(csv_path, low_percentile=10.0, high_percentile=10.0, max_ged=None):
+    """Select each comparison's percentile tails or an inclusive GED threshold."""
+    values = {comparison: [] for comparison in COMPARISONS}
+    with open(csv_path, encoding='utf-8') as stream:
+        for row in csv.DictReader(stream):
+            for comparison in COMPARISONS:
+                score = row[f'{comparison}_ged']
+                if score:
+                    values[comparison].append((row['problem_id'], float(score)))
 
-    # Collect all GED values per comparison
-    ged_values_by_comparison = {comparison: [] for comparison in comparisons}
-
-    with open(csv_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            problem_id = row.get('problem_id', '')
-            if not problem_id:
-                continue
-
-            for comparison in comparisons:
-                ged_field = f"{comparison}_ged"
-                ged_str = row.get(ged_field, '')
-                if ged_str and ged_str != '':
-                    try:
-                        ged = float(ged_str)
-                        ged_values_by_comparison[comparison].append((problem_id, ged))
-                    except ValueError:
-                        continue
-
-    # Sort and select by percentile
-    result = {}
-    for comparison in comparisons:
-        ged_values = ged_values_by_comparison[comparison]
-        if not ged_values:
-            result[comparison] = {'low': [], 'high': []}
-            continue
-
-        ged_values.sort(key=lambda x: x[1])
-        total = len(ged_values)
-
-        low_count = max(1, int(total * low_percentile / 100))
-        high_count = max(1, int(total * high_percentile / 100))
-
-        low_ids = [pid for pid, _ in ged_values[:low_count]]
-        high_ids = [pid for pid, _ in ged_values[-high_count:]]
-
-        result[comparison] = {'low': low_ids, 'high': high_ids}
-
-    return result
+    selected = {}
+    for comparison, entries in values.items():
+        if max_ged is not None:
+            selected[comparison] = {'threshold': [pid for pid, score in entries if score <= max_ged]}
+        else:
+            entries.sort(key=lambda item: item[1])
+            low_count = max(1, int(len(entries) * low_percentile / 100)) if low_percentile else 0
+            high_count = max(1, int(len(entries) * high_percentile / 100)) if high_percentile else 0
+            selected[comparison] = {
+                'low': [pid for pid, _ in entries[:low_count]],
+                'high': [pid for pid, _ in entries[-high_count:]] if high_count else [],
+            }
+    return selected
 
 
 def build_output_path(base_output: str, comparison: str, category: str) -> str:
@@ -97,12 +62,10 @@ def generate_html_report(records: List[Dict], output_path: str, comparison: str,
     """Generate HTML report for GED similarity examples."""
 
     compared_variant = comparison.replace("original_vs_", "")
-    if compared_variant not in ["simple", "hard"]:
-        compared_variant = "simple"
     compared_variant_label = compared_variant.capitalize()
     variant_order_json = json.dumps(["original", compared_variant], ensure_ascii=False)
 
-    category_label = "lowest" if category == "low" else "highest"
+    category_label = {"low": "lowest", "high": "highest", "threshold": "selected"}[category]
 
     css_styles = build_common_css()
     navigation_html = build_navigation_html(len(records), total_count_id="totalCount")
@@ -307,100 +270,39 @@ ${depTable}
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize GED similarity examples with percentile filtering")
-    parser.add_argument("--csv", type=str,
-                       default="output/qwen-2.5/dag_analysis/similarity_results.csv",
-                       help="Similarity result CSV file")
-    parser.add_argument("--segmented", type=str,
-                       default="output/qwen-2.5/segmented_records.jsonl",
-                       help="Segmented records file")
-    parser.add_argument("--analyzed", type=str,
-                       default="output/qwen-2.5/dag_analysis/analyzed_records.jsonl",
-                       help="DAG analysis result file")
-    parser.add_argument("--output", type=str,
-                       default="output/qwen-2.5/dag_analysis/ged_similarity_visualization.html",
-                       help="Output HTML file prefix")
-    parser.add_argument("--low-percentile", type=float, default=10.0,
-                       help="Lowest GED percentile, e.g. 10 means the lowest 10%%")
-    parser.add_argument("--high-percentile", type=float, default=10.0,
-                       help="Highest GED percentile, e.g. 10 means the highest 10%%")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--csv', required=True, help='Wide GED table with original_vs_simple_ged / original_vs_hard_ged')
+    parser.add_argument('--segmented', required=True)
+    parser.add_argument('--analyzed', required=True)
+    parser.add_argument('--output', required=True, help='HTML output prefix')
+    parser.add_argument('--max-ged', type=float, help='Inclusive threshold; replaces percentile selection')
+    parser.add_argument('--low-percentile', type=float, default=10.0)
+    parser.add_argument('--high-percentile', type=float, default=10.0)
     args = parser.parse_args()
+    if not all(0 <= value <= 100 for value in (args.low_percentile, args.high_percentile)):
+        parser.error('Percentiles must be between 0 and 100')
 
-    for path_arg, path_val in [("csv", args.csv), ("segmented", args.segmented), ("analyzed", args.analyzed)]:
-        if not Path(path_val).exists():
-            print(f"Error: {path_arg} file not found: {path_val}")
-            return
-
-    comparisons = ["original_vs_simple", "original_vs_hard"]
-
-    print(f"Loading GED data by percentile (low={args.low_percentile}%, high={args.high_percentile}%)...")
-    problem_ids_by_comparison = load_ged_problem_ids_by_percentile(
-        args.csv, args.low_percentile, args.high_percentile, comparisons
-    )
-
-    for comparison in comparisons:
-        low_count = len(problem_ids_by_comparison[comparison]['low'])
-        high_count = len(problem_ids_by_comparison[comparison]['high'])
-        print(f"{comparison}: {low_count} low GED, {high_count} high GED")
-
-    all_problem_ids = sorted(
-        {pid for comp_data in problem_ids_by_comparison.values()
-         for ids in comp_data.values() for pid in ids},
-        key=extract_numeric_id
-    )
-    if not all_problem_ids:
-        print("No problems found matching criteria.")
+    selection = select_ged_problem_ids(args.csv, args.low_percentile, args.high_percentile, args.max_ged)
+    problem_ids = {pid for groups in selection.values() for ids in groups.values() for pid in ids}
+    if not problem_ids:
+        print('No problems matched the selection.')
         return
-
-    print(f"Loading segmented records...")
-    segmented_records = load_segmented_records(args.segmented, all_problem_ids)
-    print(f"Loaded {len(segmented_records)} segmented records")
-
-    print(f"Loading DAG analysis...")
-    dag_data = load_dag_analysis(args.analyzed, all_problem_ids)
-    print(f"Loaded DAG analysis for {len(dag_data)} problems")
-
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    generated_outputs = []
-
-    for comparison in comparisons:
-        for category in ['low', 'high']:
-            problem_ids = sorted(
-                problem_ids_by_comparison[comparison][category],
-                key=extract_numeric_id
-            )
-            if not problem_ids:
-                print(f"Skipping {comparison} {category}: no matching problems")
+    records = load_segmented_records(args.segmented, problem_ids)
+    dags = load_dag_analysis(args.analyzed, problem_ids)
+    for comparison, groups in selection.items():
+        variant = comparison.replace('original_vs_', '')
+        for category, ids in groups.items():
+            if not ids:
                 continue
-
-            print(f"Merging data for {comparison} {category}...")
-            merged_records = []
-            for pid in problem_ids:
-                if pid not in segmented_records:
-                    print(f"Warning: Problem {pid} not found in segmented records")
-                    continue
-
-                record = segmented_records[pid]
-                if pid in dag_data:
-                    for variant in ['original', 'simple', 'hard']:
-                        if variant in record and variant in dag_data[pid]:
-                            dag_analysis = dag_data[pid][variant]
-                            record[variant]['dag_analysis_compressed'] = compress_dag_analysis(dag_analysis)
-                merged_records.append(record)
-
-            print(f"Merged {len(merged_records)} complete records for {comparison} {category}")
-
-            output_path = build_output_path(args.output, comparison, category)
-            print(f"Generating HTML report: {output_path}")
-            generate_html_report(merged_records, output_path, comparison, category)
-            generated_outputs.append(output_path)
-
-    if generated_outputs:
-        print("\nDone! Open in browser:")
-        for output_path in generated_outputs:
-            print(f"   {Path(output_path).absolute()}")
-    else:
-        print("No reports generated.")
+            selected_records = []
+            for pid in sorted(ids, key=int):
+                record = records[pid]
+                for current in ('original', variant):
+                    record[current]['dag_analysis_compressed'] = compress_dag_analysis(dags[pid][current])
+                selected_records.append(record)
+            path = build_output_path(args.output, comparison, category)
+            print(f'{comparison} / {category}: {len(selected_records)} problems')
+            generate_html_report(selected_records, path, comparison, category)
 
 
 if __name__ == "__main__":

@@ -43,10 +43,6 @@ in `utils/visualization/dag_records.py` and use the same annotation validator.
 
 ## Entry Points
 
-- `ANNOTATOR=haiku bash scripts/run_dag_analysis.sh`: select an annotator using
-  the presets below. The shell uses eight workers, three retries per chain and
-  resumes normal-mode checkpoints. `qwen` defaults to offline batch preparation;
-  the others default to normal API calls.
 - `python scripts/run_dag_analysis.py --mode normal ...`: annotate normally;
   add `--resume` to reuse successful sample checkpoints and retry failed samples.
 - `python scripts/run_dag_analysis.py --mode batch ...`: prepare requests.
@@ -58,7 +54,7 @@ in `utils/visualization/dag_records.py` and use the same annotation validator.
   annotators and compare roles, directed dependencies and GED values offline.
   Saves all six pairwise comparisons, problem-cluster bootstrap CIs, coverage,
   failure records, confusion matrices, case figures and a LaTeX table under
-  `output/qwen-2.5/reliability_audit/base_four_annotators/`. Uses the four-way
+  `--output-dir`. Uses the four-way
   common-success set; root and External edges are reported separately and
   both-empty edge sets are undefined. The base greedy data have one response
   per variant; within-variant ranking and eligibility stability are measured
@@ -67,9 +63,9 @@ in `utils/visualization/dag_records.py` and use the same annotation validator.
 
 ### Annotator selection
 
-| `ANNOTATOR` / `--annotator` | Model | API | Environment key |
+| `--annotator` | Model | API | Environment key |
 | --- | --- | --- | --- |
-| `deepseek` (shell default) | `deepseek-flash` | OpenAI-compatible Chat Completions | `DEEPSEEK_API_KEY` |
+| `deepseek` | `deepseek-flash` | OpenAI-compatible Chat Completions | `DEEPSEEK_API_KEY` |
 | `gpt` | `gpt-6-luna` | OpenAI Chat Completions | `OPENAI_API_KEY` |
 | `haiku` | `claude-haiku-5-5` | Native Anthropic Messages | `ANTHROPIC_API_KEY` |
 | `qwen` | `qwen3.8-flash` | Bailian batch JSONL; optional online Chat Completions | `DASHSCOPE_API_KEY` (online only) |
@@ -78,7 +74,7 @@ in `utils/visualization/dag_records.py` and use the same annotation validator.
 Credentials are read from `.env` or exported variables. Each provider also accepts
 `<PROVIDER>_BASE_URL`; `LLM_API_KEY` / `LLM_BASE_URL` remain generic fallbacks.
 Use `--base-url` for an explicit endpoint override. Models and providers can be
-overridden with `--model` / `--provider` (or `MODEL` / `PROVIDER` in the shell).
+overridden with `--model` / `--provider`.
 The transport sends native HTTP requests via `httpx`, so newly released model IDs
 do not depend on the model catalog in the previously pinned LiteLLM version.
 
@@ -99,7 +95,7 @@ recorded as failures and follow the same retry budget.
 
 For raw inputs, preset output defaults to `<raw-input-parent>/dag_analysis/<annotator>/`.
 For `--input`, it defaults to `<segmented-input-parent>/<annotator>/`.
-`OUTPUT_DIR` / `--output-dir` can override this. Outputs and checkpoints from a
+`--output-dir` can override this. Outputs and checkpoints from a
 different provider/model cannot be reused in that directory. Model response IDs,
 reported model versions, token usage and stop reasons are saved with annotations
 and raw responses when returned by the provider.
@@ -107,51 +103,45 @@ and raw responses when returned by the provider.
 To keep segmentation identical across annotators, use the same existing file:
 
 ```bash
-export SEGMENTED_INPUT=output/qwen-2.5/base/dag_analysis/segmented_records.jsonl
-ANNOTATOR=gpt bash scripts/run_dag_analysis.sh
-ANNOTATOR=haiku bash scripts/run_dag_analysis.sh
-ANNOTATOR=qwen bash scripts/run_dag_analysis.sh
+export SEGMENTED_INPUT="/path/to/shared-segmentation.jsonl"
+python scripts/run_dag_analysis.py --annotator gpt --input "$SEGMENTED_INPUT" --max-retries 3
+python scripts/run_dag_analysis.py --annotator haiku --input "$SEGMENTED_INPUT" --max-retries 3
+python scripts/run_dag_analysis.py --annotator qwen --input "$SEGMENTED_INPUT"
 ```
 
-Alternatively set `RAW_INPUT` to generate a separate segmentation cache. Both
-variables apply to all modes; `SEGMENTED_INPUT` takes precedence if both are set.
-For the supervision candidate pool, use
-`output/qwen-2.5/multiple_n16/dag_analysis/segmented_records.jsonl` instead.
-
-The existing n16 DeepSeek annotations are stored at
-`output/qwen-2.5/multiple_n16/dag_analysis/deepseek/analyzed_records.jsonl`, with
-their logs and normal-mode checkpoints in the same annotator directory. Its GED
-artifacts are under `output/qwen-2.5/multiple_n16/ged/deepseek/`.
-`output/qwen-2.5/multiple_n16/artifact_layout.json` records the relocation of the
-historical artifacts, whose contents and original run manifests were preserved.
+Alternatively pass `--raw-input` to generate a segmentation cache. It is mutually
+exclusive with `--input`. Both options apply to all modes. `qwen` defaults to
+offline batch preparation; the other annotators default to normal API calls with
+checkpoint resume enabled. Select the frozen candidate-pool segmentation for
+multi-sample annotation.
 
 Generate the n16 Qwen batch using the frozen shared segmentation:
 
 ```bash
-SEGMENTED_INPUT=output/qwen-2.5/multiple_n16/dag_analysis/segmented_records.jsonl \
-ANNOTATOR=qwen MODE=batch bash scripts/run_dag_analysis.sh \
+python scripts/run_dag_analysis.py --annotator qwen --mode batch \
+  --input "$SEGMENTED_INPUT" \
   --model qwen3.8-flash --max-tokens 4096 --thinking off
 ```
 
-This writes `output/qwen-2.5/multiple_n16/dag_analysis/qwen/batch/batch_requests.jsonl`.
-The current input contains 167 problem groups and 5,490 trajectories: 167 original
-anchors, 2,663 simple samples and 2,660 hard samples. All stored samples are
-included, matching the DeepSeek annotation input before GED-based selection.
+This writes `<segmented-input-parent>/qwen/batch/batch_requests.jsonl`. All stored
+samples are included; use the same input for each annotator before GED selection.
 
 After all four n16 GED runs are available, compare their supervision selections:
 
 ```bash
-python scripts/analyze_selection_consistency.py
+python scripts/analyze_selection_consistency.py \
+  --data-root /path/to/multi-sample-analysis-bundle \
+  --eligibility-config /path/to/selection-manifest.json \
+  --canonical /path/to/paired-problems.jsonl \
+  --output-dir /path/to/selection-analysis
 ```
 
 This offline analysis uses the shared strategies in `dspr_dataset/data_filter.py`:
 the saved score field, minimum correct count and GED range threshold from
-`output/qwen-2.5/eligible_problem.json`, with `top_k=None` to match the
-user-confirmed current experiment. All qualified candidates in eligible
+`--eligibility-config`, with `top_k=None`. All qualified candidates in eligible
 variants are retained. It compares eligible problem sets and retained path
 sets on common and actual candidate pools, including coverage losses;
-rank correlations are auxiliary. Outputs are isolated in
-`output/qwen-2.5/reliability_audit/n16_selection_no_topk/`; its per-run report is
+rank correlations are auxiliary. Outputs are written under `--output-dir`; its per-run report is
 `report.md` in that output directory (override with `--report`). The consolidated
 interpretation is maintained in
 [the unified Section 4.1 report](../../docs/SECTION_4_1_RESULTS_QWEN25.md#selection-stability).
@@ -160,8 +150,7 @@ annotation data and GED results are not rewritten.
 
 ### Bailian batch workflow
 
-The Qwen command above writes
-`output/qwen-2.5/base/dag_analysis/qwen/batch/batch_requests.jsonl` plus a manifest.
+The Qwen command above writes `<output-dir>/batch/batch_requests.jsonl` plus a manifest.
 Each row contains `custom_id`, `method: POST`, `url: /v1/chat/completions`, and
 `body` with `model: qwen3.8-flash`. Upload this file to the **Beijing** Bailian batch
 service and download the result and, if present, error JSONL files. Preparation
@@ -169,7 +158,8 @@ and merging are local operations; these commands do not upload or submit jobs.
 
 ```bash
 # Keep the same SEGMENTED_INPUT and output directory used for preparation.
-ANNOTATOR=qwen MODE=merge-batch bash scripts/run_dag_analysis.sh \
+python scripts/run_dag_analysis.py --annotator qwen --mode merge-batch \
+  --input "$SEGMENTED_INPUT" \
   --batch-results-file /path/to/results.jsonl \
   --batch-errors-file /path/to/errors.jsonl
 ```
@@ -199,10 +189,8 @@ Failure details are checkpointed and restored on resume, with counts in the run 
 
 Known provider expansions of the `Conclude` tag, such as `Draw` and `Draw
 intermediate and final conclusions`, are normalized to `Conclude` by the shared
-parser. Existing normal-mode failures can be recovered without new API calls
-with `scripts/recover_dag_raw_responses.py`; the recovery script keeps the
-original analyzed file unchanged and validates recovered DAGs against their
-segmented steps.
+parser. Use normal-mode `--resume` to retry failed samples while reusing successful
+checkpoints.
 
 Both annotation modes write `<output-dir>/analyzed_records.jsonl`. Normal mode
 also retains its historical `<output-dir>/normal/analyzed_records.jsonl` path.

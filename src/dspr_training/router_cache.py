@@ -49,12 +49,9 @@ def load_or_build_router_context_cache(
     metadata = _metadata(model, max_length)
     cache_path = Path(cache_path)
     if cache_path.is_file():
-        try:
-            contexts = _read_cache(cache_path, metadata, dataset)
-            print(f'[router] loaded context cache: {cache_path} ({len(contexts)} prompts)', flush=True)
-            return contexts
-        except (KeyError, OSError, RuntimeError, ValueError):
-            print(f'[router] ignoring incompatible context cache: {cache_path}', flush=True)
+        contexts = _read_cache(cache_path, metadata, dataset)
+        print(f'[router] loaded context cache: {cache_path} ({len(contexts)} prompts)', flush=True)
+        return contexts
 
     model.to(device)
     model.eval()

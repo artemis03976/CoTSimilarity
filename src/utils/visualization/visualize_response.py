@@ -7,7 +7,7 @@ from typing import List, Dict
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from utils import sort_records, load_records
+from utils.io import read_records
 from utils.web_report import (
     build_common_css,
     build_navigation_html,
@@ -234,18 +234,13 @@ def main():
                        help="Output HTML file")
     args = parser.parse_args()
 
-    # Check if input file exists
-    if not Path(args.input).exists():
-        print(f"Error: Input file not found: {args.input}")
-        return
-
     # Load records
     print(f"Loading data from: {args.input}")
-    records = load_records(args.input)
+    records = read_records(args.input)
     print(f"Loaded {len(records)} records")
 
     # Sort records by problem_id
-    records = sort_records(records)
+    records.sort(key=lambda record: int(record['problem_id']))
 
     # Determine output path
     if args.output:

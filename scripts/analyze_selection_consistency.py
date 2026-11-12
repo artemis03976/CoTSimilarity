@@ -28,7 +28,7 @@ from dspr_dataset.data_filter import (
     select_trajectories_by_ged,
 )
 from utils.artifacts import file_identity, fingerprint
-from utils.io import read_jsonl, write_json, write_jsonl
+from utils.io import read_json, read_jsonl, write_json, write_jsonl
 
 ANNOTATORS = ("deepseek", "gpt", "haiku", "qwen")
 NAMES = dict(zip(ANNOTATORS, ("DeepSeek", "GPT", "Haiku", "Qwen")))
@@ -39,10 +39,6 @@ VARIANTS = ("simple", "hard")
 def require(value, message):
     if not value:
         raise ValueError(message)
-
-
-def read_json(path):
-    return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def csv_write(path, rows):
@@ -195,7 +191,6 @@ def audit(args):
                                 'Annotation recovery budgets and feedback differ; historical DeepSeek response versions are mostly unrecorded.',
                                 'The experiment measures cross-annotator consistency and screening stability for fixed CoTs and segmentation.']}
     return frozen, dags, ged, failures, source, qualified, common, coverage, manifest
-
 
 
 def analyze(args):

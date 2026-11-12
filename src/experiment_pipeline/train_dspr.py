@@ -11,77 +11,27 @@ Either stage can also run separately.
 from __future__ import annotations
 
 import argparse
-import inspect
 import json
 import math
-import random
 from dataclasses import fields
 from pathlib import Path
 
-import numpy as np
 import torch
-from transformers import EarlyStoppingCallback, TrainerCallback, TrainingArguments, default_data_collator
+from transformers import EarlyStoppingCallback, TrainerCallback, default_data_collator
 
 from dspr.config import DSPRConfig
 from dspr.model import DSPRModel
-from dspr_training.dataset import DSPRDataset, ProblemResampledDSPRDataset, RouterPromptDataset
+from dspr_training.dataset import RouterPromptDataset
 from dspr_training.router_cache import load_or_build_router_context_cache
 from dspr_training.router_trainer import RouterPromptTrainer, compute_router_metrics
 from dspr_training.trainer import DSPRTrainer, compute_dspr_metrics
-from utils.training import ProgressEventCallback, TrainingHistoryCallback, update_steps_per_epoch
-
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-class KeepRouterEvalCallback(TrainerCallback):
-    """Prevent dropout from changing a frozen router during prefix training."""
-
-    @staticmethod
-    def _set_eval(model):
-        if model is not None and hasattr(model, 'router'):
-            model.router.eval()
-
-    def on_train_begin(self, args, state, control, **kwargs):
-        self._set_eval(kwargs.get('model'))
-
-    def on_epoch_begin(self, args, state, control, **kwargs):
-        self._set_eval(kwargs.get('model'))
-
-    def on_step_begin(self, args, state, control, **kwargs):
-        self._set_eval(kwargs.get('model'))
-
-
-class KeepFrozenBackboneEvalCallback(TrainerCallback):
-    """Keep the frozen LLM deterministic while Trainer toggles model.train()."""
-
-    @staticmethod
-    def _set_eval(model):
-        if model is not None and hasattr(model, 'frozen_llm'):
-            model.frozen_llm.eval()
-
-    def on_train_begin(self, args, state, control, **kwargs):
-        self._set_eval(kwargs.get('model'))
-
-    def on_epoch_begin(self, args, state, control, **kwargs):
-        self._set_eval(kwargs.get('model'))
-
-    def on_step_begin(self, args, state, control, **kwargs):
-        self._set_eval(kwargs.get('model'))
-
-
-def resolve_strategy_argument() -> str:
-    return (
-        'eval_strategy'
-        if 'eval_strategy' in inspect.signature(TrainingArguments.__init__).parameters
-        else 'evaluation_strategy'
-    )
+from utils.config import parse_config_args, write_resolved_config
+from utils.datasets import TrajectoryDataset, ProblemResampledDataset
+from utils.io import read_json, read_jsonl
+from utils.training import (
+    KeepFrozenModulesEvalCallback, ProgressEventCallback, TrainingHistoryCallback, set_seed,
+    training_arguments, update_steps_per_epoch,
+)
 
 
 def make_training_args(
@@ -98,17 +48,12 @@ def make_training_args(
     max_steps: int,
     eval_strategy: str,
     eval_steps: int | None,
-    save_steps: int | None,
-    max_seq_length: int,
     seed: int,
     device: str,
     logging_steps: int,
     save_total_limit: int,
-    early_stopping_patience: int,
     label_names: list[str],
-    callbacks: list[TrainerCallback],
 ):
-    del max_seq_length  # Kept in the signature to make stage settings explicit.
     output_dir.mkdir(parents=True, exist_ok=True)
     kwargs = dict(
         output_dir=str(output_dir),
@@ -122,30 +67,20 @@ def make_training_args(
         warmup_steps=warmup_steps if warmup_ratio is None else 0,
         warmup_ratio=0.0 if warmup_ratio is None else warmup_ratio,
         max_grad_norm=max_grad_norm,
-        logging_strategy='steps',
         logging_steps=logging_steps,
-        save_strategy='no' if eval_strategy == 'no' else ('steps' if eval_steps else 'epoch'),
+        save_strategy=eval_strategy,
         save_total_limit=save_total_limit,
         load_best_model_at_end=eval_strategy != 'no',
-        metric_for_best_model='eval_loss',
-        greater_is_better=False,
-        remove_unused_columns=False,
         dataloader_pin_memory=True,
-        report_to='none',
         disable_tqdm=False,
         fp16=(device.startswith('cuda') and torch.cuda.is_available()),
-        gradient_checkpointing=False,
         seed=seed,
         label_names=label_names,
     )
     if eval_strategy != 'no' and eval_steps is not None:
         kwargs['eval_steps'] = eval_steps
-        kwargs['save_steps'] = eval_steps if save_steps is None else save_steps
-    elif eval_strategy != 'no' and save_steps is not None:
-        kwargs['save_steps'] = save_steps
-    kwargs[resolve_strategy_argument()] = eval_strategy
-    training_args = TrainingArguments(**kwargs)
-    return training_args
+        kwargs['save_steps'] = eval_steps
+    return training_arguments(eval_strategy=eval_strategy, **kwargs)
 
 
 def add_early_stopping(callbacks: list[TrainerCallback], patience: int, threshold: float) -> None:
@@ -164,8 +99,7 @@ def load_router_state(model: DSPRModel, checkpoint: Path, device: str) -> None:
     if not checkpoint.is_file():
         raise FileNotFoundError(f'Router checkpoint not found: {checkpoint}')
     payload = torch.load(checkpoint, map_location=device)
-    state_dict = payload.get('router_state_dict', payload)
-    model.router.load_state_dict(state_dict)
+    model.router.load_state_dict(payload['router_state_dict'])
 
 
 def build_config(args: argparse.Namespace) -> DSPRConfig:
@@ -174,54 +108,18 @@ def build_config(args: argparse.Namespace) -> DSPRConfig:
     return DSPRConfig(**values)
 
 
-def read_jsonl_ids(path: Path) -> set[int]:
-    ids: set[int] = set()
-    with path.open('r', encoding='utf-8') as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if not line.strip():
-                continue
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f'Invalid JSON in {path} line {line_number}: {exc}') from exc
-            if item.get('problem_id') is not None:
-                ids.add(int(item['problem_id']))
-    return ids
-
-
 def read_id_manifest(path: Path) -> set[int]:
-    try:
-        payload = json.loads(path.read_text(encoding='utf-8'))
-    except json.JSONDecodeError:
-        # Accept problem records directly for router-only experiments.
-        ids = read_jsonl_ids(path)
-        if ids:
-            return ids
-        raise ValueError(f'Invalid JSON/JSONL ID manifest: {path}')
-    if not isinstance(payload, dict):
-        raise ValueError(f'Expected an ID manifest object: {path}')
-    values = payload.get('all')
-    if values is None:
-        values = payload.get('problem_ids')
-    if not isinstance(values, list):
-        raise ValueError(f'ID manifest has no usable IDs: {path}')
-    return {int(value) for value in values}
+    return {int(value) for value in read_json(path)['all']}
 
 
 def read_source_map(path: Path) -> dict[int, str]:
-    source_map: dict[int, str] = {}
-    with path.open('r', encoding='utf-8') as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if not line.strip():
-                continue
-            item = json.loads(line)
-            if item.get('problem_id') is None:
-                raise ValueError(f'Missing problem_id in {path} line {line_number}')
-            problem_id = int(item['problem_id'])
-            source = str(item.get('source', 'unknown'))
-            if problem_id in source_map and source_map[problem_id] != source:
-                raise ValueError(f'Conflicting source for problem_id={problem_id} in {path}')
-            source_map[problem_id] = source
+    source_map = {}
+    for item in read_jsonl(path):
+        problem_id = int(item['problem_id'])
+        source = str(item.get('source', 'unknown'))
+        if problem_id in source_map and source_map[problem_id] != source:
+            raise ValueError(f'Conflicting source for problem_id={problem_id} in {path}')
+        source_map[problem_id] = source
     return source_map
 
 
@@ -242,14 +140,9 @@ def resolve_data_paths(args: argparse.Namespace) -> dict[str, Path | set[int] | 
 
     prefix_train = Path(args.prefix_train_data_path) if args.prefix_train_data_path else None
     prefix_val = Path(args.prefix_val_data_path) if args.prefix_val_data_path else None
-    train_ids_explicit = bool(args.router_train_ids)
-    val_ids_explicit = bool(args.router_val_ids)
-    router_eval_ids = getattr(args, 'router_eval_ids', None)
-    router_train_sources = getattr(args, 'router_train_sources', None)
-    eval_ids_explicit = bool(router_eval_ids)
     train_ids = Path(args.router_train_ids) if args.router_train_ids else None
     val_ids = Path(args.router_val_ids) if args.router_val_ids else None
-    eval_ids = Path(router_eval_ids) if router_eval_ids else None
+    eval_ids = Path(args.router_eval_ids) if args.router_eval_ids else None
 
     if args.fold is not None:
         fold_dir = Path(args.kfold_root) / f'fold_{args.fold}'
@@ -275,37 +168,8 @@ def resolve_data_paths(args: argparse.Namespace) -> dict[str, Path | set[int] | 
                 'Router training IDs are required. Set --fold/--kfold-root or '
                 '--router-train-ids.'
             )
-        if not train_ids.is_file():
-            if train_ids_explicit:
-                raise FileNotFoundError(f'Router training ID manifest not found: {train_ids}')
-            # A fold may have train.jsonl/val.jsonl but no explicit manifests;
-            # use those files only to recover IDs. Prompt text still comes from
-            # the problem dataset below.
-            train_ids = None
-        if val_ids is not None and not val_ids.is_file():
-            if val_ids_explicit:
-                raise FileNotFoundError(f'Router validation ID manifest not found: {val_ids}')
-            val_ids = None
-        if eval_ids is not None and not eval_ids.is_file():
-            if eval_ids_explicit:
-                raise FileNotFoundError(f'Router evaluation ID manifest not found: {eval_ids}')
-            eval_ids = None
-
-        if train_ids is None:
-            if prefix_train is None or not prefix_train.is_file():
-                raise FileNotFoundError('Cannot infer router train IDs without prefix train data')
-            router_train_ids = read_jsonl_ids(prefix_train)
-        else:
-            router_train_ids = read_id_manifest(train_ids)
-
-        if val_ids is None:
-            router_val_ids = (
-                read_jsonl_ids(prefix_val)
-                if prefix_val is not None and prefix_val.is_file()
-                else None
-            )
-        else:
-            router_val_ids = read_id_manifest(val_ids)
+        router_train_ids = read_id_manifest(train_ids)
+        router_val_ids = read_id_manifest(val_ids) if val_ids is not None else None
         if router_val_ids is not None and router_train_ids & router_val_ids:
             raise ValueError('Router train/validation ID manifests overlap')
         router_eval_ids = read_id_manifest(eval_ids) if eval_ids is not None else None
@@ -314,7 +178,7 @@ def resolve_data_paths(args: argparse.Namespace) -> dict[str, Path | set[int] | 
         if router_eval_ids is not None and router_val_ids is not None and router_val_ids & router_eval_ids:
             raise ValueError('Router validation/evaluation ID manifests overlap')
 
-        train_sources = parse_source_filter(router_train_sources)
+        train_sources = parse_source_filter(args.router_train_sources)
         if train_sources is not None:
             source_map = read_source_map(problem_dataset)
             unknown_ids = router_train_ids - set(source_map)
@@ -355,7 +219,7 @@ def run_router_stage(
     eval_ids: set[int] | None = None,
 ) -> Path:
     stage_dir = Path(args.output_path) / 'router'
-    train_dataset = RouterPromptDataset.from_problem_dataset(
+    train_dataset = RouterPromptDataset(
         problem_dataset,
         model.tokenizer,
         config.max_seq_length,
@@ -363,7 +227,7 @@ def run_router_stage(
     )
     val_dataset = None
     if val_ids is not None:
-        val_dataset = RouterPromptDataset.from_problem_dataset(
+        val_dataset = RouterPromptDataset(
             problem_dataset,
             model.tokenizer,
             config.max_seq_length,
@@ -371,7 +235,7 @@ def run_router_stage(
         )
     eval_dataset = None
     if eval_ids is not None:
-        eval_dataset = RouterPromptDataset.from_problem_dataset(
+        eval_dataset = RouterPromptDataset(
             problem_dataset,
             model.tokenizer,
             config.max_seq_length,
@@ -398,7 +262,7 @@ def run_router_stage(
         eval_dataset.set_contexts(contexts)
     callbacks: list[TrainerCallback] = [
         TrainingHistoryCallback(write_train_log=True),
-        KeepFrozenBackboneEvalCallback(),
+        KeepFrozenModulesEvalCallback('frozen_llm'),
     ]
     if args.emit_progress_events:
         callbacks.append(ProgressEventCallback(stage='router'))
@@ -420,15 +284,11 @@ def run_router_stage(
         max_steps=-1,
         eval_strategy='epoch' if val_dataset is not None else 'no',
         eval_steps=None,
-        save_steps=None,
-        max_seq_length=config.max_seq_length,
         seed=config.seed,
         device=config.device,
         logging_steps=args.logging_steps,
         save_total_limit=args.save_total_limit,
-        early_stopping_patience=args.router_early_stopping_patience,
         label_names=['target_alpha'],
-        callbacks=callbacks,
     )
     trainer = RouterPromptTrainer(
         model=model,
@@ -470,7 +330,9 @@ def build_prefix_datasets(
     train_path: Path,
     val_path: Path | None,
 ):
-    flat_train = DSPRDataset(train_path, model.tokenizer, config.max_seq_length)
+    flat_train = TrajectoryDataset(
+        train_path, model.tokenizer, config.max_seq_length, include_router_inputs=True,
+    )
     if args.prefix_routing == 'label':
         for item in flat_train.data:
             expected = {'simple': 0.0, 'hard': 1.0}.get(item.get('variant_type'))
@@ -484,16 +346,19 @@ def build_prefix_datasets(
         len(flat_train), config.batch_size, config.gradient_accumulation_steps
     )
     if args.prefix_trajectory_sampling == 'random_one':
-        resampled = ProblemResampledDSPRDataset(
+        resampled = ProblemResampledDataset(
             train_path,
             model.tokenizer,
             config.max_seq_length,
             seed=config.seed,
+            include_router_inputs=True,
         )
         train_dataset = resampled
     val_dataset = None
     if val_path is not None:
-        val_dataset = DSPRDataset(val_path, model.tokenizer, config.max_seq_length)
+        val_dataset = TrajectoryDataset(
+            val_path, model.tokenizer, config.max_seq_length, include_router_inputs=True,
+        )
     return train_dataset, val_dataset, resampled, flat_steps
 
 
@@ -511,8 +376,7 @@ def run_prefix_stage(
     stage_dir = Path(args.output_path) / stage_name
     callbacks: list[TrainerCallback] = [
         TrainingHistoryCallback(write_train_log=True, resampled_dataset=resampled),
-        KeepRouterEvalCallback(),
-        KeepFrozenBackboneEvalCallback(),
+        KeepFrozenModulesEvalCallback('router', 'frozen_llm'),
     ]
     if args.emit_progress_events:
         callbacks.append(ProgressEventCallback(stage=stage_name))
@@ -541,15 +405,11 @@ def run_prefix_stage(
         max_steps=max_steps,
         eval_strategy=eval_strategy,
         eval_steps=eval_steps,
-        save_steps=eval_steps,
-        max_seq_length=config.max_seq_length,
         seed=config.seed,
         device=config.device,
         logging_steps=args.logging_steps,
         save_total_limit=args.save_total_limit,
-        early_stopping_patience=args.prefix_early_stopping_patience,
         label_names=['labels', 'target_alpha'],
-        callbacks=callbacks,
     )
     trainer = DSPRTrainer(
         model=model,
@@ -558,11 +418,6 @@ def run_prefix_stage(
         eval_dataset=val_dataset,
         data_collator=default_data_collator,
         compute_metrics=compute_dspr_metrics if val_dataset is not None else None,
-        lambda_router=0.0,
-        prefix_learning_rate=args.prefix_learning_rate,
-        router_learning_rate=0.0,
-        prefix_weight_decay=args.prefix_weight_decay,
-        router_weight_decay=0.0,
         prefix_routing=args.prefix_routing,
         callbacks=callbacks,
     )
@@ -603,15 +458,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--router-train-ids', '--router_train_ids', default=None,
-        help='Optional ID manifest or canonical split JSONL. IDs select examples from --problem-dataset; prompt text is never read from this file.',
+        help='Optional JSON ID manifest with an all list. IDs select examples from --problem-dataset; prompt text is never read from this file.',
     )
     parser.add_argument(
         '--router-val-ids', '--router_val_ids', default=None,
-        help='Optional validation ID manifest or canonical split JSONL. IDs select examples from --problem-dataset.',
+        help='Optional validation JSON ID manifest with an all list. IDs select examples from --problem-dataset.',
     )
     parser.add_argument(
         '--router-eval-ids', '--router_eval_ids', default=None,
-        help='Optional held-out ID manifest or canonical split JSONL. Metrics are written to router/router_eval_metrics.json.',
+        help='Optional held-out JSON ID manifest with an all list. Metrics are written to router/router_eval_metrics.json.',
     )
     parser.add_argument(
         '--router-train-sources', '--router_train_sources', default=None,
@@ -659,7 +514,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--prefix-early-stopping-patience', '--prefix_early_stopping_patience', type=int, default=3)
     parser.add_argument('--prefix-trajectory-sampling', '--prefix_trajectory_sampling', choices=('flat', 'random_one'), default='flat')
     parser.add_argument('--gradient-checkpointing', '--gradient_checkpointing', action=argparse.BooleanOptionalAction, default=defaults.gradient_checkpointing)
-    return parser.parse_args()
+    return parse_config_args(parser, method='dspr', section='training', aliases={
+        'fold_root': 'kfold_root', 'checkpoint_root': 'output_path',
+    })
 
 
 def main() -> int:
@@ -683,10 +540,7 @@ def main() -> int:
     model = DSPRModel(config)
     root = Path(args.output_path)
     root.mkdir(parents=True, exist_ok=True)
-    (root / 'staged_config.json').write_text(
-        json.dumps(vars(args), ensure_ascii=False, indent=2, default=str) + '\n',
-        encoding='utf-8',
-    )
+    write_resolved_config(root / 'training_config.yaml', args)
 
     router_checkpoint = Path(args.router_checkpoint) if args.router_checkpoint else None
     if args.run_stage in ('all', 'router'):

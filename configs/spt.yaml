@@ -1,0 +1,36 @@
+# Experiment settings; CLI arguments override these values.
+method: spt
+common:
+  model_name: Qwen/Qwen2.5-Math-7B-Instruct
+  seed: 42
+  folds: [0, 1, 2, 3, 4]
+  gpus: '0'
+  problem_dataset: data/canonical_math_paired.jsonl
+  fold_root: output/qwen-2.5/kfold
+  max_seq_length: 2048
+  checkpoint_root: checkpoints/qwen_spt_seed42
+  result_root: output/qwen_spt_seed42
+  prefix_length: 50
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  logging_steps: 10
+  save_total_limit: 3
+  early_stopping_threshold: 0.0
+  gradient_checkpointing: true
+  learning_rate: 4.0e-05
+  weight_decay: 0.0
+  num_epochs: 15
+  early_stopping_patience: 3
+  trajectory_sampling: flat
+inference:
+  temperature: 0.0
+  top_p: 1.0
+  samples_per_problem: 1
+  max_new_tokens: 2048
+  checkpoint_selection: best
+aggregation:
+  bootstrap_samples: 10000
+  bootstrap_seed: 42

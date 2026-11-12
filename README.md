@@ -40,12 +40,24 @@ generation QC files to the scoring machine, using the same repository code revis
 For K-fold aggregation, also copy the fold ID files and problem dataset; checkpoints
 are not needed. Set the path variables below to their locations on that machine.
 
+Training, held-out inference, and aggregation accept `--config FILE.yaml`.
+Presets are `configs/dspr.yaml`, `configs/dspr_label.yaml`, `configs/spt.yaml`, and
+`configs/lora.yaml`. Copy a preset for each run and edit its `common`, `training`,
+`inference`, and `aggregation` sections. `common` holds shared model, path, and fold
+settings; each entrypoint reads its own section. Explicit CLI options override YAML.
+Paths are relative to the repository root; YAML values do not expand shell variables.
+New runs save effective settings as YAML. Predictions and machine-readable manifests
+remain JSON/JSONL.
+
+Install the declared dependencies. GPU auto-detection uses `CUDA_VISIBLE_DEVICES`
+or `nvidia-smi`; on a CPU machine, pass `--gpus 0` when inspecting a dry run.
+
 ## 1. Generate Base Responses and Sampled Trajectories
 
 Generate one greedy response per Original/Simple/Hard problem for the base comparison:
 
 ```bash
-python scripts/inference.py \
+CUDA_VISIBLE_DEVICES=0 python scripts/inference.py \
   --baseline base --backend vllm --model-name "$MODEL_NAME" \
   --data-path "$PROBLEM_DATASET" --output-dir "$WORK_DIR/base" \
   --max-new-tokens 2048 --max-model-len 4096 \
@@ -156,14 +168,6 @@ python scripts/run_dag_analysis.py \
 
 Add `--batch-errors-file` when the provider supplies a separate error file. For online runs, `--resume` reuses successful checkpoints; concurrency and request-rate limits control retry pressure.
 
-The shell launcher exposes the same workflow:
-
-```bash
-ANNOTATOR="$ANNOTATOR" SEGMENTED_INPUT="$SEGMENTED_RECORDS" \
-OUTPUT_DIR="$WORK_DIR/annotation/$ANNOTATOR" MODE=normal \
-  bash scripts/run_dag_analysis.sh --resume
-```
-
 ## 4. Compute GED
 
 Compare each variant with its Original anchor from the same annotator. Keep compression, embedding configuration, costs, and compute budgets fixed across annotators.
@@ -234,22 +238,31 @@ DSPR first trains a router on deduplicated canonical prompts, then freezes the r
 Configure the full K-fold launcher:
 
 ```bash
-export CHECKPOINT_DIR="$WORK_DIR/models/dspr"
-export INFER_OUTPUT_DIR="$WORK_DIR/predictions/dspr"
-export BASELINE_PATH="$BASE_RECORDS"
-bash scripts/run_dspr_pipeline.sh --gpus "$GPUS"
+mkdir -p "$WORK_DIR"
+export DSPR_CONFIG="$WORK_DIR/dspr.yaml"
+cp configs/dspr.yaml "$DSPR_CONFIG"
 ```
 
-The launcher runs training and held-out generation, then prints the commands for offline scoring and aggregation. It reads the exported `MODEL_NAME`, `PROBLEM_DATASET`, and `KFOLD_ROOT`. Choose a stage or a fold subset as needed:
+Set `common.model_name`, `problem_dataset`, `fold_root`, `checkpoint_root`, and
+`result_root` in that copy to your local paths. Training hyperparameters belong in
+`training`; generation settings belong in `inference`. The launcher runs training
+and held-out generation, then prints the offline scoring and aggregation commands:
 
 ```bash
-bash scripts/run_dspr_pipeline.sh --gpus "$GPUS" --train-only
-bash scripts/run_dspr_pipeline.sh --gpus "$GPUS" --eval-only
-bash scripts/run_dspr_pipeline.sh --gpus "$GPUS" --folds 0
-bash scripts/run_dspr_pipeline.sh --gpus "$GPUS" --dry-run
+python scripts/run_pipeline.py dspr --config "$DSPR_CONFIG" --gpus "$GPUS"
+
+# Alternative invocations:
+python scripts/run_pipeline.py dspr --config "$DSPR_CONFIG" --gpus "$GPUS" --train-only
+python scripts/run_pipeline.py dspr --config "$DSPR_CONFIG" --gpus "$GPUS" --eval-only
+python scripts/run_pipeline.py dspr --config "$DSPR_CONFIG" --gpus "$GPUS" --folds 0
+python scripts/run_pipeline.py dspr --config "$DSPR_CONFIG" --gpus "$GPUS" --dry-run
 ```
 
-These are alternative invocations. A training dry run validates and prints commands without loading a model. GPU workers claim pending folds; one GPU runs folds sequentially. Configure stage-specific epochs, learning rates, and early stopping through the launcher's environment variables or `--help`.
+A dry run validates and prints commands without loading a model. GPU workers claim
+pending folds; one GPU runs folds sequentially. All three methods use
+`python scripts/run_pipeline.py METHOD --config FILE.yaml`. Experiment settings
+come from YAML and CLI options. Invoke it with the Python interpreter of the
+training environment; child processes use that same interpreter.
 
 For a single fold, or independent router/prefix stages:
 
@@ -264,6 +277,10 @@ python scripts/train.py dspr \
 ```
 
 Use `--run-stage router` for the first stage alone. For the second stage, use `--run-stage prefix --router-checkpoint "$ROUTER_CHECKPOINT"`, where `ROUTER_CHECKPOINT` is your saved router artifact. `--router-context-cache-path` permits reuse of compatible prompt encodings.
+Router ID inputs must be JSON manifests containing an `all` list. Missing manifests
+are errors; router IDs are never inferred from the filtered prefix trajectories.
+An incompatible context cache is also an error: choose a new cache path when
+changing its dataset, model, or context layer.
 
 To train each prefix with its binary supervision label, select `--prefix-routing label`.
 Simple examples use alpha 0 and Hard examples use alpha 1 during prefix training.
@@ -275,16 +292,18 @@ Reuse the routers from a completed run to train fresh prefixes on the same folds
 
 ```bash
 export ROUTER_CHECKPOINT_ROOT="/path/to/existing-dspr-checkpoints"
-PREFIX_ROUTING=label ROUTER_CHECKPOINT_ROOT="$ROUTER_CHECKPOINT_ROOT" \
-CHECKPOINT_DIR="$WORK_DIR/models/dspr-label" \
-INFER_OUTPUT_DIR="$WORK_DIR/predictions/dspr-label" \
-  bash scripts/run_dspr_pipeline.sh --gpus "$GPUS"
+python scripts/run_pipeline.py dspr --config configs/dspr_label.yaml \
+  --model-name "$MODEL_NAME" --problem-dataset "$PROBLEM_DATASET" \
+  --fold-root "$KFOLD_ROOT" --gpus "$GPUS" \
+  --checkpoint-root "$WORK_DIR/models/dspr-label" \
+  --result-root "$WORK_DIR/predictions/dspr-label" \
+  --router-checkpoint-root "$ROUTER_CHECKPOINT_ROOT"
 ```
 
 Each source fold must contain `fold_N/router/router_trainable.pt`, the router saved
 after validation checkpoint selection. Only router weights are loaded; prefixes
 start from fresh seeded initialization. Match the source model, router architecture,
-seed and fold assignment. Omit `ROUTER_CHECKPOINT_ROOT` to train both stages.
+seed and fold assignment. Omit `--router-checkpoint-root` to train both stages.
 The K-fold Python entrypoint accepts the same `--prefix-routing label` and
 `--router-checkpoint-root` options. For a single fold, combine `--prefix-routing label`
 with `--run-stage prefix --router-checkpoint "$ROUTER_CHECKPOINT"`.
@@ -298,10 +317,12 @@ Both baselines use the same grouped folds and selected trajectories as DSPR. SPT
 ```bash
 METHOD=spt  # Change to lora for the LoRA pipeline.
 python scripts/train_kfold.py "$METHOD" \
+  --config "configs/$METHOD.yaml" \
   --model-name "$MODEL_NAME" --fold-root "$KFOLD_ROOT" \
   --output-root "$WORK_DIR/models/$METHOD" --gpus "$GPUS"
 
 python scripts/evaluate.py "$METHOD" run \
+  --config "configs/$METHOD.yaml" \
   --model-name "$MODEL_NAME" --checkpoint-root "$WORK_DIR/models/$METHOD" \
   --test-root "$KFOLD_ROOT" --id-root "$KFOLD_ROOT" \
   --output-root "$WORK_DIR/predictions/$METHOD" --gpus "$GPUS" \
@@ -311,18 +332,23 @@ python scripts/evaluate.py "$METHOD" run \
 "$SCORE_PYTHON" scripts/score_answers.py "$WORK_DIR/predictions/$METHOD"
 export DSPR_RECORDS="/path/to/aggregated-dspr-predictions.jsonl"
 "$SCORE_PYTHON" scripts/evaluate.py "$METHOD" aggregate \
+  --config "configs/$METHOD.yaml" \
   --result-root "$WORK_DIR/predictions/$METHOD" --id-root "$KFOLD_ROOT" \
   --raw-data "$PROBLEM_DATASET" --base "$BASE_RECORDS" --dspr "$DSPR_RECORDS"
 ```
 
 SPT accepts `--prefix-length`; LoRA accepts `--rank`, `--lora-alpha`, and `--target-modules`. Parameter-matched LoRA checks the configured DSPR budget; for another model, set `--dspr-parameter-budget` accordingly. Use `--no-enforce-parameter-budget` for an explicitly unmatched configuration. Add `--folds 0` for one fold or `--dry-run` to inspect training/inference commands. SPT aggregation can additionally take `--lora "$LORA_RECORDS"`.
 
-The baseline shell launcher supports `STAGE=train|eval|all`, `FOLDS`, `GPUS`, and `DRY_RUN`. It finishes after generation and prints the separate scoring/aggregation commands. Use the explicit commands above for custom models and comparison files. The training-only shortcut forwards method arguments:
+The shared pipeline launcher accepts the same `--config`, `--gpus`, `--folds`,
+`--stage all|train|eval`, and `--dry-run` options as DSPR. It ends after generation
+and prints the separate scoring/aggregation commands. For example:
 
 ```bash
-STAGE=train GPUS="$GPUS" KFOLD_ROOT="$KFOLD_ROOT" \
-CHECKPOINT_ROOT="$WORK_DIR/models/$METHOD" \
-  bash scripts/run_baseline_pipeline.sh "$METHOD" --model-name "$MODEL_NAME"
+python scripts/run_pipeline.py "$METHOD" --config "configs/$METHOD.yaml" \
+  --model-name "$MODEL_NAME" --problem-dataset "$PROBLEM_DATASET" \
+  --fold-root "$KFOLD_ROOT" --gpus "$GPUS" \
+  --checkpoint-root "$WORK_DIR/models/$METHOD" \
+  --result-root "$WORK_DIR/predictions/$METHOD" --train-only
 ```
 
 ## 8. Held-Out Evaluation and Aggregation
@@ -330,6 +356,8 @@ CHECKPOINT_ROOT="$WORK_DIR/models/$METHOD" \
 To run the DSPR stages separately:
 
 ```bash
+export CHECKPOINT_DIR="$WORK_DIR/models/dspr"
+export INFER_OUTPUT_DIR="$WORK_DIR/predictions/dspr"
 python scripts/train_kfold.py dspr \
   --model-name "$MODEL_NAME" --problem-dataset "$PROBLEM_DATASET" \
   --fold-root "$KFOLD_ROOT" --output-root "$CHECKPOINT_DIR" --gpus "$GPUS"
@@ -379,6 +407,8 @@ done
 
 For a single condition, use `scripts/evaluate.py dspr run --forced-alpha 0.5`
 with `--reference-run-root "$LEARNED_RUN_DIR"` and the usual checkpoint, fold, and output paths.
+Checkpoint selection `best` requires validation evidence or the final saved model;
+use `--checkpoint-selection latest` to explicitly select the latest retained step.
 
 For a smoke run, add `--folds 0 --problem-id "$PROBLEM_ID"` to inference and choose a separate run directory. Such a partial run is not a complete fold for aggregation.
 
@@ -435,14 +465,38 @@ python scripts/plot_router_layer_ablation.py \
 
 Omit `LAYERS` to inspect all model layers. For a fixed-routing inference comparison, add `--forced-alpha` to single-checkpoint DSPR inference and keep all other settings unchanged.
 
+For manual inspection, the GED viewer supports percentile tails and an absolute
+threshold through one entrypoint:
+
+```bash
+python -m utils.visualization.visualize_ged_similarity \
+  --csv "/path/to/ged-comparison-table.csv" \
+  --segmented "$SEGMENTED_RECORDS" --analyzed "$DAG_RECORDS" \
+  --output "$WORK_DIR/ged-examples.html" --max-ged 0
+```
+
+The CSV uses `original_vs_simple_ged` and `original_vs_hard_ged` columns. Omit
+`--max-ged` to select the lowest/highest 10%, or set `--low-percentile` and
+`--high-percentile` explicitly. Response and DAG viewers remain available through
+`python -m utils.visualization.visualize_response --input FILE --output PAGE` and
+`python -m utils.visualization.visualize_dag --input FILE --output PAGE`.
+
 ## Code Structure
 
 | Module | Responsibility |
 | --- | --- |
+| `configs/` | YAML presets for DSPR, label-routed prefixes, SPT, and LoRA |
 | `src/dspr/`, `src/dspr_training/` | Dual prefixes, router, and staged training |
 | `src/spt/`, `src/spt_training/` | Static prompt baseline |
 | `src/dspr_dataset/` | Shared screening and trajectory-selection strategies |
 | `src/data_analysis/` | Segmentation, annotation, graph construction, and GED |
 | `src/inference/` | Model adapters, sampling, and response validation |
 | `src/experiment_pipeline/` | Training orchestration, held-out evaluation, and aggregation |
-| `src/utils/` | Answer evaluation, I/O, and progress reporting |
+| `src/utils/` | Answer evaluation, configuration, I/O, and shared training/progress tools |
+
+All three training methods use `src/utils/datasets.py` for trajectory encoding;
+DSPR requests additional router inputs. The router stage reads canonical prompts
+through `src/dspr_training/dataset.py`. Training and inference share the math prompt
+in `src/utils/prompts.py` and the GPU fold queue in `src/utils/scheduling.py`.
+OOF calculations live in `src/experiment_pipeline/metrics.py`; `aggregate.py`
+validates input files and exports the results.

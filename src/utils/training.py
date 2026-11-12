@@ -5,11 +5,75 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import sys
 
-from transformers import TrainerCallback
+import numpy as np
+import torch
+from transformers import TrainerCallback, TrainingArguments
 
 from .training_progress import PROGRESS_EVENT_PREFIX, TRAIN_LOG_PREFIX
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def training_arguments(*, eval_strategy, device=None, **kwargs):
+    """Shared Trainer settings; method-specific loss/precision choices stay explicit."""
+    defaults = dict(
+        logging_strategy="steps", metric_for_best_model="eval_loss",
+        greater_is_better=False, remove_unused_columns=False,
+        report_to="none", gradient_checkpointing=False,
+    )
+    defaults.update(kwargs)
+    defaults['eval_strategy'] = eval_strategy
+    if device is not None and device.startswith("cpu"):
+        defaults['use_cpu'] = True
+    return TrainingArguments(**defaults)
+
+
+def stage_optimizer(trainer, module, name):
+    """Keep staged optimization restricted to the selected trainable module."""
+    if trainer.optimizer is None:
+        parameter_ids = {id(parameter) for parameter in module.parameters()}
+        decay_names = set(trainer.get_decay_parameter_names(trainer.model))
+        groups = []
+        for use_decay in (True, False):
+            parameters = [
+                parameter for key, parameter in trainer.model.named_parameters()
+                if parameter.requires_grad and id(parameter) in parameter_ids
+                and (key in decay_names) == use_decay
+            ]
+            if parameters:
+                groups.append({
+                    'params': parameters,
+                    'lr': trainer.args.learning_rate,
+                    'weight_decay': trainer.args.weight_decay if use_decay else 0.0,
+                    'group_name': name,
+                })
+        optimizer_cls, kwargs = trainer.get_optimizer_cls_and_kwargs(trainer.args, trainer.model)
+        trainer.optimizer = optimizer_cls(groups, **kwargs)
+    return trainer.optimizer
+
+
+class KeepFrozenModulesEvalCallback(TrainerCallback):
+    """Keep frozen modules deterministic when Trainer switches to training mode."""
+
+    def __init__(self, *module_names):
+        self.module_names = module_names
+
+    def on_step_begin(self, args, state, control, model, **kwargs):
+        for name in self.module_names:
+            getattr(model, name).eval()
+
+    on_train_begin = on_step_begin
+    on_epoch_begin = on_step_begin
 
 
 class ProgressEventCallback(TrainerCallback):
@@ -24,8 +88,8 @@ class ProgressEventCallback(TrainerCallback):
             "step": int(state.global_step),
             "total_steps": int(state.max_steps),
             "epoch": float(state.epoch) if state.epoch is not None else None,
-            "best_metric": getattr(state, "best_metric", None),
-            "best_model_checkpoint": getattr(state, "best_model_checkpoint", None),
+            "best_metric": state.best_metric,
+            "best_model_checkpoint": state.best_model_checkpoint,
         }
         if self.stage is not None:
             payload["stage"] = self.stage
@@ -112,4 +176,4 @@ def update_steps_per_epoch(dataset_size: int, batch_size: int, gradient_accumula
     if batch_size <= 0 or gradient_accumulation_steps <= 0:
         raise ValueError("batch_size and gradient_accumulation_steps must be positive")
     dataloader_batches = math.ceil(dataset_size / batch_size)
-    return max(math.ceil(dataloader_batches / gradient_accumulation_steps), 1)
+    return math.ceil(dataloader_batches / gradient_accumulation_steps)

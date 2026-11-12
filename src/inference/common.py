@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from dspr.config import MATH_SYSTEM_PROMPT
+from utils.io import read_records as read_jsonl, write_json, write_jsonl
+from utils.prompts import MATH_SYSTEM_PROMPT
 
 
 VARIANTS = ("original", "simple", "hard")
@@ -22,25 +22,6 @@ class GenerationResult:
     token_ids: tuple[int, ...] = ()
     finish_reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Read a JSONL file and fail with an actionable line-level error."""
-
-    records: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid JSON in {path} line {line_number}: {exc}") from exc
-            if not isinstance(record, dict):
-                raise ValueError(f"Expected a JSON object in {path} line {line_number}")
-            records.append(record)
-    return records
 
 
 def read_math_records(
@@ -86,21 +67,6 @@ def normalise_problem_id(value: Any) -> int:
         raise ValueError(f"problem_id must be an integer, got {value!r}") from exc
 
 
-def build_messages(problem: str, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> list[dict[str, str]]:
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": problem},
-    ]
-
-
-def build_prompt(tokenizer: Any, problem: str, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> str:
-    return tokenizer.apply_chat_template(
-        build_messages(problem, system_prompt),
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-
-
 def ground_truth_for(variant_data: dict[str, Any]) -> Any:
     """Read references from canonical inputs or saved inference records."""
     for field in ("solution", "answer", "ground_truth"):
@@ -120,18 +86,3 @@ def ground_truth_type_for(variant_data: dict[str, Any], variant: str) -> str:
                 )
             return "solution" if field == "solution" else "answer"
     raise ValueError(f"No reference found for variant={variant}")
-
-
-def write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-
-
-def write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")

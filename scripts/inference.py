@@ -138,12 +138,10 @@ def validate_args(args: argparse.Namespace) -> None:
 
 
 def set_seed(seed: int) -> None:
+    import numpy as np
+    import torch
+
     random.seed(seed)
-    try:
-        import numpy as np
-        import torch
-    except ImportError:
-        return
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)

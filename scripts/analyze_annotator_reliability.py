@@ -27,7 +27,7 @@ from data_analysis.measurement.reliability import (
 )
 from data_analysis.records import iter_samples
 from utils.artifacts import file_identity, fingerprint
-from utils.io import read_jsonl, write_json, write_jsonl
+from utils.io import read_json, read_jsonl, write_json, write_jsonl
 
 ANNOTATORS = ("deepseek", "gpt", "haiku", "qwen")
 DISPLAY_NAMES = {"deepseek": "DeepSeek", "gpt": "GPT", "haiku": "Haiku", "qwen": "Qwen"}
@@ -36,10 +36,6 @@ PAIRS = tuple(combinations(ANNOTATORS, 2))
 ANNOTATION_METRICS = ("role_agreement",) + tuple(f"edge_{k}_f1" for k in EDGE_KINDS)
 GED_METRICS = ("absolute_difference", "signed_difference_b_minus_a", "raw_absolute_difference",
                "normalizer_absolute_difference")
-
-
-def read_json(path):
-    return json.loads(Path(path).read_text())
 
 
 def csv_write(path, rows):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict
 from typing import Any
 
 import numpy as np
@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from transformers import Trainer
 
 from .trainer import _binary_router_metrics
+from utils.training import stage_optimizer
 
 
 logger = logging.getLogger(__name__)
@@ -55,40 +56,7 @@ class RouterPromptTrainer(Trainer):
         super().__init__(*args, **kwargs)
 
     def create_optimizer(self):
-        """Build AdamW groups containing only trainable router parameters."""
-        if self.optimizer is not None:
-            return self.optimizer
-
-        opt_model = self.model
-        model_to_group = opt_model.module if hasattr(opt_model, 'module') else opt_model
-        router_parameter_ids = {id(parameter) for parameter in model_to_group.router.parameters()}
-        decay_parameters = set(self.get_decay_parameter_names(opt_model))
-        grouped_parameters = []
-        for use_decay in (True, False):
-            parameters = [
-                parameter
-                for name, parameter in opt_model.named_parameters()
-                if parameter.requires_grad
-                and id(parameter) in router_parameter_ids
-                and (name in decay_parameters) == use_decay
-            ]
-            if parameters:
-                grouped_parameters.append(
-                    {
-                        'params': parameters,
-                        'lr': self.args.learning_rate,
-                        'weight_decay': self.args.weight_decay if use_decay else 0.0,
-                        'group_name': 'router',
-                    }
-                )
-        if not grouped_parameters:
-            raise ValueError('Router stage has no trainable router parameters')
-
-        optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(self.args, opt_model)
-        optimizer_kwargs.pop('params', None)
-        optimizer_kwargs.pop('model', None)
-        self.optimizer = optimizer_cls(grouped_parameters, **optimizer_kwargs)
-        return self.optimizer
+        return stage_optimizer(self, self.model.router, 'router')
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         target = inputs.pop('target_alpha').float().reshape(-1, 1)
@@ -140,12 +108,11 @@ class RouterPromptTrainer(Trainer):
     def save_model(self, output_dir: str | None = None, _internal_call: bool = False):
         output_dir = output_dir or self.args.output_dir
         os.makedirs(output_dir, exist_ok=True)
-        model_to_save = self.model.module if hasattr(self.model, 'module') else self.model
-        config = model_to_save.config
-        config_payload = asdict(config) if is_dataclass(config) else None
+        config = self.model.config
+        config_payload = asdict(config)
         torch.save(
             {
-                'router_state_dict': model_to_save.router.state_dict(),
+                'router_state_dict': self.model.router.state_dict(),
                 'model_config': config_payload,
                 'training_args': self.args.to_dict(),
                 'target_smoothing': self.target_smoothing,
@@ -156,16 +123,10 @@ class RouterPromptTrainer(Trainer):
 
     def load_router_checkpoint(self, checkpoint_path: str) -> None:
         checkpoint = torch.load(checkpoint_path, map_location=self.args.device)
-        state_dict = checkpoint.get('router_state_dict', checkpoint)
-        model_to_load = self.model.module if hasattr(self.model, 'module') else self.model
-        model_to_load.router.load_state_dict(state_dict)
+        state_dict = checkpoint['router_state_dict']
+        self.model.router.load_state_dict(state_dict)
 
     def _load_best_model(self):
-        best_checkpoint = self.state.best_model_checkpoint
-        if best_checkpoint:
-            router_checkpoint = os.path.join(best_checkpoint, 'router_trainable.pt')
-            if os.path.isfile(router_checkpoint):
-                logger.info('Loading best router checkpoint from %s', router_checkpoint)
-                self.load_router_checkpoint(router_checkpoint)
-                return
-        return super()._load_best_model()
+        checkpoint = os.path.join(self.state.best_model_checkpoint, 'router_trainable.pt')
+        logger.info('Loading best router checkpoint from %s', checkpoint)
+        self.load_router_checkpoint(checkpoint)

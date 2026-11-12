@@ -1,0 +1,45 @@
+# Experiment settings; CLI arguments override these values.
+method: dspr
+common:
+  model_name: Qwen/Qwen2.5-Math-7B-Instruct
+  seed: 42
+  folds: [0, 1, 2, 3, 4]
+  gpus: auto
+  problem_dataset: data/canonical_math_paired.jsonl
+  fold_root: output/qwen-2.5/kfold
+  max_seq_length: 2048
+  checkpoint_root: checkpoints/qwen_staged_kfold_seed42
+  result_root: output/qwen_staged_kfold_seed42
+  context_layer_idx: 15
+  prefix_length: 15
+  router_intermediate_dim: 64
+  router_dropout: 0.1
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  logging_steps: 10
+  save_total_limit: 3
+  early_stopping_threshold: 0.0
+  gradient_checkpointing: true
+  prefix_routing: router
+  router_learning_rate: 1.0e-05
+  prefix_learning_rate: 4.0e-05
+  router_weight_decay: 0.001
+  prefix_weight_decay: 0.0
+  router_target_smoothing: 0.05
+  router_epochs: 20
+  prefix_epochs: 15
+  prefix_trajectory_sampling: flat
+  router_early_stopping_patience: 3
+  prefix_early_stopping_patience: 3
+inference:
+  temperature: 0.0
+  top_p: 1.0
+  samples_per_problem: 1
+  max_new_tokens: 2048
+  checkpoint_selection: best
+aggregation:
+  bootstrap_samples: 10000
+  bootstrap_seed: 42

@@ -8,7 +8,6 @@ import hashlib
 import json
 import math
 import os
-import queue
 import re
 import subprocess
 import sys
@@ -16,56 +15,25 @@ import threading
 import time
 from collections import deque
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
+from utils.config import parse_config_args, write_resolved_config
+from utils.io import read_json, read_records as read_jsonl, write_json
 from utils.inference_progress import parse_progress
+from utils.scheduling import parse_gpu_list, run_folds
 
-from .kfold import (
-    DEFAULT_FOLDS, DEFAULT_MODEL_NAME, DEFAULT_OUTPUT_ROOTS as DEFAULT_CHECKPOINT_ROOTS,
-    parse_fold_list, parse_gpu_list, resolve_path, utc_now, write_json,
+from .common import (
+    DEFAULT_MODEL_NAME, DEFAULT_CHECKPOINT_ROOTS, DEFAULT_RESULT_ROOTS,
+    REPO_ROOT, VARIANTS, expected_ids_for_fold, normalise_id, output_is_nonempty,
+    parse_fold_list, resolve_path, utc_now,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_ROOTS = {
-    method: f"output/{Path(path).name}" for method, path in DEFAULT_CHECKPOINT_ROOTS.items()
-}
-VARIANTS = ("original", "simple", "hard")
 CHECKPOINT_PATTERN = re.compile(r"^checkpoint-(\d+)$")
 CHECKPOINT_FILES = {"dspr": "dspr_trainable.pt", "spt": "baseline_trainable.pt"}
 ADAPTER_FILES = ("adapter_model.safetensors", "adapter_model.bin")
-
-
-def read_json(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
-
-
-def read_jsonl(path: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid JSON in {path} line {line_number}: {exc}") from exc
-            if not isinstance(record, dict):
-                raise ValueError(f"Expected an object in {path} line {line_number}")
-            records.append(record)
-    return records
-
-
-def normalise_id(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Problem ID must be an integer, got {value!r}") from exc
 
 
 def checkpoint_step(path: Path) -> int:
@@ -80,33 +48,10 @@ def eval_loss_for_checkpoint(state: dict[str, Any], step: int) -> float | None:
             continue
         event_step = int(event.get("step", -1))
         if event_step <= step:
-            try:
-                matches.append((event_step, float(event["eval_loss"])))
-            except (TypeError, ValueError):
-                continue
+            matches.append((event_step, float(event["eval_loss"])))
     if not matches:
         return None
     return max(matches, key=lambda item: item[0])[1]
-
-
-def held_out_id_path(id_root: Path, fold: int) -> Path:
-    path = id_root / f"fold_{fold}" / "test_ids.json"
-    if not path.is_file():
-        raise FileNotFoundError(f"Missing fold test IDs: {path}")
-    return path
-
-
-def expected_ids_for_fold(id_root: Path, fold: int) -> list[int]:
-    path = held_out_id_path(id_root, fold)
-    payload = read_json(path)
-    ids = [normalise_id(value) for value in payload.get("all", [])]
-    if not ids or len(ids) != len(set(ids)):
-        raise ValueError(f"Invalid or duplicate held-out IDs in {path}")
-    return sorted(ids)
-
-
-def output_is_nonempty(path: Path) -> bool:
-    return path.exists() and (not path.is_dir() or any(path.iterdir()))
 
 
 @dataclass
@@ -136,7 +81,7 @@ class FoldSpec:
 def run_fold(
     spec: FoldSpec,
     expected_samples: int,
-    lock: threading.Lock,
+    state_lock: threading.Lock,
     progress_position: int = 0,
 ) -> FoldSpec:
     output_dir = Path(spec.output_dir)
@@ -146,7 +91,7 @@ def run_fold(
     env["PYTHONUNBUFFERED"] = "1"
     env["TOKENIZERS_PARALLELISM"] = "false"
     env["PYTHONPATH"] = str(REPO_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
-    with lock:
+    with state_lock:
         spec.status = "running"
         spec.stage = "starting"
         spec.total_generations = len(spec.expected_problem_ids) * len(VARIANTS)
@@ -164,7 +109,7 @@ def run_fold(
                     position=progress_position, dynamic_ncols=True, leave=False)
     progress.set_postfix(stage="starting")
     try:
-        return_code = stream_inference(spec, env, progress, lock, error_tail)
+        return_code = stream_inference(spec, env, progress, state_lock, error_tail)
     finally:
         progress.close()
 
@@ -176,7 +121,7 @@ def run_fold(
             validate_generated_output(spec, expected_samples)
         except Exception as exc:
             validation_error = str(exc)
-    with lock:
+    with state_lock:
         spec.return_code = return_code
         spec.elapsed_seconds = time.monotonic() - started
         spec.finished_at = utc_now()
@@ -195,6 +140,19 @@ def run_fold(
             for line in error_tail:
                 tqdm.write(f"[fold {spec.fold}] {line}")
     return spec
+
+
+def record_failure(spec: FoldSpec, exc: Exception) -> None:
+    spec.status = "failed"
+    spec.return_code = -1
+    spec.error = repr(exc)
+    spec.finished_at = utc_now()
+    spec.stage = "failed"
+    try:
+        write_json(Path(spec.output_dir) / "run_status.json", asdict(spec))
+    except OSError as status_error:
+        tqdm.write(f"[fold {spec.fold}] cannot save failure status: {status_error}")
+    tqdm.write(f"[fold {spec.fold}] failed: {exc}; log: {spec.log_path}")
 
 
 def stream_inference(spec, env, progress, lock, error_tail) -> int:
@@ -238,56 +196,6 @@ def stream_inference(spec, env, progress, lock, error_tail) -> int:
             progress.set_postfix(details, refresh=False)
         process.stdout.close()
         return process.wait()
-
-
-def run_dynamic_schedule(
-    specs: list[FoldSpec],
-    gpu_ids: list[str],
-    expected_samples: int,
-) -> list[FoldSpec]:
-    pending: queue.Queue[FoldSpec] = queue.Queue()
-    for spec in specs:
-        pending.put(spec)
-    state_lock = threading.Lock()
-    completed: list[FoldSpec] = []
-    completed_lock = threading.Lock()
-
-    def worker(gpu: str, position: int) -> None:
-        while True:
-            try:
-                spec = pending.get_nowait()
-            except queue.Empty:
-                return
-            result = spec
-            try:
-                spec.gpu = gpu
-                result = run_fold(spec, expected_samples, state_lock, position)
-            except Exception as exc:
-                spec.status = "failed"
-                spec.return_code = -1
-                spec.error = repr(exc)
-                spec.finished_at = utc_now()
-                spec.stage = "failed"
-                try:
-                    write_json(Path(spec.output_dir) / "run_status.json", asdict(spec))
-                except OSError:
-                    pass
-                tqdm.write(f"[fold {spec.fold}] failed: {exc}; log: {spec.log_path}")
-                result = spec
-            finally:
-                with completed_lock:
-                    completed.append(result)
-                pending.task_done()
-
-    threads = [
-        threading.Thread(target=worker, args=(gpu, position), name=f"evaluate-gpu-{gpu}")
-        for position, gpu in enumerate(gpu_ids[: min(len(gpu_ids), len(specs))])
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    return sorted(completed, key=lambda item: item.fold)
 
 
 def validate_generated_output(spec: FoldSpec, expected_samples: int) -> dict[str, int]:
@@ -432,12 +340,10 @@ def resolve_checkpoint(
         })
     if direct is not None:
         return selected(fold_root, {"method": direct_selection})
-    if available:
-        directory = available[-1]
-        return selected(directory, {
-            "method": "latest_checkpoint_fallback_no_eval_state", "checkpoint_step": checkpoint_step(directory),
-        })
-    raise FileNotFoundError(f"No {method.upper()} checkpoint found under {fold_root}")
+    raise FileNotFoundError(
+        f"No validation-selected {method.upper()} checkpoint under {fold_root}; "
+        "use --checkpoint-selection latest to explicitly select the latest weights"
+    )
 
 
 def build_inference_command(
@@ -575,11 +481,11 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
     parser.add_argument("--checkpoint-root", default=DEFAULT_CHECKPOINT_ROOTS[method])
     parser.add_argument("--test-root", default="output/qwen-2.5/kfold")
     parser.add_argument("--id-root", default="output/qwen-2.5/kfold")
-    parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOTS[method])
+    parser.add_argument("--output-root", default=DEFAULT_RESULT_ROOTS[method])
     parser.add_argument("--inference-script", default="scripts/inference.py")
     parser.add_argument("--checkpoint-selection", choices=("best", "latest"), default="best")
     parser.add_argument("--folds", nargs="+", type=int, default=None)
-    parser.add_argument("--gpus", default=None, help="Physical GPU IDs, e.g. 0,1; default: auto-detect")
+    parser.add_argument("--gpus", type=str, default=None, help="Physical GPU IDs, e.g. 0,1; default: auto-detect")
     parser.add_argument("--problem-id", type=int, default=None)
     parser.add_argument("--allow-existing", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Skip complete matching folds; rerun interrupted folds")
@@ -601,7 +507,9 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
         parser.add_argument("--router-intermediate-dim", type=int, default=64)
         parser.add_argument("--router-dropout", type=float, default=0.10)
         parser.add_argument("--max-seq-length", type=int, default=2048)
-    return parser.parse_args(argv)
+    return parse_config_args(parser, argv, method=method, section="inference", aliases={
+        "fold_root": ("test_root", "id_root"), "result_root": "output_root",
+    })
 
 
 def main(method: str = "dspr", argv: list[str] | None = None) -> int:
@@ -613,7 +521,7 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
     if reference_root is not None:
         if forced_alpha is None:
             raise ValueError("--reference-run-root requires --forced-alpha")
-        reference_root = resolve_path(REPO_ROOT, reference_root).resolve()
+        reference_root = resolve_path(reference_root).resolve()
     if args.temperature != 0.0 or args.top_p != 1.0 or args.samples_per_problem != 1:
         raise ValueError(
             "Held-out evaluation is deterministic-only: require temperature=0, top_p=1, samples_per_problem=1"
@@ -626,13 +534,13 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
         print(f"Reusing checkpoints and inference settings from: {reference_root}", flush=True)
     print("Resolving GPUs and checkpoints...", flush=True)
     gpu_ids = parse_gpu_list(args.gpus)
-    checkpoint_root = resolve_path(REPO_ROOT, args.checkpoint_root).resolve()
-    test_root = resolve_path(REPO_ROOT, args.test_root).resolve()
-    id_root = resolve_path(REPO_ROOT, args.id_root).resolve()
-    output_root = resolve_path(REPO_ROOT, args.output_root).resolve()
+    checkpoint_root = resolve_path(args.checkpoint_root).resolve()
+    test_root = resolve_path(args.test_root).resolve()
+    id_root = resolve_path(args.id_root).resolve()
+    output_root = resolve_path(args.output_root).resolve()
     if reference_root is not None and output_root == reference_root:
         raise ValueError("Fixed-alpha output must be separate from the learned reference run")
-    inference_script = resolve_path(REPO_ROOT, args.inference_script).resolve()
+    inference_script = resolve_path(args.inference_script).resolve()
     if not inference_script.is_file():
         raise FileNotFoundError(f"Inference entrypoint not found: {inference_script}")
     print(f"GPUs: {gpu_ids}; checkpoint selection: {args.checkpoint_selection}", flush=True)
@@ -703,12 +611,14 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
             print(json.dumps(spec.command, ensure_ascii=False))
         return 0
     manifest_path = output_root / "inference_manifest.json"
+    write_resolved_config(output_root / "inference_config.yaml", args)
     write_json(manifest_path, manifest)
     pending = [spec for spec in specs if spec.status != "succeeded"]
     print(f"Starting {len(pending)} folds on {min(len(gpu_ids), len(pending))} GPUs. Manifest: {manifest_path}", flush=True)
     results = sorted(
         [spec for spec in specs if spec.status == "succeeded"]
-        + run_dynamic_schedule(pending, gpu_ids, args.samples_per_problem), key=lambda spec: spec.fold,
+        + run_folds(pending, gpu_ids, partial(run_fold, expected_samples=args.samples_per_problem),
+                    record_failure), key=lambda spec: spec.fold,
     )
     manifest.update(finished_at=utc_now(), folds=[asdict(spec) for spec in results])
     write_json(manifest_path, manifest)

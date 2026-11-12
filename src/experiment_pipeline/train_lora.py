@@ -4,18 +4,13 @@
 from __future__ import annotations
 
 import argparse
-import inspect
-import json
-import random
 from pathlib import Path
-from typing import Any
 
+from utils.config import parse_config_args, write_resolved_config
+from utils.io import write_json
 
-DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-Math-7B-Instruct"
-DEFAULT_DSPR_BUDGET = 337_025
-DEFAULT_RANK = 1
-DEFAULT_LORA_ALPHA = 2
-DEFAULT_RUN_NAME = "qwen_lora_qv_r1_seed42"
+from .common import DEFAULT_MODEL_NAME, DEFAULT_DSPR_BUDGET, DEFAULT_RANK, DEFAULT_LORA_ALPHA
+
 DEFAULT_HIDDEN_SIZE = 3584
 DEFAULT_KV_SIZE = 512
 DEFAULT_LAYERS = 28
@@ -32,14 +27,6 @@ def expected_qv_lora_parameters(
         raise ValueError("LoRA rank and model dimensions must be positive")
     per_layer = rank * ((hidden_size + hidden_size) + (hidden_size + kv_size))
     return layers * per_layer
-
-
-def write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,7 +73,8 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Disable explicitly to train a larger, unmatched LoRA baseline",
     )
-    return parser.parse_args()
+    return parse_config_args(parser, method='lora', section='training',
+                             aliases={'checkpoint_root': 'output_path'})
 
 
 def main() -> int:
@@ -104,45 +92,20 @@ def main() -> int:
     if args.early_stopping_patience < 0 or args.early_stopping_threshold < 0:
         raise ValueError("Invalid early-stopping settings")
 
-    try:
-        import numpy as np
-        import torch
-        from peft import LoraConfig, get_peft_model
-        from transformers import (
-            AutoModelForCausalLM,
-            AutoTokenizer,
-            EarlyStoppingCallback,
-            Trainer,
-            TrainingArguments,
-            default_data_collator,
-        )
-    except ImportError as exc:
-        raise RuntimeError(
-            "LoRA training dependencies are missing. Install requirements.txt, including peft."
-        ) from exc
+    import torch
+    from peft import LoraConfig, get_peft_model
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        EarlyStoppingCallback,
+        Trainer,
+        default_data_collator,
+    )
 
-    from dspr_training.dataset import DSPRDataset
+    from utils.training import set_seed, training_arguments
+    from utils.datasets import TrajectoryDataset
 
-    class LoRADataset(DSPRDataset):
-        """Reuse DSPR tokenization while dropping routing-only tensors."""
-
-        def __getitem__(self, index):
-            item = super().__getitem__(index)
-            for key in (
-                "prompt_input_ids",
-                "prompt_attention_mask",
-                "target_alpha",
-                "variant_type",
-            ):
-                item.pop(key, None)
-            return item
-
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    set_seed(args.seed)
 
     print("Loading base model for parameter-matched LoRA...")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
@@ -158,8 +121,7 @@ def main() -> int:
     base_model.config.use_cache = False
     if args.gradient_checkpointing:
         base_model.gradient_checkpointing_enable()
-        if hasattr(base_model, "enable_input_require_grads"):
-            base_model.enable_input_require_grads()
+        base_model.enable_input_require_grads()
 
     lora_config = LoraConfig(
         r=args.rank,
@@ -188,8 +150,8 @@ def main() -> int:
     )
     model.print_trainable_parameters()
 
-    train_dataset = LoRADataset(args.train_data_path, tokenizer, args.max_seq_length)
-    val_dataset = LoRADataset(args.val_data_path, tokenizer, args.max_seq_length)
+    train_dataset = TrajectoryDataset(args.train_data_path, tokenizer, args.max_seq_length)
+    val_dataset = TrajectoryDataset(args.val_data_path, tokenizer, args.max_seq_length)
     eval_strategy = "epoch" if len(val_dataset) > 0 else "no"
     output_path = Path(args.output_path).resolve()
     budget_manifest = {
@@ -212,6 +174,7 @@ def main() -> int:
         "training_arguments": vars(args),
     }
     write_json(output_path / "budget_manifest.json", budget_manifest)
+    write_resolved_config(output_path / "training_config.yaml", args)
 
     training_kwargs = dict(
         output_dir=str(output_path),
@@ -224,29 +187,18 @@ def main() -> int:
         warmup_steps=args.warmup_steps,
         warmup_ratio=args.warmup_ratio if args.warmup_steps == 0 else 0.0,
         max_grad_norm=args.max_grad_norm,
-        logging_strategy="steps",
         logging_steps=args.logging_steps,
         save_strategy=eval_strategy,
         save_total_limit=args.save_total_limit,
         load_best_model_at_end=(eval_strategy != "no"),
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
-        remove_unused_columns=False,
         dataloader_pin_memory=True,
-        report_to="none",
         disable_tqdm=args.emit_progress_events,
         fp16=(args.device.startswith("cuda") and args.dtype == "float16" and torch.cuda.is_available()),
         bf16=(args.device.startswith("cuda") and args.dtype == "bfloat16" and torch.cuda.is_available()),
-        gradient_checkpointing=False,
         label_names=["labels"],
         seed=args.seed,
     )
-    supported_args = inspect.signature(TrainingArguments.__init__).parameters
-    strategy_argument = "eval_strategy" if "eval_strategy" in supported_args else "evaluation_strategy"
-    training_kwargs[strategy_argument] = eval_strategy
-    if args.device.startswith("cpu"):
-        training_kwargs["use_cpu" if "use_cpu" in supported_args else "no_cuda"] = True
-    training_args = TrainingArguments(**training_kwargs)
+    training_args = training_arguments(eval_strategy=eval_strategy, device=args.device, **training_kwargs)
     callbacks = []
     if args.emit_progress_events:
         from utils.training import ProgressEventCallback

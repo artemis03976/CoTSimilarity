@@ -5,7 +5,9 @@ from __future__ import annotations
 from importlib.metadata import version
 from typing import Sequence
 
-from .common import GenerationResult, build_prompt
+from utils.prompts import build_prompt
+
+from .common import GenerationResult
 from .greedy import GreedyModelConfig, _eos_token_ids
 
 

@@ -8,7 +8,6 @@ import html
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from utils import sort_records
 from utils.io import atomic_text
 from utils.web_report import (
     build_common_css,
@@ -440,18 +439,13 @@ def main():
                        help="Disable DAG compression and show the original full graph")
     args = parser.parse_args()
 
-    # Check if input file exists
-    if not Path(args.input).exists():
-        print(f"Error: Input file not found: {args.input}")
-        return
-
     # Load records
     print(f"Loading data from: {args.input}")
     records = load_analyzed_records(args.input)
     print(f"Loaded {len(records)} records")
 
     # Sort records by problem_id
-    records = sort_records(records)
+    records.sort(key=lambda record: int(record['problem_id']))
 
     # Generate HTML report
     print(f"Generating visualization report...")

@@ -1,58 +1,28 @@
-﻿# DSPR Model Implementation
+# DSPR model and staged training
 
-This directory contains the implementation of the Dynamic Structural Prefix Routing (DSPR) model.
+`model.py` combines a frozen causal LM, prompt-context readout, a scalar router,
+and two trainable soft-prefix tables. Training runs in two stages:
 
-## Structure
+1. Train the router on canonical Simple/Hard prompts with targets 0/1.
+2. Freeze the router and train the prefixes on selected CoT trajectories using
+   language-model loss. Router BCE in this stage is a diagnostic only.
 
-```
-src/
-├── dspr/                      # Core model components
-│   ├── model.py              # Main DSPRModel
-│   ├── router.py             # UCB Router MLP
-│   ├── context_encoder.py    # Context extraction
-│   ├── dual_prefix.py        # Dual structural prefixes
-│   └── config.py             # Configuration
-│
-├── dspr_training/            # Training pipeline
-    ├── dataset.py            # Dataset loader
-    ├── trainer.py            # Training loop
-│   └── loss.py               # Joint loss function
-│
-└── dspr_dataset/             # Dataset construction utilities
-    ├── data_filter.py        # GED-based trajectory filtering
-    └── split_dataset.py      # Train/validation/test split by problem_id
-```
+`prefix_routing: router` mixes prefixes using the frozen router during training.
+`prefix_routing: label` selects the corresponding prefix using each example's
+binary target. Validation and default inference use the continuous router mixture
+in both modes.
 
-## Training
+The router dataset lives in `src/dspr_training/dataset.py`; all methods share
+trajectory encoding in `src/utils/datasets.py`. Both training stages share the
+optimizer construction in `src/utils/training.py`, with learning rate and weight
+decay supplied separately for each stage.
+
+Run the full pipeline with a YAML configuration:
 
 ```bash
-python scripts/train.py dspr
+python scripts/run_pipeline.py dspr --config /path/to/dspr.yaml --gpus 0,1
 ```
 
-## Dataset Format
-
-Expected JSONL format:
-```json
-{
-  "problem_id": 1,
-  "problem": "Problem text...",
-  "response": "Response text...",
-  "variant_type": "simple",
-  "target_alpha": 0.0,
-  "ged_score": 2.5
-}
-```
-
-- `variant_type`: "simple" or "hard"
-- `target_alpha`: 0.0 for simple (exploit), 1.0 for hard (explore)
-- `ged_score`: Graph edit distance used to select training samples
-- `ged_normalized`: GED divided by the conservative unit-edit budget across
-  both graphs, retained for scale-free analysis
-- `similarity_normalized`: `1 - ged_normalized`, also in `[0, 1]`
-
-## Key Features
-
-1. **Single-input architecture**: No need for original problem at inference
-2. **Lightweight**: Only ~1.2M trainable parameters
-3. **Joint loss**: L_total = L_LLM_Gen + λ * L_Router
-4. **Memory efficient**: Fits in 24GB GPU with mixed precision
+See the [root README](../../README.md) for configuration, single-stage commands,
+offline scoring, and aggregation. The checkpoint weight fields remain
+`router_state_dict` and `dual_prefix_state_dict`.

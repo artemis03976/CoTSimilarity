@@ -7,6 +7,19 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+def read_json(path):
+    path = Path(path)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in {path}: {exc}") from exc
+
+
+def read_records(path):
+    """Materialize JSONL when callers need indexing or repeated iteration."""
+    return list(read_jsonl(path))
+
+
 def read_jsonl(path):
     with Path(path).open(encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, 1):
@@ -49,7 +62,6 @@ def write_jsonl(path, records) -> None:
 
 def read_manifest(path) -> dict:
     try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
+        return read_json(path)
+    except FileNotFoundError:
         return {}

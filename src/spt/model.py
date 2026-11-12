@@ -1,4 +1,4 @@
-﻿import torch
+import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -146,17 +146,10 @@ class StaticPromptModel(nn.Module):
         return new_token_ids
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        """Compatibility hook for HuggingFace Trainer."""
-        if hasattr(self.frozen_llm, "gradient_checkpointing_enable"):
-            if gradient_checkpointing_kwargs is None:
-                self.frozen_llm.gradient_checkpointing_enable()
-            else:
-                self.frozen_llm.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
-                )
+        self.frozen_llm.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs=gradient_checkpointing_kwargs,
+        )
         self.frozen_llm.config.use_cache = False
 
     def gradient_checkpointing_disable(self):
-        """Compatibility hook for HuggingFace Trainer."""
-        if hasattr(self.frozen_llm, "gradient_checkpointing_disable"):
-            self.frozen_llm.gradient_checkpointing_disable()
+        self.frozen_llm.gradient_checkpointing_disable()

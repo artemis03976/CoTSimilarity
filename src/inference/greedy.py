@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
-from .common import GenerationResult, build_prompt
+from utils.prompts import build_prompt
+
+from .common import GenerationResult
 
 
 BASELINES = ("base", "dspr", "spt", "lora")

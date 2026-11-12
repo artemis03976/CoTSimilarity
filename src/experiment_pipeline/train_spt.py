@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import inspect
-import json
 import math
-import random
 from dataclasses import fields
 from pathlib import Path
 
 from spt.config import SPTConfig
+from utils.config import parse_config_args, write_resolved_config
+from utils.io import write_json
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,7 +44,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early_stopping_patience", type=int, default=3)
     parser.add_argument("--early_stopping_threshold", type=float, default=0.0)
     parser.add_argument("--resume_trainable_checkpoint", default=None)
-    args = parser.parse_args()
+    args = parse_config_args(parser, method='spt', section='training',
+                             aliases={'checkpoint_root': 'output_path'})
     if args.warmup_steps is None and args.warmup_ratio is None:
         args.warmup_ratio = 0.05
     return args
@@ -63,39 +63,37 @@ def main() -> int:
     if args.warmup_steps is not None and args.warmup_steps < 0:
         raise ValueError("warmup_steps must be non-negative")
 
-    import numpy as np
     import torch
-    from transformers import EarlyStoppingCallback, TrainingArguments, default_data_collator
+    from transformers import EarlyStoppingCallback, default_data_collator
 
-    from dspr_training.dataset import DSPRDataset, ProblemResampledDSPRDataset
-    from utils.training import ProgressEventCallback, TrainingHistoryCallback, update_steps_per_epoch
+    from utils.datasets import TrajectoryDataset, ProblemResampledDataset
+    from utils.training import (
+        ProgressEventCallback, TrainingHistoryCallback, set_seed,
+        training_arguments, update_steps_per_epoch,
+    )
     from spt import StaticPromptModel
     from spt_training import BaselineTrainer
 
     config_fields = {field.name for field in fields(SPTConfig)}
     config = SPTConfig(**{key: value for key, value in vars(args).items() if key in config_fields
                           and value is not None})
-    random.seed(config.seed)
-    np.random.seed(config.seed)
-    torch.manual_seed(config.seed)
-    torch.cuda.manual_seed_all(config.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    set_seed(config.seed)
 
     print("Loading StaticPromptModel baseline...")
     model = StaticPromptModel(config)
     trainable_params = sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
     print(f"Trainable parameters: {trainable_params:,} (soft prompt only)")
 
-    flat_train = DSPRDataset(config.train_data_path, model.tokenizer, config.max_seq_length)
+    flat_train = TrajectoryDataset(config.train_data_path, model.tokenizer, config.max_seq_length)
     flat_steps = update_steps_per_epoch(len(flat_train), config.batch_size, config.gradient_accumulation_steps)
     train_dataset = flat_train
     resampled = None
     if args.trajectory_sampling == "random_one":
-        resampled = ProblemResampledDSPRDataset(config.train_data_path, model.tokenizer,
-                                               config.max_seq_length, seed=config.seed)
+        resampled = ProblemResampledDataset(
+            config.train_data_path, model.tokenizer, config.max_seq_length, seed=config.seed,
+        )
         train_dataset = resampled
-    val_dataset = DSPRDataset(config.val_data_path, model.tokenizer, config.max_seq_length)
+    val_dataset = TrajectoryDataset(config.val_data_path, model.tokenizer, config.max_seq_length)
     has_validation = len(val_dataset) > 0
     if args.early_stopping_patience > 0 and not has_validation:
         raise ValueError("Early stopping requires a non-empty validation dataset")
@@ -112,29 +110,19 @@ def main() -> int:
         warmup_steps=args.warmup_steps or 0,
         warmup_ratio=args.warmup_ratio or 0.0,
         max_grad_norm=config.max_grad_norm,
-        logging_strategy="steps",
         logging_steps=args.logging_steps,
         save_strategy=eval_strategy,
         save_total_limit=args.save_total_limit,
         load_best_model_at_end=has_validation,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
-        remove_unused_columns=False,
         dataloader_pin_memory=config.device.startswith("cuda"),
-        report_to="none",
         disable_tqdm=args.emit_progress_events,
         fp16=(config.device.startswith("cuda") and torch.cuda.is_available()),
-        gradient_checkpointing=False,
         label_names=["labels"],
         seed=config.seed,
     )
     if resampled is not None and has_validation:
         kwargs.update(eval_steps=flat_steps, save_steps=flat_steps)
-    parameters = inspect.signature(TrainingArguments.__init__).parameters
-    kwargs["eval_strategy" if "eval_strategy" in parameters else "evaluation_strategy"] = eval_strategy
-    if config.device == "cpu":
-        kwargs["use_cpu" if "use_cpu" in parameters else "no_cuda"] = True
-    training_args = TrainingArguments(**kwargs)
+    training_args = training_arguments(eval_strategy=eval_strategy, device=config.device, **kwargs)
     callbacks = [TrainingHistoryCallback(write_train_log=not args.emit_progress_events,
                                           resampled_dataset=resampled)]
     if args.emit_progress_events:
@@ -144,6 +132,7 @@ def main() -> int:
                                               early_stopping_threshold=args.early_stopping_threshold))
     output_path = Path(args.output_path)
     output_path.mkdir(parents=True, exist_ok=True)
+    write_resolved_config(output_path / 'training_config.yaml', args)
     manifest = {
         "method": "static_prompt_tuning",
         "model_name": config.model_name,
@@ -154,8 +143,7 @@ def main() -> int:
         "sampling_records": len(train_dataset),
         "training_arguments": vars(args),
     }
-    (output_path / "training_manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json(output_path / "training_manifest.json", manifest)
     trainer = BaselineTrainer(model=model, args=training_args, train_dataset=train_dataset,
                               eval_dataset=val_dataset if has_validation else None,
                               data_collator=default_data_collator, callbacks=callbacks)

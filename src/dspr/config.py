@@ -1,6 +1,4 @@
-﻿from dataclasses import dataclass
-
-MATH_SYSTEM_PROMPT = "Please reason step by step, and put your final answer within \\boxed{}."
+from dataclasses import dataclass
 
 
 @dataclass
@@ -20,9 +18,6 @@ class DSPRConfig:
     gradient_accumulation_steps: int = 4
     max_grad_norm: float = 1.0
     warmup_steps: int = 100
-
-    # Loss weights
-    lambda_router: float = 0.5
 
     # Data
     train_data_path: str = "data/qwen/dspr_train.jsonl"

@@ -14,7 +14,6 @@ from tqdm import tqdm
 from .common import (
     DEFAULT_SYSTEM_PROMPT,
     VARIANTS,
-    build_prompt,
     ground_truth_for,
     ground_truth_type_for,
     normalise_problem_id,
@@ -22,6 +21,7 @@ from .common import (
 )
 from .quality import CoTValidationConfig, ValidationResult, validate_cot
 from utils.scoring import pending_score
+from utils.prompts import build_prompt
 
 
 @dataclass(frozen=True)

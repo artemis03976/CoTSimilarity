@@ -1,12 +1,13 @@
-﻿import os
+import os
 import logging
 from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from transformers import Trainer
 
-from .loss import DSPRLoss
+from utils.training import stage_optimizer
 
 
 logger = logging.getLogger(__name__)
@@ -82,101 +83,14 @@ def _binary_router_metrics(alpha: np.ndarray, target_alpha: np.ndarray) -> dict[
 class DSPRTrainer(Trainer):
     """HuggingFace Trainer for DSPR model."""
 
-    def __init__(
-        self,
-        *args,
-        lambda_router: float = 0.1,
-        prefix_learning_rate: float | None = None,
-        router_learning_rate: float | None = None,
-        prefix_weight_decay: float | None = None,
-        router_weight_decay: float | None = None,
-        prefix_routing: str = "router",
-        **kwargs,
-    ):
-        if prefix_routing not in {"router", "label"}:
-            raise ValueError("prefix_routing must be router or label")
-        if prefix_routing == "label" and lambda_router != 0.0:
-            raise ValueError("Label-routed prefix training requires lambda_router=0")
+    def __init__(self, *args, prefix_routing: str = "router", **kwargs):
         self.prefix_routing = prefix_routing
         self._train_diagnostics = _empty_diagnostic_accumulator()
         self._eval_diagnostics = _empty_diagnostic_accumulator()
         super().__init__(*args, **kwargs)
-        self.loss_fn = DSPRLoss(lambda_router=lambda_router)
-        self.prefix_learning_rate = (
-            self.args.learning_rate if prefix_learning_rate is None else prefix_learning_rate
-        )
-        self.router_learning_rate = (
-            self.args.learning_rate if router_learning_rate is None else router_learning_rate
-        )
-        self.prefix_weight_decay = (
-            self.args.weight_decay if prefix_weight_decay is None else prefix_weight_decay
-        )
-        self.router_weight_decay = (
-            self.args.weight_decay if router_weight_decay is None else router_weight_decay
-        )
 
     def create_optimizer(self):
-        """Build AdamW groups with independent prefix and router rates."""
-        if self.optimizer is not None:
-            return self.optimizer
-
-        opt_model = self.model
-        model_to_group = opt_model.module if hasattr(opt_model, "module") else opt_model
-        prefix_parameter_ids = {id(parameter) for parameter in model_to_group.dual_prefix.parameters()}
-        router_parameter_ids = {id(parameter) for parameter in model_to_group.router.parameters()}
-        decay_parameters = set(self.get_decay_parameter_names(opt_model))
-
-        grouped_parameters = []
-        group_specs = (
-            ("prefix", prefix_parameter_ids, self.prefix_learning_rate),
-            ("router", router_parameter_ids, self.router_learning_rate),
-        )
-        assigned_parameter_ids = prefix_parameter_ids | router_parameter_ids
-        for group_name, parameter_ids, learning_rate in group_specs:
-            for use_decay in (True, False):
-                parameters = [
-                    parameter
-                    for name, parameter in opt_model.named_parameters()
-                    if parameter.requires_grad
-                    and id(parameter) in parameter_ids
-                    and (name in decay_parameters) == use_decay
-                ]
-                if parameters:
-                    grouped_parameters.append(
-                        {
-                            "params": parameters,
-                            "lr": learning_rate,
-                            "weight_decay": (
-                                self.prefix_weight_decay if use_decay else 0.0
-                            )
-                            if group_name == "prefix"
-                            else (
-                                self.router_weight_decay if use_decay else 0.0
-                            ),
-                            "group_name": group_name,
-                        }
-                    )
-
-        other_parameters = [
-            parameter
-            for parameter in opt_model.parameters()
-            if parameter.requires_grad and id(parameter) not in assigned_parameter_ids
-        ]
-        if other_parameters:
-            grouped_parameters.append(
-                {
-                    "params": other_parameters,
-                    "lr": self.args.learning_rate,
-                    "weight_decay": self.args.weight_decay,
-                    "group_name": "other",
-                }
-            )
-
-        optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(self.args, opt_model)
-        optimizer_kwargs.pop("params", None)
-        optimizer_kwargs.pop("model", None)
-        self.optimizer = optimizer_cls(grouped_parameters, **optimizer_kwargs)
-        return self.optimizer
+        return stage_optimizer(self, self.model.dual_prefix, 'prefix')
 
     @staticmethod
     def _accumulate_diagnostics(
@@ -236,11 +150,10 @@ class DSPRTrainer(Trainer):
             forced_alpha=target_alpha if label_routing else None,
         )
 
-        if label_routing:
-            total_loss = lm_loss
-            loss_components = {"lm_loss": lm_loss.item(), "router_loss": 0.0}
-        else:
-            total_loss, loss_components = self.loss_fn(lm_loss, alpha, target_alpha)
+        # The prefix stage optimizes LM loss only; router BCE is diagnostic.
+        with torch.no_grad():
+            router_loss = 0.0 if label_routing else F.binary_cross_entropy(alpha, target_alpha).item()
+        loss_components = {"lm_loss": lm_loss.item(), "router_loss": router_loss}
         accumulator = self._train_diagnostics if model.training else self._eval_diagnostics
         self._accumulate_diagnostics(
             accumulator,
@@ -249,52 +162,36 @@ class DSPRTrainer(Trainer):
             target_alpha,
         )
         if not return_outputs:
-            return total_loss
+            return lm_loss
 
         outputs = {"logits": alpha}
-        return total_loss, outputs
+        return lm_loss, outputs
 
     def save_model(self, output_dir: str | None = None, _internal_call: bool = False):
         output_dir = output_dir or self.args.output_dir
         os.makedirs(output_dir, exist_ok=True)
-        model_to_save = self.model.module if hasattr(self.model, "module") else self.model
 
         # Save only trainable DSPR parameters to avoid huge checkpoints of frozen base LLM.
         torch.save(
             {
-                "dual_prefix_state_dict": model_to_save.dual_prefix.state_dict(),
-                "router_state_dict": model_to_save.router.state_dict(),
+                "dual_prefix_state_dict": self.model.dual_prefix.state_dict(),
+                "router_state_dict": self.model.router.state_dict(),
                 "training_args": self.args.to_dict(),
                 "prefix_routing": self.prefix_routing,
                 "prefix_validation_routing": "router",
-                "dspr_learning_rates": {
-                    "prefix": self.prefix_learning_rate,
-                    "router": self.router_learning_rate,
-                },
-                "dspr_weight_decays": {
-                    "prefix": self.prefix_weight_decay,
-                    "router": self.router_weight_decay,
-                },
             },
             os.path.join(output_dir, "dspr_trainable.pt"),
         )
 
     def load_trainable_checkpoint(self, checkpoint_path: str):
         ckpt = torch.load(checkpoint_path, map_location=self.args.device)
-        model_to_load = self.model.module if hasattr(self.model, "module") else self.model
-        model_to_load.dual_prefix.load_state_dict(ckpt["dual_prefix_state_dict"])
-        model_to_load.router.load_state_dict(ckpt["router_state_dict"])
+        self.model.dual_prefix.load_state_dict(ckpt["dual_prefix_state_dict"])
+        self.model.router.load_state_dict(ckpt["router_state_dict"])
 
     def _load_best_model(self):
-        """Load the project-specific lightweight checkpoint selected by Trainer."""
-        best_checkpoint = self.state.best_model_checkpoint
-        if best_checkpoint:
-            trainable_checkpoint = os.path.join(best_checkpoint, "dspr_trainable.pt")
-            if os.path.isfile(trainable_checkpoint):
-                logger.info("Loading best DSPR checkpoint from %s", trainable_checkpoint)
-                self.load_trainable_checkpoint(trainable_checkpoint)
-                return
-        return super()._load_best_model()
+        checkpoint = os.path.join(self.state.best_model_checkpoint, "dspr_trainable.pt")
+        logger.info("Loading best DSPR checkpoint from %s", checkpoint)
+        self.load_trainable_checkpoint(checkpoint)
 
     def log(self, logs: dict[str, float], start_time=None) -> None:
         """Attach interval-level training diagnostics to regular Trainer logs."""
@@ -305,14 +202,7 @@ class DSPRTrainer(Trainer):
             ))
             self._train_diagnostics = _empty_diagnostic_accumulator()
             if self.optimizer is not None:
-                group_rates = {
-                    group.get("group_name"): float(group["lr"])
-                    for group in self.optimizer.param_groups
-                }
-                if "prefix" in group_rates:
-                    logs["prefix_learning_rate"] = group_rates["prefix"]
-                if "router" in group_rates:
-                    logs["router_learning_rate"] = group_rates["router"]
+                logs["prefix_learning_rate"] = float(self.optimizer.param_groups[0]["lr"])
 
         if start_time is None:
             super().log(logs)

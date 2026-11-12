@@ -1,0 +1,43 @@
+# Experiment settings; CLI arguments override these values.
+method: lora
+common:
+  model_name: Qwen/Qwen2.5-Math-7B-Instruct
+  seed: 42
+  folds: [0, 1, 2, 3, 4]
+  gpus: '0'
+  problem_dataset: data/canonical_math_paired.jsonl
+  fold_root: output/qwen-2.5/kfold
+  max_seq_length: 2048
+  checkpoint_root: checkpoints/qwen_lora_qv_r1_seed42
+  result_root: output/qwen_lora_qv_r1_seed42
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0
+  warmup_ratio: 0.05
+  logging_steps: 10
+  save_total_limit: 3
+  early_stopping_threshold: 0.0
+  gradient_checkpointing: true
+  learning_rate: 4.0e-05
+  weight_decay: 0.0
+  num_epochs: 15
+  early_stopping_patience: 3
+  rank: 1
+  lora_alpha: 2
+  target_modules: [q_proj, v_proj]
+  lora_dropout: 0.05
+  dtype: float16
+  attention_implementation: flash_attention_2
+  dspr_parameter_budget: 337025
+  budget_tolerance: 0.1
+  enforce_parameter_budget: true
+inference:
+  temperature: 0.0
+  top_p: 1.0
+  samples_per_problem: 1
+  max_new_tokens: 2048
+  checkpoint_selection: best
+aggregation:
+  bootstrap_samples: 10000
+  bootstrap_seed: 42

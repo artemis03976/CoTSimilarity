@@ -10,109 +10,25 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import queue
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Iterable
 
 from tqdm import tqdm
+from utils.config import parse_config_args, write_resolved_config
+from utils.io import write_json
 from utils.training_progress import parse_progress_event
+from utils.scheduling import parse_gpu_list, run_folds
 
-from .train_lora import DEFAULT_DSPR_BUDGET, DEFAULT_RANK, DEFAULT_LORA_ALPHA, DEFAULT_RUN_NAME
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_ROOTS = {
-    "dspr": "checkpoints/qwen_staged_kfold_seed42",
-    "spt": "checkpoints/qwen_spt_seed42",
-    "lora": f"checkpoints/{DEFAULT_RUN_NAME}",
-}
-
-DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-Math-7B-Instruct"
-DEFAULT_FOLDS = tuple(range(5))
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def parse_fold_list(values: list[int] | None) -> list[int]:
-    folds = list(DEFAULT_FOLDS) if values is None else values
-    if not folds:
-        raise ValueError("At least one fold must be selected")
-    if len(set(folds)) != len(folds):
-        raise ValueError(f"Duplicate fold IDs: {folds}")
-    invalid = [fold for fold in folds if fold < 0 or fold >= 5]
-    if invalid:
-        raise ValueError(f"Fold IDs must be in [0, 4], got {invalid}")
-    return folds
-
-
-def parse_gpu_list(value: str | None) -> list[str]:
-    """Parse ``--gpus`` while preserving IDs such as ``0`` or ``MIG-...``."""
-    if value is None or value.strip().lower() == "auto":
-        return detect_gpu_ids()
-    gpu_ids = [item.strip() for item in value.split(",") if item.strip()]
-    if not gpu_ids:
-        raise ValueError("--gpus must contain at least one GPU ID")
-    if len(set(gpu_ids)) != len(gpu_ids):
-        raise ValueError(f"Duplicate GPU IDs: {gpu_ids}")
-    return gpu_ids
-
-
-def detect_gpu_ids() -> list[str]:
-    """Best-effort GPU discovery with a conservative single-GPU fallback."""
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
-    if visible:
-        ids = [item.strip() for item in visible.split(",") if item.strip()]
-        if ids:
-            return ids
-
-    # Keep the orchestrator usable in a lightweight environment where torch is
-    # unavailable.  The actual training child will provide the definitive
-    # CUDA error if a GPU is required but missing.
-    try:
-        probe = subprocess.run(
-            [sys.executable, "-c", "import torch; print(torch.cuda.device_count())"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        count = int(probe.stdout.strip().splitlines()[-1])
-        if count > 0:
-            return [str(index) for index in range(count)]
-    except (OSError, ValueError, IndexError):
-        pass
-
-    try:
-        probe = subprocess.run(
-            ["nvidia-smi", "-L"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if probe.returncode == 0:
-            count = len([line for line in probe.stdout.splitlines() if line.strip()])
-            if count > 0:
-                return [str(index) for index in range(count)]
-    except OSError:
-        pass
-
-    return ["0"]
-
-
-def write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def resolve_path(repo_root: Path, value: str) -> Path:
-    path = Path(value)
-    return path if path.is_absolute() else repo_root / path
+from .common import (
+    DEFAULT_CHECKPOINT_ROOTS, DEFAULT_DSPR_BUDGET, DEFAULT_RANK, DEFAULT_LORA_ALPHA,
+    DEFAULT_MODEL_NAME, REPO_ROOT, output_is_nonempty, parse_fold_list, resolve_path, utc_now,
+)
 
 
 @dataclass
@@ -158,10 +74,7 @@ def validate_inputs(
                 raise FileNotFoundError(f"Missing fold input: {path}")
 
         fold_output = output_root / f"fold_{fold}"
-        output_is_nonempty = fold_output.exists() and (
-            not fold_output.is_dir() or any(fold_output.iterdir())
-        )
-        if output_is_nonempty and not allow_existing:
+        if output_is_nonempty(fold_output) and not allow_existing:
             raise FileExistsError(
                 f"Output directory is not empty: {fold_output}. "
                 "Choose a new --output-root or pass --allow-existing explicitly."
@@ -296,52 +209,16 @@ def run_fold(
     return spec
 
 
-def run_dynamic_schedule(specs: list[FoldSpec], repo_root: Path, gpu_ids: list[str]) -> list[FoldSpec]:
-    pending: queue.Queue[FoldSpec] = queue.Queue()
-    for spec in specs:
-        pending.put(spec)
-
-    state_lock = threading.Lock()
-    completed: list[FoldSpec] = []
-    completed_lock = threading.Lock()
-
-    def worker(gpu: str, progress_position: int) -> None:
-        while True:
-            try:
-                spec = pending.get_nowait()
-            except queue.Empty:
-                return
-            result = spec
-            try:
-                # GPU assignment happens when a worker claims the fold.  This
-                # is what prevents a fast worker from colliding with a slower
-                # worker on the same GPU.
-                spec.gpu = gpu
-                result = run_fold(spec, repo_root, state_lock, progress_position)
-            except Exception as exc:  # keep other GPUs/folds progressing
-                with state_lock:
-                    spec.status = "failed"
-                    spec.return_code = -1
-                    spec.error = repr(exc)
-                    spec.finished_at = utc_now()
-                    write_json(Path(spec.output_path) / "run_status.json", asdict(spec))
-                tqdm.write(f"[fold {spec.fold}] failed before/during launch: {exc}", file=sys.stderr)
-                result = spec
-            finally:
-                with completed_lock:
-                    completed.append(result)
-                pending.task_done()
-
-    worker_count = min(len(gpu_ids), len(specs))
-    threads = [
-        threading.Thread(target=worker, args=(gpu, position), name=f"kfold-gpu-{gpu}")
-        for position, gpu in enumerate(gpu_ids[:worker_count])
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    return sorted(completed, key=lambda item: item.fold)
+def record_failure(spec: FoldSpec, exc: Exception) -> None:
+    spec.status = "failed"
+    spec.return_code = -1
+    spec.error = repr(exc)
+    spec.finished_at = utc_now()
+    try:
+        write_json(Path(spec.output_path) / "run_status.json", asdict(spec))
+    except OSError as status_error:
+        tqdm.write(f"[fold {spec.fold}] cannot save failure status: {status_error}", file=sys.stderr)
+    tqdm.write(f"[fold {spec.fold}] failed before/during launch: {exc}", file=sys.stderr)
 
 
 # Preserve each training entrypoint's option spellings and argument order.
@@ -415,7 +292,7 @@ def build_train_command(
 
 
 def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.Namespace:
-    if method not in DEFAULT_OUTPUT_ROOTS:
+    if method not in DEFAULT_CHECKPOINT_ROOTS:
         raise ValueError(f"Unsupported K-fold method: {method}")
     parser = argparse.ArgumentParser(description=f"Train {method.upper()} on the prepared Qwen folds")
     parser.add_argument("--fold-root", default="output/qwen-2.5/kfold")
@@ -424,7 +301,7 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--folds", nargs="+", type=int, default=None)
-    parser.add_argument("--gpus", default=None, help="Physical GPU IDs, e.g. 0,1; default: auto-detect")
+    parser.add_argument("--gpus", type=str, default=None, help="Physical GPU IDs, e.g. 0,1; default: auto-detect")
     parser.add_argument("--allow-existing", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--batch-size", type=int, default=4)
@@ -485,12 +362,13 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
             parser.add_argument("--dspr-parameter-budget", type=int, default=DEFAULT_DSPR_BUDGET)
             parser.add_argument("--budget-tolerance", type=float, default=0.10)
             parser.add_argument("--enforce-parameter-budget", action=argparse.BooleanOptionalAction, default=True)
-    args = parser.parse_args(argv)
+    args = parse_config_args(parser, argv, method=method, section="training",
+                             aliases={"checkpoint_root": "output_root"})
     if args.output_root is None:
         args.output_root = (
             f"checkpoints/qwen_staged_label_kfold_seed{args.seed}"
             if method == "dspr" and args.prefix_routing == "label"
-            else DEFAULT_OUTPUT_ROOTS[method]
+            else DEFAULT_CHECKPOINT_ROOTS[method]
         )
     if method == "dspr":
         if args.warmup_steps is None:
@@ -511,9 +389,9 @@ def validate_training_args(args: argparse.Namespace, method: str) -> None:
         return
     if args.warmup_steps < 0:
         raise ValueError("--warmup-steps must be non-negative")
-    if args.prefix_learning_rate is not None and args.prefix_learning_rate <= 0.0:
+    if args.prefix_learning_rate <= 0.0:
         raise ValueError("--prefix-learning-rate must be positive")
-    if args.router_learning_rate is not None and args.router_learning_rate <= 0.0:
+    if args.router_learning_rate <= 0.0:
         raise ValueError("--router-learning-rate must be positive")
     if args.warmup_ratio is not None and not 0.0 <= args.warmup_ratio < 1.0:
         raise ValueError("--warmup-ratio must be in [0, 1)")
@@ -536,14 +414,14 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
     validate_training_args(args, method)
     folds = parse_fold_list(args.folds)
     gpu_ids = parse_gpu_list(args.gpus)
-    fold_root = resolve_path(REPO_ROOT, args.fold_root).resolve()
-    output_root = resolve_path(REPO_ROOT, args.output_root).resolve()
-    train_script = resolve_path(REPO_ROOT, args.train_script).resolve()
+    fold_root = resolve_path(args.fold_root).resolve()
+    output_root = resolve_path(args.output_root).resolve()
+    train_script = resolve_path(args.train_script).resolve()
     if method == "dspr":
         args.fold_root = str(fold_root)
         if args.router_checkpoint_root:
-            args.router_checkpoint_root = str(resolve_path(REPO_ROOT, args.router_checkpoint_root).resolve())
-        args.problem_dataset = str(resolve_path(REPO_ROOT, args.problem_dataset).resolve())
+            args.router_checkpoint_root = str(resolve_path(args.router_checkpoint_root).resolve())
+        args.problem_dataset = str(resolve_path(args.problem_dataset).resolve())
         if not Path(args.problem_dataset).is_file():
             raise FileNotFoundError(f"Canonical router source not found: {args.problem_dataset}")
     validate_inputs(train_script, fold_root, output_root, folds, allow_existing=args.allow_existing or args.dry_run)
@@ -594,8 +472,9 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
         return 0
 
     manifest_path = output_root / "run_manifest.json"
+    write_resolved_config(output_root / "training_config.yaml", args)
     write_json(manifest_path, manifest)
-    results = run_dynamic_schedule(specs, REPO_ROOT, gpu_ids)
+    results = run_folds(specs, gpu_ids, partial(run_fold, repo_root=REPO_ROOT), record_failure)
     manifest.update(finished_at=utc_now(), folds=[asdict(spec) for spec in results])
     write_json(manifest_path, manifest)
     if len(results) != len(specs):
