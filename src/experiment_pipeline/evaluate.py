@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -129,6 +130,7 @@ class FoldSpec:
     completed_generations: int = 0
     total_generations: int = 0
     method: str = "dspr"
+    forced_alpha: float | None = None
 
 
 def run_fold(
@@ -328,6 +330,13 @@ def validate_generated_output(spec: FoldSpec, expected_samples: int) -> dict[str
                         raise ValueError(f"Problem {pid} {variant} has invalid alpha {value!r}") from exc
                     if not math.isfinite(numeric) or not 0.0 <= numeric <= 1.0:
                         raise ValueError(f"Problem {pid} {variant} alpha is outside [0, 1]: {numeric}")
+                    # Allow the rounding of a scalar stored as float16/bfloat16.
+                    if spec.forced_alpha is not None and not math.isclose(
+                        numeric, spec.forced_alpha, rel_tol=0.0, abs_tol=0.002,
+                    ):
+                        raise ValueError(
+                            f"Problem {pid} {variant} alpha={numeric}; expected fixed alpha={spec.forced_alpha}"
+                        )
     return {"records": len(records), "variants": len(records) * len(VARIANTS)}
 
 
@@ -443,6 +452,8 @@ def build_inference_command(
     if method == "dspr":
         for name in ("context_layer_idx", "prefix_length", "router_intermediate_dim", "router_dropout", "max_seq_length"):
             command.extend([f"--{name}", str(getattr(args, name))])
+        if args.forced_alpha is not None:
+            command.extend(["--forced-alpha", str(args.forced_alpha)])
     elif method == "spt":
         prefix_length = spec.checkpoint_selection["prefix_length"]
         if args.prefix_length is not None and args.prefix_length != prefix_length:
@@ -451,6 +462,106 @@ def build_inference_command(
     if args.problem_id is not None:
         command.extend(["--id", str(args.problem_id)])
     return command
+
+
+def resolve_reference_fold(
+    reference_root: Path, checkpoint_root: Path, fold: int, expected_ids: list[int],
+) -> tuple[Path, dict[str, Any], list[str]]:
+    """Pin a control run to the checkpoint and arguments used for learned OOF."""
+    status_path = reference_root / f"fold_{fold}" / "run_status.json"
+    status = read_json(status_path)
+    if status.get("fold") != fold or status.get("status") != "succeeded":
+        raise ValueError(f"Reference fold must have succeeded: {status_path}")
+    if sorted(status.get("expected_problem_ids", [])) != expected_ids:
+        raise ValueError(f"Reference fold test IDs differ from current fold IDs: {status_path}")
+    command = status.get("command")
+    if not isinstance(command, list) or len(command) < 3 or not all(isinstance(x, str) for x in command):
+        raise ValueError(f"Reference fold has no inference command: {status_path}")
+    options = {token.split("=", 1)[0].replace("_", "-") for token in command[2:] if token.startswith("--")}
+    if status.get("forced_alpha") is not None or "--forced-alpha" in options:
+        raise ValueError(f"Reference must use the learned router: {status_path}")
+    if command_option(command, "--baseline") != "dspr":
+        raise ValueError(f"Reference is not a DSPR inference run: {status_path}")
+
+    # Relocate the recorded checkpoint under the requested root; never select
+    # another best/latest checkpoint for a control condition.
+    recorded = str(status["checkpoint"])
+    parts = Path(recorded.replace("\\", "/")).parts
+    fold_name = f"fold_{fold}"
+    if fold_name not in parts:
+        raise ValueError(f"Reference checkpoint lacks {fold_name}: {recorded}")
+    checkpoint = checkpoint_root.joinpath(*parts[parts.index(fold_name):])
+    if not checkpoint.is_file():
+        raise FileNotFoundError(f"Recorded reference checkpoint not found: {checkpoint}")
+    return checkpoint, {
+        "method": "reference_run_status",
+        "reference_status": str(status_path),
+        "reference_status_sha256": hashlib.sha256(status_path.read_bytes()).hexdigest(),
+        "recorded_checkpoint": recorded,
+        "original_selection": status.get("checkpoint_selection"),
+        "model_name": command_option(command, "--model-name"),
+    }, command
+
+
+def command_option(command: list[str], name: str) -> str | None:
+    for index, token in enumerate(command[2:], start=2):
+        option, sep, value = token.partition("=")
+        if option.replace("_", "-") == name:
+            return value if sep else command[index + 1]
+    return None
+
+
+def replay_reference_command(
+    original: list[str], inference_script: Path, spec: FoldSpec, problem_id: int | None,
+) -> list[str]:
+    """Keep recorded generation/architecture flags, replacing only run controls."""
+    replaced = {"--checkpoint", "--data-path", "--output-dir", "--forced-alpha", "--id", "--problem-id"}
+    flags = {"--emit-progress-events"}
+    command = [sys.executable, str(inference_script)]
+    index = 2
+    while index < len(original):
+        token = original[index]
+        option, sep, _ = token.partition("=")
+        option = option.replace("_", "-")
+        if option in replaced:
+            index += 1 if sep else 2
+            continue
+        if option not in flags:
+            command.append(token)
+        index += 1
+    command.extend([
+        "--checkpoint", spec.checkpoint, "--data-path", spec.data_path,
+        "--output-dir", spec.output_dir, "--forced-alpha", str(spec.forced_alpha),
+        "--emit-progress-events",
+    ])
+    if problem_id is not None:
+        command.extend(["--problem-id", str(problem_id)])
+    return command
+
+
+def resume_completed_fold(spec: FoldSpec, expected_samples: int) -> bool:
+    """Skip complete matching folds; allow interrupted matching folds to rerun."""
+    status_path = Path(spec.output_dir) / "run_status.json"
+    if not status_path.is_file():
+        raise FileExistsError(f"Cannot resume a directory without run_status.json: {spec.output_dir}")
+    saved = read_json(status_path)
+    if (saved.get("command") != spec.command
+            or saved.get("expected_problem_ids") != spec.expected_problem_ids
+            or saved.get("forced_alpha") != spec.forced_alpha):
+        raise ValueError(f"Resume settings differ from the saved run: {status_path}")
+    if saved.get("status") != "succeeded":
+        return False
+    try:
+        validate_generated_output(spec, expected_samples)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"[fold {spec.fold}] incomplete saved output; rerunning: {exc}", flush=True)
+        return False
+    for name in ("status", "stage", "started_at", "finished_at", "return_code", "elapsed_seconds",
+                 "completed_generations", "total_generations"):
+        if name in saved:
+            setattr(spec, name, saved[name])
+    spec.stage = "completed"
+    return True
 
 
 def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.Namespace:
@@ -469,6 +580,7 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
     parser.add_argument("--gpus", default=None, help="Physical GPU IDs, e.g. 0,1; default: auto-detect")
     parser.add_argument("--problem-id", type=int, default=None)
     parser.add_argument("--allow-existing", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="Skip complete matching folds; rerun interrupted folds")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -477,6 +589,12 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--prefix-length", type=int, default=15 if method == "dspr" else None)
     if method == "dspr":
+        parser.add_argument("--forced-alpha", type=float, default=None)
+        parser.add_argument(
+            "--reference-run-root", default=None,
+            help="For fixed-alpha runs, replay each learned fold's checkpoint and inference arguments; "
+                 "recorded model/generation settings take precedence over CLI defaults",
+        )
         parser.add_argument("--context-layer-idx", type=int, default=15)
         parser.add_argument("--router-intermediate-dim", type=int, default=64)
         parser.add_argument("--router-dropout", type=float, default=0.10)
@@ -486,6 +604,14 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
 
 def main(method: str = "dspr", argv: list[str] | None = None) -> int:
     args = parse_args(method, argv)
+    forced_alpha = getattr(args, "forced_alpha", None)
+    if forced_alpha is not None and (not math.isfinite(forced_alpha) or not 0.0 <= forced_alpha <= 1.0):
+        raise ValueError("--forced-alpha must be finite and in [0, 1]")
+    reference_root = getattr(args, "reference_run_root", None)
+    if reference_root is not None:
+        if forced_alpha is None:
+            raise ValueError("--reference-run-root requires --forced-alpha")
+        reference_root = resolve_path(REPO_ROOT, reference_root).resolve()
     if args.temperature != 0.0 or args.top_p != 1.0 or args.samples_per_problem != 1:
         raise ValueError(
             "Held-out evaluation is deterministic-only: require temperature=0, top_p=1, samples_per_problem=1"
@@ -493,13 +619,17 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
     folds = parse_fold_list(args.folds)
     if args.problem_id is not None and len(folds) != 1:
         raise ValueError("--problem-id requires exactly one selected fold")
-    print(f"{method.upper()} held-out evaluation: model={args.model_name}; folds={folds}", flush=True)
+    print(f"{method.upper()} held-out evaluation: folds={folds}; forced_alpha={forced_alpha}", flush=True)
+    if reference_root is not None:
+        print(f"Reusing checkpoints and inference settings from: {reference_root}", flush=True)
     print("Resolving GPUs and checkpoints...", flush=True)
     gpu_ids = parse_gpu_list(args.gpus)
     checkpoint_root = resolve_path(REPO_ROOT, args.checkpoint_root).resolve()
     test_root = resolve_path(REPO_ROOT, args.test_root).resolve()
     id_root = resolve_path(REPO_ROOT, args.id_root).resolve()
     output_root = resolve_path(REPO_ROOT, args.output_root).resolve()
+    if reference_root is not None and output_root == reference_root:
+        raise ValueError("Fixed-alpha output must be separate from the learned reference run")
     inference_script = resolve_path(REPO_ROOT, args.inference_script).resolve()
     if not inference_script.is_file():
         raise FileNotFoundError(f"Inference entrypoint not found: {inference_script}")
@@ -508,8 +638,14 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
 
     specs = []
     for index, fold in enumerate(folds):
-        checkpoint, selection = resolve_checkpoint(checkpoint_root / f"fold_{fold}", args.checkpoint_selection, method)
         all_expected_ids = expected_ids_for_fold(id_root, fold)
+        reference_command = None
+        if reference_root is not None:
+            checkpoint, selection, reference_command = resolve_reference_fold(
+                reference_root, checkpoint_root, fold, all_expected_ids,
+            )
+        else:
+            checkpoint, selection = resolve_checkpoint(checkpoint_root / f"fold_{fold}", args.checkpoint_selection, method)
         if args.problem_id is not None:
             if args.problem_id not in all_expected_ids:
                 raise ValueError(f"Problem {args.problem_id} is not held out in Fold {fold}")
@@ -523,15 +659,21 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
         if len(raw_ids) != len(set(raw_ids)) or set(raw_ids) != set(all_expected_ids):
             raise ValueError(f"Fold {fold} raw test IDs differ from test_ids.json")
         output_dir = output_root / f"fold_{fold}"
-        if output_is_nonempty(output_dir) and not (args.allow_existing or args.dry_run):
+        if output_is_nonempty(output_dir) and not (args.allow_existing or args.dry_run or args.resume):
             raise FileExistsError(f"Output directory is not empty: {output_dir}")
         spec = FoldSpec(
             fold=fold, gpu=gpu_ids[index % len(gpu_ids)], checkpoint=str(checkpoint.resolve()),
             checkpoint_selection=selection, data_path=str(data_path.resolve()), expected_problem_ids=expected_ids,
             output_dir=str(output_dir.resolve()), log_path=str((output_dir / "inference.log").resolve()),
-            command=[], method=method,
+            command=[], method=method, forced_alpha=forced_alpha,
         )
-        spec.command = build_inference_command(inference_script, spec, args, method)
+        if reference_command is not None:
+            spec.command = replay_reference_command(reference_command, inference_script, spec, args.problem_id)
+        else:
+            spec.command = build_inference_command(inference_script, spec, args, method)
+        if args.resume and output_is_nonempty(output_dir):
+            if resume_completed_fold(spec, args.samples_per_problem):
+                print(f"[fold {fold}] already complete; skipping inference", flush=True)
         specs.append(spec)
         print(f"[fold {fold}] ready: {len(expected_ids)} problems; "
               f"checkpoint={checkpoint}; selection={selection['method']}", flush=True)
@@ -541,7 +683,18 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
         "checkpoint_root": str(checkpoint_root), "test_root": str(test_root), "id_root": str(id_root),
         "output_root": str(output_root), "gpus": gpu_ids, "folds": [asdict(spec) for spec in specs],
         "settings": vars(args),
+        "inference_settings_source": "per_fold_reference_command" if reference_root else "cli",
     }
+    if reference_root is not None:
+        models = {spec.checkpoint_selection["model_name"] for spec in specs}
+        if len(models) != 1 or None in models:
+            raise ValueError("Reference folds must specify the same model")
+        manifest["model_name"] = models.pop()
+        # Do not record unused CLI model/generation defaults as effective settings.
+        manifest["settings"] = {key: value for key, value in vars(args).items() if key in {
+            "checkpoint_root", "test_root", "id_root", "output_root", "inference_script", "folds", "gpus",
+            "problem_id", "allow_existing", "resume", "dry_run", "forced_alpha", "reference_run_root",
+        }}
     if args.dry_run:
         print("Dry run: no inference processes started.")
         for spec in specs:
@@ -549,8 +702,12 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
         return 0
     manifest_path = output_root / "inference_manifest.json"
     write_json(manifest_path, manifest)
-    print(f"Starting {len(specs)} folds on {min(len(gpu_ids), len(specs))} GPUs. Manifest: {manifest_path}", flush=True)
-    results = run_dynamic_schedule(specs, gpu_ids, args.samples_per_problem)
+    pending = [spec for spec in specs if spec.status != "succeeded"]
+    print(f"Starting {len(pending)} folds on {min(len(gpu_ids), len(pending))} GPUs. Manifest: {manifest_path}", flush=True)
+    results = sorted(
+        [spec for spec in specs if spec.status == "succeeded"]
+        + run_dynamic_schedule(pending, gpu_ids, args.samples_per_problem), key=lambda spec: spec.fold,
+    )
     manifest.update(finished_at=utc_now(), folds=[asdict(spec) for spec in results])
     write_json(manifest_path, manifest)
     if len(results) != len(specs):

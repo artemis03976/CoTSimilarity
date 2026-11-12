@@ -1,727 +1,369 @@
 # StructuredCoT
 
-Official repository for "Dynamic Structural Prefix Routing for Structure-Aware Robust LLM Reasoning". The repository contains the full workflow for generating model responses, extracting reasoning structures as IFD-Graphs, computing graph edit distance (GED), constructing DSPR training data, and evaluating DSPR against baselines.
+Implementation of **Dynamic Structural Prefix Routing for Structure-Aware Robust LLM Reasoning**.
+The pipeline generates reasoning traces, builds IFD-Graphs, selects trajectories with graph edit distance (GED), and trains DSPR or its SPT/LoRA baselines.
 
-Most workflows are driven by scripts under `scripts/`, with reusable implementation code under `src/`.
+## Setup and Local Configuration
 
-## Repository Layout
-
-```text
-.
-+-- scripts/
-|   +-- inference.py                  # Unified greedy Base/DSPR/SPT/LoRA inference
-|   +-- inference_multiple.py         # Batched validated vLLM trajectory sampling
-|   +-- pertubation_test.py           # Legacy response-generation entrypoint
-|   +-- train.py                      # Unified DSPR/SPT/LoRA training entrypoint
-|   +-- train_kfold.py                # Unified multi-GPU DSPR/SPT/LoRA K-fold training
-|   +-- evaluate.py                   # Unified K-fold inference and OOF aggregation
-|   +-- run_dspr_pipeline.sh          # Staged K-fold DSPR training, inference, and OOF metrics
-|   +-- run_baseline_pipeline.sh      # Same-fold SPT/LoRA training, inference, and OOF comparisons
-|   +-- run_ablation_*.sh             # Ablation for DSPR hyperparameters
-|
-+-- src/
-|   +-- experiment_pipeline/          # Reusable training, K-fold, and OOF capabilities
-|   +-- inference/                    # Shared model adapters, validation, and runners
-|   +-- dspr/                         # Core DSPR model implementation
-|   +-- dspr_training/                # DSPR dataset wrapper, loss, and Trainer
-|   +-- dspr_dataset/                 # DSPR dataset construction utilities
-|   +-- spt/                          # Static Prompt Tuning baseline model
-|   +-- spt_training/                 # SPT Trainer
-|   +-- data_analysis/                # CoT segmentation, DAG analysis, GED analysis
-|   +-- utils/                        # Evaluation, sorting, reports, visualization
-|
-+-- data/                             # Input datasets and derived training splits
-+-- output/                           # Generated responses and analysis artifacts
-+-- Dockerfile
-+-- docker-compose.gpu.yml
-+-- requirements.txt
-```
-
-## Main Components
-
-`src/dspr/` contains the DSPR model:
-
-- `config.py`: default model, data, training, and hardware settings.
-- `model.py`: wraps the frozen base LLM with structural prefix routing.
-- `dual_prefix.py`: learnable exploit/explore structural prefixes.
-- `router.py`: MLP router that predicts the exploration weight.
-- `context_encoder.py`: extracts hidden-state context for routing.
-
-`src/data_analysis/` turns raw generated responses into structural features:
-
-- `cot_segmenter.py`: segments chain-of-thought responses into reasoning units.
-- `scripts/run_dag_analysis.py`: shared input resolution and CLI for DAG extraction.
-- `scripts/run_ged_analysis.py`: GED CLI, graph preparation, and worker execution.
-- `annotation/`: shared prompts and validation, normal requests, and batch preparation/merging.
-- `graph/`: graph construction, compression, and prepared graph/embedding caches.
-- `metrics/`: graph edit distance and node-text encoding.
-- `measurement/`: joins GED with correctness, saves checkpoints, and exports results.
-- `records.py`, `schemas.py`, and `config.py`: record adaptation, sample identities, and configuration.
-- `src/utils/io.py`, `artifacts.py`, and `env.py`: common file I/O, content fingerprints, and environment loading.
-
-The processing order remains segmentation, DAG annotation, graph compression and
-text encoding, GED comparison, then DSPR dataset filtering. See
-[`src/data_analysis/README.md`](src/data_analysis/README.md) for module boundaries.
-
-`src/spt/` and `src/spt_training/` implement the Static Prompt Tuning baseline, which uses the same frozen LLM and DSPR dataset format but replaces dynamic routing with one static learned prefix.
-
-`src/inference/` provides two experiment-facing inference contracts:
-
-- deterministic greedy inference through one model adapter interface for Base, DSPR, SPT, and LoRA;
-- batched vLLM sampling with structural CoT validation, bounded resampling, raw-generation retention, and QC summaries.
-
-## Environment Setup
-
-Install dependencies directly:
+Run commands from the repository root:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
+export PYTHONPATH=src
+export MODEL_NAME="/path/to/model"
+export PROBLEM_DATASET="/path/to/paired-problems.jsonl"
+export WORK_DIR="/path/to/your-run"
+export GPUS="0,1"
 ```
 
-Or use the GPU Docker environment:
+Alternatively, use the GPU container:
 
 ```bash
 docker compose -f docker-compose.gpu.yml build
 docker compose -f docker-compose.gpu.yml run --rm dspr
 ```
 
-Most scripts assume they are launched from the repository root. If imports fail in a custom environment, set:
+All paths below are placeholders or directories for your own run. Set each artifact-file variable to the file produced by its preceding stage. Configure annotation-provider credentials locally. Use `--help` on an entry point for additional options.
+
+## 1. Generate Base Responses and Sampled Trajectories
+
+Generate one greedy response per Original/Simple/Hard problem for the base comparison:
 
 ```bash
-export PYTHONPATH=src
+python scripts/inference.py \
+  --baseline base --backend vllm --model-name "$MODEL_NAME" \
+  --data-path "$PROBLEM_DATASET" --output-dir "$WORK_DIR/base" \
+  --max-new-tokens 2048 --max-model-len 4096 \
+  --batch-size 128 --gpu-memory-utilization 0.90 \
+  --max-num-seqs 64 --max-num-batched-tokens 8192
 ```
 
-## Data And Artifact Conventions
-
-Common paths used by the current scripts:
-
-- `data/canonical_math_paired.jsonl`: source math problems.
-- `output/<model>/multiple_seed42/all_records.jsonl`: accepted original/simple/hard responses.
-- `output/<model>/multiple_seed42/raw_generations.jsonl`: all multi-path attempts, including rejected paths.
-- `output/<model>/multiple_seed42/generation_qc.json`: decoding and validation audit summary.
-- `output/<model>/segmented_records_50.jsonl`: segmented CoT records.
-- `output/<model>/dag_analysis_50/analyzed_records.jsonl`: DAG analysis results.
-- `output/<model>/all_ged_results.jsonl`: GED and correctness records.
-- `data/<model>/dspr_dataset.jsonl`: filtered DSPR dataset.
-- `data/<model>/dspr_train.jsonl`, `dspr_val.jsonl`, `dspr_test.jsonl`: DSPR splits.
-- `checkpoints/<model>/dspr/dspr_trainable.pt`: trained DSPR parameters.
-- `output/<model>/dspr/all_records.jsonl`: DSPR inference records.
-
-Some `output/*/all_records.jsonl` files are expensive experiment artifacts and are intentionally kept in the repository workflow.
-
-`data/canonical_math_paired_cleaned.jsonl` is a separate cleaned dataset. It
-excludes paired groups containing proof tasks or questions that cannot be
-reliably repaired or graded. Corrections use each record's existing fields;
-worked solutions retain boxed final answers and multipart answer labels use
-ordinary text. Original problem IDs and source coordinates are preserved.
-Keep source files and experiment inputs separate from the cleaned dataset.
-Audit records and exclusions are stored under `output/problem_answer_repair/`.
-
-Validate the cleaned dataset without loading a model:
-
-```bash
-python scripts/validate_problem_answers.py
-```
-
-This checks reference extraction, evaluator round trips, and preservation of
-the original field layouts and source coordinates. It does not establish
-mathematical correctness. Existing scripts continue to default to
-`data/canonical_math_paired.jsonl`. Select the
-cleaned path explicitly and use a separate output directory for a new run.
-
-## End-To-End DSPR Workflow
-
-### Shared filtering for new K-fold datasets
-
-`src/dspr_dataset/data_filter.py` owns trajectory selection. Three independent
-strategies are composed in order:
-
-| Strategy | Example selection rule |
-| --- | --- |
-| `EligibilityStrategy` | Correct, non-timeout samples with a selection score; at least 3 per problem-variant |
-| `GEDRangeStrategy` | `max(ged_normalized) - min(ged_normalized) >= 0.10` on those candidates |
-| `TopKStrategy` | Up to 5 lowest-score Simple paths or highest-score Hard paths |
-
-The final eligible IDs reflect the first two strategies. Top-k selects the
-training trajectories without changing those IDs. Both dataset export and
-`scripts/build_kfold_splits.py` call `select_trajectories_by_ged`; the split
-builder does not select trajectories from raw sample arrays. It reads the
-protocol and GED source from `--eligible`, with an optional `--ged-results`
-source override, and checks that recomputed eligibility matches the manifest.
-
-Before DAG analysis, `scripts/cheap_screen.py` calls `CheapScreenStrategy` from
-the same module. It requires a valid original anchor and at least 3 valid
-correct paths on each perturbation variant, without requiring GED scores or
-original correctness. Its candidate counting reuses `EligibilityStrategy`
-with the pre-DAG conditions. `data_filter.py` is an importable library and has
-no command-line entrypoint.
-
-To build a separate dataset from existing GED results without rerunning
-generation or GED analysis:
-
-```bash
-python scripts/build_kfold_splits.py \
-  --raw-data output/qwen-2.5/multiple_n16/all_records.jsonl \
-  --eligible output/qwen-2.5/eligible_problem.json \
-  --output-root output/qwen-2.5_ged_top5 \
-  --k 5 --seed 42
-```
-
-Outer held-out folds cover all raw problem groups. The builder requires an
-empty destination `kfold` directory to preserve existing folds.
-
-### Staged DSPR training
-
-For the staged training variant, first train the prompt-only router on one
-deduplicated example per problem-variant, then train the dual prefix on all
-trajectory records while keeping the router fixed:
-
-```bash
-python scripts/train.py dspr \
-  --problem-dataset data/canonical_math_paired.jsonl \
-  --kfold-root output/qwen-2.5/kfold \
-  --fold 0 \
-  --output-path checkpoints/qwen-2.5_staged_seed42 \
-  --router-learning-rate 1e-5 \
-  --prefix-learning-rate 4e-5 \
-  --router-weight-decay 1e-3 \
-  --router-target-smoothing 0.05 \
-  --router-epochs 20 \
-  --prefix-epochs 15
-```
-
-The router artifact is saved as
-`<output>/router/router_trainable.pt`; the prefix-stage artifact is saved as
-`<output>/prefix/dspr_trainable.pt`. To run the second stage separately, pass
-`--run-stage prefix --router-checkpoint <path-to-router_trainable.pt>`, or use
-`--run-stage router` for router training alone. `train_dspr.py` provides only
-router and frozen-router prefix training; joint training and joint calibration
-have been removed. The former `train_staged_dspr.py` module and `staged_dspr`
-command alias are removed; use `scripts/train.py dspr`.
-
-The staged pipeline treats `data/canonical_math_paired.jsonl` as the only canonical
-source of problem-variant prompts. K-fold `train_ids.json` and `val_ids.json`
-select the router examples from that source, while `fold_N/train.jsonl` and
-`fold_N/val.jsonl` provide the refined CoT trajectories used only by the prefix
-stage. Legacy `dcpr_train.jsonl` and `dcpr_val.jsonl` are not used by this
-pipeline. The router context encoder is run once and cached as
-`<output>/router_context_cache.pt`; subsequent router epochs use the cached
-vectors directly. To share one cache across several folds, pass the same path
-with `--router-context-cache-path` to each fold command.
-
-To run a router-only context-layer ablation, use:
-
-```bash
-bash scripts/run_router_layer_ablation.sh
-```
-
-The script discovers `num_hidden_layers` from the model configuration and
-sweeps hidden-state indices `0..L` (including the embedding output at index
-0). Set `LAYERS="8 12 15 20"` for a smaller sweep, or override `MODEL_NAME`,
-`problem_dataset`, `KFOLD_ROOT`, `FOLD`, and `OUTPUT_ROOT` for another setup. Each
-run writes its own router history under `layer_<idx>/router/`. After training,
-plot the curves and layer summary with:
-
-```bash
-python scripts/plot_router_layer_ablation.py \
-  --root checkpoints/qwen-2.5_router_layer_ablation_seed42
-```
-
-This produces `router_layer_curves.png`, `router_layer_summary.png`, and CSV/
-JSON summaries under `<root>/plots`.
-
-The example commands below use Qwen2.5-Math-7B-Instruct and write artifacts under `output/qwen-2.5`, `data/qwen`, and `checkpoints/qwen`.
-
-### 1. Generate Base Model Responses
+Sample multiple Simple/Hard trajectories while retaining one greedy Original anchor:
 
 ```bash
 python scripts/inference_multiple.py \
-  --model Qwen/Qwen2.5-Math-7B-Instruct \
-  --data-path data/canonical_math_paired.jsonl \
-  --output-dir output/qwen-2.5/multiple_seed42 \
-  --sampled-variants simple hard \
-  --samples-per-problem 50 \
-  --temperature 0.7 \
-  --top-p 0.8 \
-  --top-k 20 \
-  --seed 42
+  --model "$MODEL_NAME" --data-path "$PROBLEM_DATASET" \
+  --output-dir "$WORK_DIR/sampling" \
+  --sampled-variants simple hard --samples-per-problem 16 \
+  --temperature 0.7 --top-p 0.8 --top-k 20 --seed 42
+
+export BASE_RECORDS="/path/to/base-predictions.jsonl"
+export SAMPLED_RECORDS="/path/to/sampled-records.jsonl"
 ```
 
-This produces one greedy original reference and 50 valid sampled paths for
-each simple/hard perturbation. The `raw_generations.jsonl` file retains all
-accepted and rejected attempts, while `generation_qc.json` reports rejection
-reasons and sampling shortfalls. The command fails rather than silently
-returning fewer than 50 valid paths.
+Sampling validates responses and retries invalid trajectories within a bounded attempt budget. Greedy inference records one response without resampling. Match generation settings when comparing methods. For base inference, `--batch-size` counts problem groups; `--max-num-seqs` controls vLLM concurrency. Use `--backend transformers` when appropriate.
 
-The repetition validator only rejects a token block with a period of at most
-64 tokens when it repeats consecutively five times **and** the consecutive loop
-spans at least 64 tokens. This avoids rejecting short arithmetic patterns such
-as `3 * 3 * 3 * 3 * 3 * 3` or runs of zeros in large integers; reuse of the same
-phrase at distant positions is also allowed. During generation, the progress
-display shows both accepted valid paths and raw attempts against the bounded
-attempt budget.
-
-If validation thresholds change after an expensive vLLM run, rebuild the
-accepted pool from the saved raw attempts without loading the model again:
+To revalidate saved sampling attempts without regenerating responses:
 
 ```bash
-python scripts/revalidate_multiple.py \
-  --raw-path output/qwen-2.5/multiple_seed42/raw_generations.jsonl \
-  --records-path output/qwen-2.5/multiple_seed42/all_records.jsonl \
-  --output-dir output/qwen-2.5/multiple_seed42_revalidated
+export RAW_ATTEMPTS="/path/to/raw-attempts.jsonl"
+python - <<'PY'
+import os
+from pathlib import Path
+from inference.revalidate import revalidate_multiple
+
+revalidate_multiple(
+    raw_path=Path(os.environ["RAW_ATTEMPTS"]),
+    records_path=Path(os.environ["SAMPLED_RECORDS"]),
+    output_dir=Path(os.environ["WORK_DIR"]) / "revalidated",
+    samples_per_problem=16,
+)
+PY
 ```
 
-### 2. Segment CoTs and Run DAG Analysis
+## 2. Cheap Screening
 
-Use the unified launcher for either mode. Normal mode supports concurrent
-requests; `--concurrency` controls the worker count and `--max-retries` sets
-the per-chain retry budget (default 5 retries after the initial request).
+Require a valid Original anchor and at least three valid, correct trajectories on each perturbation variant. This stage does not use GED or require the Original answer to be correct.
+
+```bash
+python scripts/cheap_screen.py \
+  --input "$SAMPLED_RECORDS" --canonical "$PROBLEM_DATASET" \
+  --output-dir "$WORK_DIR/screening" --min-correct 3
+
+export CANDIDATE_RECORDS="/path/to/screened-candidates.jsonl"
+```
+
+Keep the full sampled dataset for the held-out problem universe; the screened subset controls annotation and supervision preparation.
+
+## 3. Segment CoTs and Annotate DAGs
+
+Create a shared segmentation once, then reuse it for every annotator:
+
+```bash
+export SEGMENTED_RECORDS="/path/to/shared-segmentation.jsonl"
+python -m data_analysis.cot_segmenter \
+  --input "$CANDIDATE_RECORDS" --output "$SEGMENTED_RECORDS"
+
+export ANNOTATOR="deepseek"
+python scripts/run_dag_analysis.py \
+  --mode normal --annotator "$ANNOTATOR" \
+  --input "$SEGMENTED_RECORDS" --output-dir "$WORK_DIR/annotation/$ANNOTATOR" \
+  --concurrency 8 --requests-per-minute 60 --max-retries 3 \
+  --max-tokens 4096 --thinking off --resume
+```
+
+Presets include `deepseek`, `gpt`, `haiku`, and `qwen`. Override `--provider`, `--model`, or `--base-url` for another endpoint. Each annotator needs a separate directory. To combine segmentation and annotation, replace `--input` with `--raw-input` and set `--segmented-cache` explicitly.
+
+For offline batch annotation, prepare requests and then merge the downloaded responses against the same segmentation:
 
 ```bash
 python scripts/run_dag_analysis.py \
-  --mode normal \
-  --raw-input "output/qwen-2.5/multiple_seed42/all_records.jsonl" \
-  --output-dir "output/qwen-2.5/dag_analysis_50" \
-  --provider deepseek \
-  --model deepseek-chat \
-  --concurrency 8 \
-  --max-retries 5
-```
+  --mode batch --annotator qwen --input "$SEGMENTED_RECORDS" \
+  --output-dir "$WORK_DIR/annotation/qwen" --max-tokens 4096 --thinking off
 
-Batch mode prepares provider-ready requests:
-
-```bash
+export BATCH_RESPONSES="/path/to/downloaded-batch-responses.jsonl"
 python scripts/run_dag_analysis.py \
-  --mode batch \
-  --raw-input "output/qwen-2.5/multiple_seed42/all_records.jsonl" \
-  --output-dir "output/qwen-2.5/dag_analysis_50" \
-  --provider deepseek \
-  --model deepseek-chat
+  --mode merge-batch --annotator qwen --input "$SEGMENTED_RECORDS" \
+  --batch-results-file "$BATCH_RESPONSES" \
+  --output-dir "$WORK_DIR/annotation/qwen"
 ```
 
-This single command segments every CoT, saves the reusable cache at
-`output/qwen-2.5/dag_analysis_50/segmented_records.jsonl`, and then creates the
-provider-ready file under `dag_analysis_50/batch/`. A cache matching the input
-content and segmentation settings is reused automatically.
-Pass `--refresh-segment-cache` to regenerate it,
-or `--segmented-cache <path>` to choose another cache location.
+Add `--batch-errors-file` when the provider supplies a separate error file. For online runs, `--resume` reuses successful checkpoints; concurrency and request-rate limits control retry pressure.
 
-The standalone `cot_segmenter.py` entrypoint remains available when only
-segmentation is needed.
-
-### 3. Merge DAG Batch Results
-
-After the batch inference service returns results, merge them with the same
-segmented cache:
+The shell launcher exposes the same workflow:
 
 ```bash
-python scripts/run_dag_analysis.py \
-  --mode merge-batch \
-  --input "output/qwen-2.5/dag_analysis_50/segmented_records.jsonl" \
-  --batch-results-file "path/to/batch_results.jsonl" \
-  --output-dir "output/qwen-2.5/dag_analysis_50"
+ANNOTATOR="$ANNOTATOR" SEGMENTED_INPUT="$SEGMENTED_RECORDS" \
+OUTPUT_DIR="$WORK_DIR/annotation/$ANNOTATOR" MODE=normal \
+  bash scripts/run_dag_analysis.sh --resume
 ```
 
-The merged DAG records are written to:
+## 4. Compute GED
 
-```text
-output/qwen-2.5/dag_analysis_50/analyzed_records.jsonl
-```
-
-Normal-mode runs additionally write each provider attempt (including the raw
-response and any parse/provider error) to
-`output/qwen-2.5/dag_analysis_50/normal/raw_responses.jsonl`.
-
-Known provider variants of the `Conclude` tag are normalized during parsing.
-To recover an existing normal-mode run from its saved raw responses without
-calling the provider again, use `scripts/recover_dag_raw_responses.py`.
-
-### 4. Compute GED Records
+Compare each variant with its Original anchor from the same annotator. Keep compression, embedding configuration, costs, and compute budgets fixed across annotators.
 
 ```bash
+export DAG_RECORDS="/path/to/annotated-records.jsonl"
+export GED_RECORDS="/path/to/ged-records.jsonl"
+export GRAPH_CACHE="/path/to/graph-cache.pt"
+
 python scripts/run_ged_analysis.py \
-  --output-root "output/qwen-2.5" \
-  --variant-records "output/qwen-2.5/dag_analysis_50/analyzed_records.jsonl" \
-  --correctness-file "output/qwen-2.5/multiple_seed42/all_records.jsonl" \
-  --graph-cache "output/qwen-2.5/ged_graph_cache.pt" \
-  --all-results-output "output/qwen-2.5/all_ged_results.jsonl"
+  --output-root "$WORK_DIR/ged/$ANNOTATOR" \
+  --variant-records "$DAG_RECORDS" --correctness-file "$CANDIDATE_RECORDS" \
+  --graph-cache "$GRAPH_CACHE" --all-results-output "$GED_RECORDS" \
+  --num-samples 16 --lambda-role 1 --lambda-text 1 \
+  --ged-timeout 120 --max-ged-nodes 32 --max-ged-edges 64 \
+  --workers 4 --resume
 ```
 
-By default, `run_ged_analysis.py` uses each problem's `original_0` response as the GED reference graph. For older workflows where original and variant DAG records are stored separately, pass `--original-records` explicitly.
+Use distinct GED files and caches for each annotator. Pass `--original-records` if Original annotations are stored separately. `--prepare-graph-cache-only` prepares compressed graphs and embeddings; `--rebuild-graph-cache` refreshes them after input or configuration changes. Timeout and size exclusions are recorded separately from successful distances.
 
-The first run associates every DAG node with its original segmented CoT span,
-compresses the graph, and encodes compressed-node text with
-`sentence-transformers/all-MiniLM-L6-v2`. The compressed graphs and their shared
-embedding matrix are stored together in `ged_graph_cache.pt`. Later runs load
-this cache directly and skip graph compression, model initialization, and text
-encoding. Use `--rebuild-graph-cache` after changing DAG annotations,
-segmentation, compression, or the embedding model. To prepare the cache before
-starting the slower GED search, add `--prepare-graph-cache-only`.
+Normalized GED is `clip(GED / B, 0, 1)`, where `B` is the total node and edge count of both graphs. Pin the encoder and its revision when comparing runs.
 
-Node substitution follows the role-plus-text cost from the paper:
-`lambda_role * role_mismatch + lambda_text * (1 - clipped_cosine)`. Both
-weights default to `1.0` and can be changed with `--lambda-role` and
-`--lambda-text`. The embedding model, optional revision, device, batch size,
-and maximum token length are controlled by the corresponding
-`--text-similarity-*` and `--embedding-*` arguments. Each result JSONL is
-accompanied by an `all_ged_results.config.json` file recording these weights
-and the graph-cache metadata.
+## 5. Select Trajectories and Build K-Folds
 
-Each GED record keeps the raw `ged` and also reports `ged_normalized` in
-`[0, 1]`, used by the current within-problem selection protocol. The latter
-uses the conservative unit-cost upper bound
-`|V1| + |V2| + |E1| + |E2|`; `similarity_normalized` is its complement. This
-prevents graph size and edge-count differences from producing an invalid
-negative similarity while keeping the original raw GED available for audit.
-Because the text-aware metric produces fractional costs and changes the raw
-GED scale, thresholds calibrated on the earlier role-only GED should be
-re-estimated before dataset curation.
+`src/dspr_dataset/data_filter.py` is the shared filtering implementation:
 
-### 5. Build The DSPR Dataset
+| Strategy | Role |
+| --- | --- |
+| `CheapScreenStrategy` | Screen valid anchors and sufficient correct candidates before GED |
+| `EligibilityStrategy` | Require correct, non-timeout candidates with a usable score and sufficient count |
+| `GEDRangeStrategy` | Apply the within-variant maximum-minus-minimum score threshold |
+| `TopKStrategy` | Optionally retain the lowest Simple or highest Hard scores |
+
+The following configuration retains all qualified trajectories in eligible variants. Set `top_k` explicitly only when a ranking cutoff is part of the intended protocol.
 
 ```bash
-bash scripts/prepare_qwen_dspr_data.sh
+export ELIGIBILITY_FILE="/path/to/selection-manifest.json"
+export TRAINING_RECORDS="/path/to/selected-trajectories.jsonl"
+python - <<'PY'
+import os
+from dspr_dataset.data_filter import load_ged_results, select_trajectories_by_ged
+from utils.io import write_json, write_jsonl
+
+source = os.environ["GED_RECORDS"]
+selection = select_trajectories_by_ged(
+    load_ged_results(source),
+    score_field="ged_normalized", min_correct_samples=3,
+    min_ged_range=0.10, top_k=None,
+    model_name=os.environ["MODEL_NAME"], source_file=source,
+)
+write_json(os.environ["ELIGIBILITY_FILE"], selection["eligibility"])
+write_jsonl(os.environ["TRAINING_RECORDS"], selection["selected"])
+PY
+
+python scripts/build_kfold_splits.py \
+  --raw-data "$SAMPLED_RECORDS" --eligible "$ELIGIBILITY_FILE" \
+  --ged-results "$GED_RECORDS" --output-root "$WORK_DIR/splits" \
+  --k 5 --seed 42 --validation-buckets 8
+export KFOLD_ROOT="$WORK_DIR/splits/kfold"
 ```
 
-This reads `output/qwen-2.5/multiple_n16/ged/deepseek/all_ged_results.jsonl` and writes
-`data/qwen/dspr_dataset.jsonl`, `data/qwen/eligibility.json`, and the five folds
-under `output/qwen-2.5/kfold/`. Set `PYTHON`, `GED_RESULTS`, or `DATA_ROOT` to override
-the interpreter, input, or output root.
+The builder reuses the saved filtering protocol and verifies eligible IDs. It groups all variants and trajectories of each problem together, balancing type, level, and eligibility. Each outer fold is held out once; validation is selected from the remaining groups. Eligibility controls supervision, while held-out folds cover the full raw problem universe. All methods reuse the same folds. Use a new split directory for a changed dataset or protocol.
 
-Only correct, non-timeout trajectories with a valid normalized GED are
-considered. A problem-variant needs at least three such trajectories and a
-normalized GED range of at least 0.10. Simple selects the five lowest values;
-Hard selects the five highest when five are available. Eligibility is per
-variant, so a single-sided group contributes prefix trajectories only for its
-eligible variant.
+## 6. Staged DSPR Pipeline
 
-### 6. K-fold Train/Validation/Test Splits
+DSPR first trains a router on deduplicated canonical prompts, then freezes the router and trains dual prefixes on selected trajectories. Router and prefix checkpoints are separate; validation selects checkpoints.
 
-The problem dataset is `data/canonical_math_paired.jsonl`. The preparation
-script assigns every raw problem group to one of five outer test folds with
-seed 42, then selects validation groups from the remaining train/validation
-pool. With the default eight validation buckets, each run uses approximately
-70% of groups for training, 10% for validation, and 20% for testing. All
-variants and trajectories of a problem stay together. Assignment balances
-problem type, level, and the eligible/noneligible status of the simple and
-hard variants. Eligibility controls which trajectories enter prefix training;
-the outer test folds retain all problem groups.
-
-Each `output/qwen-2.5/kfold/fold_N/` contains `train.jsonl`, `val.jsonl`,
-`test.jsonl`, and the corresponding `train_ids.json`, `val_ids.json`, and
-`test_ids.json` manifests. `manifest.json`, `coverage.json`, `fold_assignments.jsonl`, and
-`fold_balance.csv` record the protocol and coverage at the K-fold root.
-
-### 7. Train DSPR
-
-Train one fold with the staged pipeline:
+Configure the full K-fold launcher:
 
 ```bash
-python scripts/train_kfold.py dspr --folds 0 --gpus 0
+export CHECKPOINT_DIR="$WORK_DIR/models/dspr"
+export INFER_OUTPUT_DIR="$WORK_DIR/predictions/dspr"
+export BASELINE_PATH="$BASE_RECORDS"
+bash scripts/run_dspr_pipeline.sh --gpus "$GPUS"
 ```
 
-Each fold first trains the router on canonical problem-variant prompts from
-`data/canonical_math_paired.jsonl`, selected by its `train_ids.json` and `val_ids.json`.
-It then freezes the router and trains the dual prefix on that fold's
-`train.jsonl` and `val.jsonl` trajectories. Artifacts are saved separately:
-
-```text
-checkpoints/qwen_staged_kfold_seed42/fold_0/router/router_trainable.pt
-checkpoints/qwen_staged_kfold_seed42/fold_0/prefix/dspr_trainable.pt
-```
-
-### 8. Train Qwen DSPR with the Prepared K-Folds
-
-The five prepared Qwen folds can be trained in router -> prefix stages with seed
-42 using the orchestration script below. Each fold gets an isolated checkpoint
-directory and `train.log`.
-GPU workers dynamically claim the next unfinished fold, so the same command
-also works when fewer than five GPUs are available:
+The launcher runs training, held-out inference, and aggregation. It reads the exported `MODEL_NAME`, `PROBLEM_DATASET`, and `KFOLD_ROOT`. Choose a stage or a fold subset as needed:
 
 ```bash
-python scripts/train_kfold.py dspr --gpus 0,1,2,3,4
+bash scripts/run_dspr_pipeline.sh --gpus "$GPUS" --train-only
+bash scripts/run_dspr_pipeline.sh --gpus "$GPUS" --eval-only
+bash scripts/run_dspr_pipeline.sh --gpus "$GPUS" --folds 0
+bash scripts/run_dspr_pipeline.sh --gpus "$GPUS" --dry-run
 ```
 
-All DSPR, SPT, and LoRA K-fold commands use `src/experiment_pipeline/kfold.py`
-for argument handling, command construction, GPU scheduling, progress bars,
-logs, and status manifests. Method-specific options preserve staged DSPR
-training, static-prompt SPT, and parameter-matched LoRA. Invoke them through
-`scripts/train_kfold.py METHOD`; method-specific legacy entrypoints are removed.
+These are alternative invocations. A training dry run validates and prints commands without loading a model. GPU workers claim pending folds; one GPU runs folds sequentially. Configure stage-specific epochs, learning rates, and early stopping through the launcher's environment variables or `--help`.
 
-Shared training callbacks, history logging, and update-step budgeting live in
-`src/utils/training.py`. The lightweight worker/parent training-event protocol
-and parser live in `src/utils/training_progress.py`; inference events use
-`src/utils/inference_progress.py`. All three trainers use these utilities
-without importing another method's training implementation. Existing progress
-event prefixes and log formats are unchanged.
-
-Use `--dry-run` to validate the fold files and print the exact child commands
-without loading a model. Outputs default to
-`checkpoints/qwen_staged_kfold_seed42/fold_0` through `fold_4`; the complete run
-manifest is written to the parent directory. `run_status.json` records separate
-router and prefix progress and early stopping results. Defaults are 20 router
-epochs at learning rate `1e-5`, 15 prefix epochs at `4e-5`, and early stopping
-patience 3 for each stage. Use `--router-epochs`, `--prefix-epochs`,
-`--router-learning-rate`, and `--prefix-learning-rate` to override them.
-
-`scripts/run_dspr_pipeline.sh` is the unified shell entrypoint, replacing the
-former separate staged-training script. It runs training, held-out inference,
-and OOF metric reporting with the same folds and model settings:
+For a single fold, or independent router/prefix stages:
 
 ```bash
-# Full five-fold pipeline on two GPUs
-bash scripts/run_dspr_pipeline.sh --gpus 0,1
-
-# Training only, or validate the training commands without loading a model
-bash scripts/run_dspr_pipeline.sh --gpus 0 --train-only
-bash scripts/run_dspr_pipeline.sh --gpus 0 --dry-run
-
-# Run just one fold, including inference and metrics for that fold
-bash scripts/run_dspr_pipeline.sh --gpus 0 --folds 0
-
-# Evaluate already trained prefix checkpoints
-bash scripts/run_dspr_pipeline.sh --gpus 0,1 --eval-only
+python scripts/train.py dspr \
+  --model-name "$MODEL_NAME" --problem-dataset "$PROBLEM_DATASET" \
+  --kfold-root "$KFOLD_ROOT" --fold 0 \
+  --output-path "$WORK_DIR/models/dspr-single" \
+  --prefix-length 15 --router-intermediate-dim 64 --router-dropout 0.10 \
+  --router-learning-rate 1e-5 --prefix-learning-rate 4e-5 \
+  --router-epochs 20 --prefix-epochs 15
 ```
 
-Set `KFOLD_ROOT`, `problem_dataset`, `CHECKPOINT_DIR`, and `INFER_OUTPUT_DIR` to
-override data and output locations. Training settings can be configured with
-environment variables such as `ROUTER_EPOCHS`, `PREFIX_EPOCHS`,
-`ROUTER_LEARNING_RATE`, and `PREFIX_LEARNING_RATE`; see `--help` for the full
-list. A training dry run stops before inference because it creates no
-checkpoints. To compare OOF results with a baseline, set `BASELINE_PATH`.
+Use `--run-stage router` for the first stage alone. For the second stage, use `--run-stage prefix --router-checkpoint "$ROUTER_CHECKPOINT"`, where `ROUTER_CHECKPOINT` is your saved router artifact. `--router-context-cache-path` permits reuse of compatible prompt encodings.
 
-### 9. Evaluate Qwen DSPR with Held-Out K-Folds
+## 7. SPT and LoRA Pipelines
 
-First run one held-out Fold-0 problem as a smoke test. Use a separate output
-root so the smoke result cannot overwrite the formal fold output:
+Both baselines use the same grouped folds and selected trajectories as DSPR. SPT learns a static prompt; LoRA trains adapters. Use separate model and prediction directories for each method.
 
 ```bash
+METHOD=spt  # Change to lora for the LoRA pipeline.
+python scripts/train_kfold.py "$METHOD" \
+  --model-name "$MODEL_NAME" --fold-root "$KFOLD_ROOT" \
+  --output-root "$WORK_DIR/models/$METHOD" --gpus "$GPUS"
+
+python scripts/evaluate.py "$METHOD" run \
+  --model-name "$MODEL_NAME" --checkpoint-root "$WORK_DIR/models/$METHOD" \
+  --test-root "$KFOLD_ROOT" --id-root "$KFOLD_ROOT" \
+  --output-root "$WORK_DIR/predictions/$METHOD" --gpus "$GPUS" \
+  --max-new-tokens 2048
+
+export DSPR_RECORDS="/path/to/aggregated-dspr-predictions.jsonl"
+python scripts/evaluate.py "$METHOD" aggregate \
+  --result-root "$WORK_DIR/predictions/$METHOD" --id-root "$KFOLD_ROOT" \
+  --raw-data "$PROBLEM_DATASET" --base "$BASE_RECORDS" --dspr "$DSPR_RECORDS"
+```
+
+SPT accepts `--prefix-length`; LoRA accepts `--rank`, `--lora-alpha`, and `--target-modules`. Parameter-matched LoRA checks the configured DSPR budget; for another model, set `--dspr-parameter-budget` accordingly. Use `--no-enforce-parameter-budget` for an explicitly unmatched configuration. Add `--folds 0` for one fold or `--dry-run` to inspect training/inference commands. SPT aggregation can additionally take `--lora "$LORA_RECORDS"`.
+
+The baseline shell launcher supports `STAGE=train|eval|all`, `FOLDS`, `GPUS`, and `DRY_RUN`. Its evaluation and comparator settings are defined in the launcher; use the explicit commands above for custom models and comparison files. The training-only shortcut forwards method arguments:
+
+```bash
+STAGE=train GPUS="$GPUS" KFOLD_ROOT="$KFOLD_ROOT" \
+CHECKPOINT_ROOT="$WORK_DIR/models/$METHOD" \
+  bash scripts/run_baseline_pipeline.sh "$METHOD" --model-name "$MODEL_NAME"
+```
+
+## 8. Held-Out Evaluation and Aggregation
+
+To run the DSPR stages separately:
+
+```bash
+python scripts/train_kfold.py dspr \
+  --model-name "$MODEL_NAME" --problem-dataset "$PROBLEM_DATASET" \
+  --fold-root "$KFOLD_ROOT" --output-root "$CHECKPOINT_DIR" --gpus "$GPUS"
+
 python scripts/evaluate.py dspr run \
-  --folds 0 \
-  --problem-id 2 \
-  --gpus 0 \
-  --output-root output/qwen_staged_kfold_seed42_smoke
-```
+  --model-name "$MODEL_NAME" --checkpoint-root "$CHECKPOINT_DIR" \
+  --test-root "$KFOLD_ROOT" --id-root "$KFOLD_ROOT" \
+  --output-root "$INFER_OUTPUT_DIR" --gpus "$GPUS" --max-new-tokens 2048
 
-After the smoke test passes, run all folds. The evaluator reads each fold's
-`prefix/checkpoint-*/trainer_state.json`, selects its best prefix validation checkpoint, explicitly uses
-prefix length 15, and dynamically assigns pending folds to available GPUs:
-
-```bash
-python scripts/evaluate.py dspr run --gpus 0,1,2,3,4
-```
-
-Each fold writes `all_records.jsonl`, `inference.log`, and `run_status.json`
-under `output/qwen_staged_kfold_seed42/fold_N`. The parent directory also contains an
-`inference_manifest.json` with the exact checkpoint and command for every fold.
-Inference reads each fold's `test.jsonl` and checks coverage against its
-`test_ids.json` manifest.
-
-Validate and pool the five folds into one OOF result:
-
-```bash
-python scripts/evaluate.py dspr aggregate
-```
-
-To add paired bootstrap confidence intervals and exact McNemar tests against a
-matched greedy-decoding baseline, first generate one base-Qwen prediction for
-every raw problem group. The base model does not require one run per fold
-because it has no fold-specific training:
-
-```bash
-python scripts/inference.py \
-  --baseline base \
-  --backend vllm \
-  --model-name Qwen/Qwen2.5-Math-7B-Instruct \
-  --data-path data/canonical_math_paired.jsonl \
-  --output-dir output/qwen_matched_greedy \
-  --max-new-tokens 2048 \
-  --max-model-len 4096 \
-  --batch-size 128 \
-  --gpu-memory-utilization 0.90 \
-  --max-num-seqs 64 \
-  --max-num-batched-tokens 8192
-```
-
-From the repository root, `bash scripts/run_inference.sh` runs this
-configuration on GPU 0. Edit `CUDA_VISIBLE_DEVICES` and the arguments directly
-in the script as needed. Extra arguments are forwarded to `inference.py`; for
-example, `--num 32 --output-dir output/qwen_base_smoke` selects 32 problem
-triplets and saves them separately.
-
-The vLLM backend supports base greedy inference and keeps one engine resident
-across batches. `--batch-size` counts problem triplets, so 128 submits 384
-prompts; `--max-num-seqs` controls the engine's concurrent sequence limit.
-Prompt tokenization, tokenizer EOS, model repetition penalty, quality checks,
-and answer scoring follow the Transformers path. Each variant gets one greedy
-output, including invalid outputs, with no resampling. Backend kernels can
-produce different greedy tokens despite matching these settings.
-
-Before loading model weights, the backend checks every selected prompt plus
-the full output budget against `--max-model-len`, without truncation. Omitting
-this option selects `max(4096, longest prompt + max-new-tokens)`. Chunked
-prefill is enabled by default; `--no-enable-chunked-prefill` disables it.
-The JSONL is flushed after each scored triplet, and `generation_qc.json` is
-updated after each batch with completion counts, backend settings, generation
-tokens/s, and separate generation/evaluation times. Throughput excludes model
-loading. Compare `--max-num-seqs 32`, `64`, and `128` on the same actual subset;
-`--max-num-batched-tokens 16384` is another tuning option. Re-running overwrites
-the selected output directory's prediction/QC files.
-
-The CLI defaults to `--backend transformers` for compatibility with existing
-DSPR/SPT/LoRA commands. When omitted, `--max-new-tokens` defaults to 2048 for
-vLLM and retains the previous 4096 default for Transformers. The base shell
-wrapper explicitly selects vLLM and a 2048-token output budget. Set the same
-output budget on both sides when comparing experiments.
-
-Then pass the resulting baseline file to the aggregator:
-
-```bash
 python scripts/evaluate.py dspr aggregate \
-  --baseline output/qwen_matched_greedy/all_records.jsonl
+  --result-root "$INFER_OUTPUT_DIR" --id-root "$KFOLD_ROOT" \
+  --raw-data "$PROBLEM_DATASET" --baseline "$BASE_RECORDS"
 ```
 
-The aggregator requires exact fold-ID coverage and writes
-`oof_all_records.jsonl`, `oof_metrics.json`, `oof_metrics.csv`, and
-`oof_alpha_summary.csv` under the K-fold output root.
-All three methods use `src/experiment_pipeline/aggregate.py` for fold validation,
-OOF merging, accuracy slices, paired bootstrap intervals, and McNemar tests.
-DSPR additionally requires router alpha values and exports their statistics;
-SPT and LoRA select their own default paths and comparators. Invoke aggregation
-through `scripts/evaluate.py METHOD aggregate`; report field names are retained.
-The OOF problem count is inferred from the selected folds. Use `--folds 0` to
-report a single fold and `--expected-problems N` for an explicit count assertion.
-Canonical raw data and baseline files can cover a larger universe; metrics use
-only the selected held-out IDs.
+Evaluation selects validation checkpoints and checks held-out ID coverage. Aggregation combines out-of-fold predictions and reports full, eligible, and noneligible slices; matched comparisons support paired bootstrap intervals and McNemar tests. Use the same `--folds` subset across inference and aggregation. `--expected-problems` optionally asserts the intended test population size.
 
-### 9.1 Train and Evaluate SPT and LoRA on the Same Folds
-
-Both baselines directly reuse `output/qwen-2.5/kfold/fold_N/train.jsonl`,
-`val.jsonl`, and `test.jsonl`. They use the same CoT supervision and response-only
-loss mask as the DSPR prefix stage. Defaults are flat trajectory sampling,
-learning rate `4e-5`, batch size 4, gradient accumulation 4, a 15-epoch cap,
-maximum training length 2048, warmup ratio 0.05, and weight decay 0. Validation
-LM loss selects the best checkpoint, with early-stopping patience 3. These
-defaults match the current staged prefix configuration; historical overrides
-should be checked against the corresponding training manifest.
-
-SPT defaults to one 50-token static prompt. Use `--prefix-length` to select a
-shorter prompt. Parameter-matched LoRA uses rank **1**, alpha **2**, and
-`q_proj`/`v_proj` adapters. Its training entrypoint enforces a 10% parameter-budget
-tolerance relative to the configured DSPR model.
-
-Validate both five-fold training schedules without loading model weights:
+For fixed-routing controls, reuse the learned run's per-fold checkpoints and recorded inference arguments:
 
 ```bash
-python scripts/train_kfold.py spt --gpus 0 --dry-run
-python scripts/train_kfold.py lora --gpus 0 --dry-run
+export LEARNED_RUN_DIR="/path/to/learned-router-predictions"
+REFERENCE_RUN_ROOT="$LEARNED_RUN_DIR" CHECKPOINT_ROOT="$CHECKPOINT_DIR" \
+KFOLD_ROOT="$KFOLD_ROOT" PROBLEM_DATASET="$PROBLEM_DATASET" GPUS="$GPUS" \
+OUTPUT_ROOT="$WORK_DIR/predictions/fixed-alpha" \
+  bash scripts/run_fixed_alpha_kfold.sh
 ```
 
-Run training, held-out greedy inference, and OOF comparison:
+The launcher runs alpha 0, 0.5, and 1 sequentially, with parallel folds within each condition,
+then aggregates each condition. Results use separate `alpha_0`, `alpha_0p5`, and `alpha_1`
+directories. Each reference fold must have a successful `run_status.json`; its exact checkpoint
+must still exist under `CHECKPOINT_ROOT`. Recorded generation and architecture arguments are
+reused. `DRY_RUN=1` checks commands without generation; the default `RESUME=1` skips complete
+matching folds and reruns interrupted folds. A failed condition stops the sequence.
+Set `BASELINE_PATH` to a matching base prediction file to include base comparisons.
+For a single condition, use `scripts/evaluate.py dspr run --forced-alpha 0.5`
+with `--reference-run-root "$LEARNED_RUN_DIR"` and the usual checkpoint, fold, and output paths.
+
+For a smoke run, add `--folds 0 --problem-id "$PROBLEM_ID"` to inference and choose a separate run directory. Such a partial run is not a complete fold for aggregation.
+
+Evaluate a single DSPR checkpoint directly:
 
 ```bash
-GPUS=0 bash scripts/run_baseline_pipeline.sh spt
-GPUS=0 bash scripts/run_baseline_pipeline.sh lora
-```
-
-One GPU runs folds sequentially; `GPUS=0,1,2,3,4` enables parallel folds.
-The terminal displays an optimizer-step progress bar for each active fold,
-including its method, GPU, epoch, and estimated remaining time. Detailed logs
-are saved in `checkpoints/<run_name>/fold_N/train.log`.
-Held-out SPT/LoRA evaluation prints checkpoint selection and reference/model-loading
-stages, then shows a progress bar for each active fold with completed answers,
-problem ID, variant, and estimated remaining time. Inference failures print the
-last log lines; complete logs remain in `output/<run_name>/fold_N/inference.log`.
-All three methods use `src/experiment_pipeline/evaluate.py` for checkpoint
-selection, inference scheduling, progress reporting, and output validation.
-DSPR selects its prefix-stage checkpoint and requires router alpha values;
-SPT reads prompt dimensions from the checkpoint; LoRA loads its adapter directory.
-Run evaluation through `scripts/evaluate.py METHOD run`. The method-specific
-evaluate, aggregate, and K-fold compatibility modules have been removed.
-For an initial fold-0 run, use `FOLDS=0`. Set `STAGE=train` or `STAGE=eval` to
-run only that stage; `DRY_RUN=1` validates the training commands. `RUN_NAME`,
-`CHECKPOINT_ROOT`, and `OUTPUT_ROOT` can select separate experiment directories.
-Extra arguments after the method are forwarded to K-fold training.
-
-The individual entrypoints are also available:
-
-```bash
-python scripts/train_kfold.py spt --gpus 0
-python scripts/evaluate.py spt run --gpus 0
-python scripts/evaluate.py spt aggregate --lora output/qwen_lora_qv_r1_seed42/oof_all_records.jsonl
-
-python scripts/train_kfold.py lora --gpus 0
-python scripts/evaluate.py lora run --gpus 0
-python scripts/evaluate.py lora aggregate
-```
-
-SPT selects and loads `baseline_trainable.pt` using its validation checkpoint
-state, including the saved prompt length. LoRA selects the best PEFT adapter.
-Inference uses one greedy response per variant, a 2048-output-token budget,
-and the existing answer evaluator. Aggregation supports `--folds 0` and the
-full five-fold OOF universe, with full, eligible, and noneligible comparisons
-against `output/qwen-2.5/base/all_records.jsonl` and
-`output/qwen_staged_kfold_seed42/oof_all_records.jsonl`.
-
-Outputs are separate: `checkpoints/qwen_spt_seed42` / `output/qwen_spt_seed42`
-and `checkpoints/qwen_lora_qv_r1_seed42` / `output/qwen_lora_qv_r1_seed42`.
-A cleaned-dataset experiment requires separately rebuilt training records and
-folds.
-
-To run a larger LoRA configuration, explicitly disable parameter matching and
-use its own output directory:
-
-```bash
-RUN_NAME=qwen_lora_qv_r3_seed42 GPUS=0 bash scripts/run_baseline_pipeline.sh lora \
-  --rank 3 --lora-alpha 6 --no-enforce-parameter-budget
-```
-
-### 10. Evaluate a Single DSPR Checkpoint
-
-```bash
+export MODEL_CHECKPOINT="/path/to/model-checkpoint"
 python scripts/inference.py \
-  --baseline dspr \
-  --checkpoint "checkpoints/qwen/dspr/dspr_trainable.pt" \
-  --model-name "Qwen/Qwen2.5-Math-7B-Instruct" \
-  --data-path "data/canonical_math_paired.jsonl" \
-  --output-dir "output/qwen-2.5/dspr" \
-  --prefix-length 50 \
-  --max-new-tokens 4096
+  --baseline dspr --model-name "$MODEL_NAME" --checkpoint "$MODEL_CHECKPOINT" \
+  --data-path "$PROBLEM_DATASET" --output-dir "$WORK_DIR/single-checkpoint" \
+  --prefix-length 15 --router-intermediate-dim 64 --router-dropout 0.10 \
+  --max-new-tokens 2048
 ```
 
-Use the same command with `--baseline spt` and an SPT checkpoint, or
-`--baseline lora` and a PEFT adapter directory. The single-path entrypoint is
-greedy-only by design: invalid or truncated outputs are recorded in
-`generation_qc.json` and are never resampled.
-
-The inference output is:
-
-```text
-output/qwen-2.5/dspr/all_records.jsonl
-```
-
-### 11. Report Accuracy
-
-Evaluate one result file:
+Match architecture arguments to the saved checkpoint. Use `--baseline spt` with its prompt length, or `--baseline lora` with an adapter directory. Score or compare prediction files with:
 
 ```bash
-python src/utils/calculate_accuracy.py "output/qwen-2.5/dspr/all_records.jsonl"
+export PREDICTION_RECORDS="/path/to/predictions.jsonl"
+python src/utils/calculate_accuracy.py "$PREDICTION_RECORDS"
+python src/utils/calculate_accuracy.py "$PREDICTION_RECORDS" --compare-file "$BASE_RECORDS"
 ```
 
-Compare DSPR against a baseline result file:
+## 9. Annotator Consistency and Ablation Workflows
+
+For cross-annotator analysis, keep questions, responses, segmentation, and step IDs fixed. Repeat DAG annotation and GED with separate annotator directories and identical GED settings. Use base greedy traces for role/dependency consistency and screened multi-sample traces for selection consistency.
 
 ```bash
-python src/utils/calculate_accuracy.py \
-  "output/qwen-2.5/dspr/all_records.jsonl" \
-  --compare-file "output/qwen_matched_greedy/all_records.jsonl"
+export BASE_ANALYSIS_ROOT="/path/to/base-analysis-bundle"
+export SAMPLE_ANALYSIS_ROOT="/path/to/multi-sample-analysis-bundle"
+python scripts/analyze_annotator_reliability.py \
+  --base-root "$BASE_ANALYSIS_ROOT" --canonical "$PROBLEM_DATASET" \
+  --output-dir "$WORK_DIR/analysis/annotation" --bootstrap-samples 10000 --seed 42
+
+python scripts/analyze_selection_consistency.py \
+  --data-root "$SAMPLE_ANALYSIS_ROOT" --canonical "$PROBLEM_DATASET" \
+  --eligibility-config "$ELIGIBILITY_FILE" \
+  --output-dir "$WORK_DIR/analysis/selection" \
+  --report "$WORK_DIR/selection-summary.md" --bootstrap-samples 10000 --seed 42
 ```
 
-## Recommended Reading Order
+The analysis bundles must follow the input layout expected by each script, including matching records, annotator subdirectories, GED configurations, and failure records. These commands analyze saved artifacts without calling annotators or rerunning GED. Selection consistency uses the shared count/range strategies without a top-k cutoff.
 
-For new contributors, the fastest way to understand the code is:
+To sweep the router context layer and summarize its training curves:
 
-1. `scripts/run_dspr_pipeline.sh` for the high-level workflow.
-2. `src/dspr/config.py` and `src/dspr/model.py` for the model interface.
-3. `src/dspr_training/dataset.py`, `loss.py`, and `trainer.py` for training behavior.
-4. `src/data_analysis/measurement/` and `src/dspr_dataset/data_filter.py` for dataset construction.
-5. `scripts/inference.py`, `scripts/evaluate.py`, and `src/utils/calculate_accuracy.py` for evaluation.
+```bash
+MODEL_NAME="$MODEL_NAME" PROBLEM_DATASET="$PROBLEM_DATASET" \
+KFOLD_ROOT="$KFOLD_ROOT" OUTPUT_ROOT="$WORK_DIR/router-ablation" \
+FOLD=0 LAYERS="8 12 15 20" bash scripts/run_router_layer_ablation.sh
+
+python scripts/plot_router_layer_ablation.py \
+  --root "$WORK_DIR/router-ablation" --output-dir "$WORK_DIR/router-plots"
+```
+
+Omit `LAYERS` to inspect all model layers. For a fixed-routing inference comparison, add `--forced-alpha` to single-checkpoint DSPR inference and keep all other settings unchanged.
+
+## Code Structure
+
+| Module | Responsibility |
+| --- | --- |
+| `src/dspr/`, `src/dspr_training/` | Dual prefixes, router, and staged training |
+| `src/spt/`, `src/spt_training/` | Static prompt baseline |
+| `src/dspr_dataset/` | Shared screening and trajectory-selection strategies |
+| `src/data_analysis/` | Segmentation, annotation, graph construction, and GED |
+| `src/inference/` | Model adapters, sampling, and response validation |
+| `src/experiment_pipeline/` | Training orchestration, held-out evaluation, and aggregation |
+| `src/utils/` | Answer evaluation, I/O, and progress reporting |
