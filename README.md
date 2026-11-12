@@ -265,6 +265,32 @@ python scripts/train.py dspr \
 
 Use `--run-stage router` for the first stage alone. For the second stage, use `--run-stage prefix --router-checkpoint "$ROUTER_CHECKPOINT"`, where `ROUTER_CHECKPOINT` is your saved router artifact. `--router-context-cache-path` permits reuse of compatible prompt encodings.
 
+To train each prefix with its binary supervision label, select `--prefix-routing label`.
+Simple examples use alpha 0 and Hard examples use alpha 1 during prefix training.
+Validation uses the frozen router's continuous mixture, and its validation loss selects
+the checkpoint. Default inference also uses continuous routing. The default
+`--prefix-routing router` retains mixed-prefix training.
+
+Reuse the routers from a completed run to train fresh prefixes on the same folds:
+
+```bash
+export ROUTER_CHECKPOINT_ROOT="/path/to/existing-dspr-checkpoints"
+PREFIX_ROUTING=label ROUTER_CHECKPOINT_ROOT="$ROUTER_CHECKPOINT_ROOT" \
+CHECKPOINT_DIR="$WORK_DIR/models/dspr-label" \
+INFER_OUTPUT_DIR="$WORK_DIR/predictions/dspr-label" \
+  bash scripts/run_dspr_pipeline.sh --gpus "$GPUS"
+```
+
+Each source fold must contain `fold_N/router/router_trainable.pt`, the router saved
+after validation checkpoint selection. Only router weights are loaded; prefixes
+start from fresh seeded initialization. Match the source model, router architecture,
+seed and fold assignment. Omit `ROUTER_CHECKPOINT_ROOT` to train both stages.
+The K-fold Python entrypoint accepts the same `--prefix-routing label` and
+`--router-checkpoint-root` options. For a single fold, combine `--prefix-routing label`
+with `--run-stage prefix --router-checkpoint "$ROUTER_CHECKPOINT"`.
+Use separate directories for this training condition. Checkpoints and run metadata
+record the routing mode; supplied training labels are not reported as router accuracy.
+
 ## 7. SPT and LoRA Pipelines
 
 Both baselines use the same grouped folds and selected trajectories as DSPR. SPT learns a static prompt; LoRA trains adapters. Use separate model and prediction directories for each method.

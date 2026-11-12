@@ -90,8 +90,14 @@ class DSPRTrainer(Trainer):
         router_learning_rate: float | None = None,
         prefix_weight_decay: float | None = None,
         router_weight_decay: float | None = None,
+        prefix_routing: str = "router",
         **kwargs,
     ):
+        if prefix_routing not in {"router", "label"}:
+            raise ValueError("prefix_routing must be router or label")
+        if prefix_routing == "label" and lambda_router != 0.0:
+            raise ValueError("Label-routed prefix training requires lambda_router=0")
+        self.prefix_routing = prefix_routing
         self._train_diagnostics = _empty_diagnostic_accumulator()
         self._eval_diagnostics = _empty_diagnostic_accumulator()
         super().__init__(*args, **kwargs)
@@ -192,13 +198,22 @@ class DSPRTrainer(Trainer):
         accumulator["target_alpha"].append(target_values)
 
     @staticmethod
-    def _summarize_diagnostics(accumulator: dict[str, Any]) -> dict[str, float]:
+    def _summarize_diagnostics(
+        accumulator: dict[str, Any], *, router_diagnostics: bool = True,
+    ) -> dict[str, float]:
         sample_count = accumulator["sample_count"]
         if sample_count == 0:
             return {}
 
         alpha = np.concatenate(accumulator["alpha"])
         target_alpha = np.concatenate(accumulator["target_alpha"])
+        if not router_diagnostics:
+            # These are supplied labels, not router predictions. Do not report
+            # tautological router accuracy/AUC for label-routed training.
+            return {
+                "lm_loss": float(accumulator["lm_loss_sum"] / sample_count),
+                "prefix_alpha_mean": float(alpha.mean()),
+            }
         return {
             "lm_loss": float(accumulator["lm_loss_sum"] / sample_count),
             "router_loss": float(accumulator["router_loss_sum"] / sample_count),
@@ -208,6 +223,9 @@ class DSPRTrainer(Trainer):
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         target_alpha = inputs.pop("target_alpha")
         inputs.pop("variant_type", None)
+        # Validation always uses the deployed soft mixture. Only training
+        # bypasses the frozen router with the per-example binary labels.
+        label_routing = self.prefix_routing == "label" and model.training
 
         lm_loss, alpha = model(
             input_ids=inputs["input_ids"],
@@ -215,9 +233,14 @@ class DSPRTrainer(Trainer):
             labels=inputs.get("labels"),
             prompt_input_ids=inputs["prompt_input_ids"],
             prompt_attention_mask=inputs["prompt_attention_mask"],
+            forced_alpha=target_alpha if label_routing else None,
         )
 
-        total_loss, loss_components = self.loss_fn(lm_loss, alpha, target_alpha)
+        if label_routing:
+            total_loss = lm_loss
+            loss_components = {"lm_loss": lm_loss.item(), "router_loss": 0.0}
+        else:
+            total_loss, loss_components = self.loss_fn(lm_loss, alpha, target_alpha)
         accumulator = self._train_diagnostics if model.training else self._eval_diagnostics
         self._accumulate_diagnostics(
             accumulator,
@@ -242,6 +265,8 @@ class DSPRTrainer(Trainer):
                 "dual_prefix_state_dict": model_to_save.dual_prefix.state_dict(),
                 "router_state_dict": model_to_save.router.state_dict(),
                 "training_args": self.args.to_dict(),
+                "prefix_routing": self.prefix_routing,
+                "prefix_validation_routing": "router",
                 "dspr_learning_rates": {
                     "prefix": self.prefix_learning_rate,
                     "router": self.router_learning_rate,
@@ -275,7 +300,9 @@ class DSPRTrainer(Trainer):
         """Attach interval-level training diagnostics to regular Trainer logs."""
         logs = dict(logs)
         if "loss" in logs or "train_loss" in logs:
-            logs.update(self._summarize_diagnostics(self._train_diagnostics))
+            logs.update(self._summarize_diagnostics(
+                self._train_diagnostics, router_diagnostics=self.prefix_routing == "router",
+            ))
             self._train_diagnostics = _empty_diagnostic_accumulator()
             if self.optimizer is not None:
                 group_rates = {

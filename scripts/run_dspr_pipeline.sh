@@ -11,9 +11,8 @@ MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-Math-7B-Instruct}"
 PROBLEM_DATASET="${PROBLEM_DATASET:-data/canonical_math_paired.jsonl}"
 KFOLD_ROOT="${KFOLD_ROOT:-output/qwen-2.5/kfold}"
 SEED="${SEED:-42}"
-RUN_NAME="${RUN_NAME:-qwen_staged_kfold_seed${SEED}}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/${RUN_NAME}}"
-INFER_OUTPUT_DIR="${INFER_OUTPUT_DIR:-output/${RUN_NAME}}"
+PREFIX_ROUTING="${PREFIX_ROUTING:-router}"
+ROUTER_CHECKPOINT_ROOT="${ROUTER_CHECKPOINT_ROOT:-}"
 GPUS="${GPUS:-auto}"
 read -r -a FOLD_IDS <<< "${FOLDS:-${FOLD:-0 1 2 3 4}}"
 PIPELINE_STAGE="${PIPELINE_STAGE:-all}"
@@ -27,6 +26,8 @@ Usage: bash scripts/run_dspr_pipeline.sh [OPTIONS]
   --folds N [N ...]           Fold subset; default: 0 1 2 3 4
   --train-only               Run router -> frozen-router prefix training only
   --eval-only                Generate held-out responses from existing prefix checkpoints
+  --prefix-routing MODE      router (default) or label (Simple=0/Hard=1 during training)
+  --router-checkpoint-root P  Reuse P/fold_N/router/router_trainable.pt; train fresh prefixes only
   --dry-run                  Validate and print commands without training or inference
   --allow-existing           Allow non-empty training and inference output directories
   -h, --help                 Show this help
@@ -37,6 +38,7 @@ Configuration can also be set with environment variables:
   ROUTER_EPOCHS (20), PREFIX_EPOCHS (15), ROUTER_LEARNING_RATE (1e-5),
   PREFIX_LEARNING_RATE (4e-5), ROUTER_WEIGHT_DECAY (1e-3),
   PREFIX_WEIGHT_DECAY (0.0), ROUTER_TARGET_SMOOTHING (0.05),
+  PREFIX_ROUTING (router/label), ROUTER_CHECKPOINT_ROOT (optional existing run),
   PREFIX_TRAJECTORY_SAMPLING (flat/random_one; default: flat),
   BATCH_SIZE (4), GRADIENT_ACCUMULATION_STEPS (4), WARMUP_RATIO (0.05),
   CONTEXT_LAYER_IDX (15), PREFIX_LENGTH (15), ROUTER_INTERMEDIATE_DIM (64),
@@ -63,6 +65,8 @@ while (( $# )); do
       ;;
     --train-only) PIPELINE_STAGE=train; shift ;;
     --eval-only) PIPELINE_STAGE=eval; shift ;;
+    --prefix-routing) PREFIX_ROUTING="${2:?--prefix-routing requires a value}"; shift 2 ;;
+    --router-checkpoint-root) ROUTER_CHECKPOINT_ROOT="${2:?--router-checkpoint-root requires a value}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --allow-existing) ALLOW_EXISTING=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -74,6 +78,15 @@ case "${PIPELINE_STAGE}" in
   all|train|eval) ;;
   *) echo "Error: PIPELINE_STAGE must be all, train, or eval." >&2; exit 2 ;;
 esac
+
+case "${PREFIX_ROUTING}" in
+  router) DEFAULT_RUN_NAME="qwen_staged_kfold_seed${SEED}" ;;
+  label) DEFAULT_RUN_NAME="qwen_staged_label_kfold_seed${SEED}" ;;
+  *) echo "Error: PREFIX_ROUTING must be router or label." >&2; exit 2 ;;
+esac
+RUN_NAME="${RUN_NAME:-${DEFAULT_RUN_NAME}}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/${RUN_NAME}}"
+INFER_OUTPUT_DIR="${INFER_OUTPUT_DIR:-output/${RUN_NAME}}"
 
 COMMON_ARGS=(
   --model-name "${MODEL_NAME}"
@@ -90,8 +103,13 @@ if [[ "${DRY_RUN}" == "1" ]]; then COMMON_ARGS+=(--dry-run); fi
 
 if [[ "${PIPELINE_STAGE}" != "eval" ]]; then
   echo "========== Staged DSPR K-fold training =========="
+  TRAIN_ARGS=(--prefix-routing "${PREFIX_ROUTING}")
+  if [[ -n "${ROUTER_CHECKPOINT_ROOT}" ]]; then
+    TRAIN_ARGS+=(--router-checkpoint-root "${ROUTER_CHECKPOINT_ROOT}")
+  fi
   "${PYTHON}" scripts/train_kfold.py dspr \
     "${COMMON_ARGS[@]}" \
+    "${TRAIN_ARGS[@]}" \
     --problem-dataset "${PROBLEM_DATASET}" \
     --fold-root "${KFOLD_ROOT}" \
     --output-root "${CHECKPOINT_DIR}" \

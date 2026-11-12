@@ -3,6 +3,8 @@
 
 Stage 1 trains the prompt-only router on one example per problem-variant.
 Stage 2 freezes that router and trains the dual prefix on CoT trajectories.
+Prefix training can use predicted mixtures or binary labels; validation and
+default inference always use the predicted continuous mixture.
 Either stage can also run separately.
 """
 
@@ -469,6 +471,13 @@ def build_prefix_datasets(
     val_path: Path | None,
 ):
     flat_train = DSPRDataset(train_path, model.tokenizer, config.max_seq_length)
+    if args.prefix_routing == 'label':
+        for item in flat_train.data:
+            expected = {'simple': 0.0, 'hard': 1.0}.get(item.get('variant_type'))
+            if expected is None or item.get('target_alpha') != expected:
+                raise ValueError(
+                    f"Label routing requires Simple=0 and Hard=1: problem {item.get('problem_id')}"
+                )
     train_dataset = flat_train
     resampled = None
     flat_steps = update_steps_per_epoch(
@@ -554,10 +563,12 @@ def run_prefix_stage(
         router_learning_rate=0.0,
         prefix_weight_decay=args.prefix_weight_decay,
         router_weight_decay=0.0,
+        prefix_routing=args.prefix_routing,
         callbacks=callbacks,
     )
     print(
         f'[{stage_name}] trajectories={len(train_dataset)} sampling={args.prefix_trajectory_sampling} '
+        f'train_routing={args.prefix_routing} validation_routing=router '
         f'lr={args.prefix_learning_rate:g} weight_decay={args.prefix_weight_decay:g}',
         flush=True,
     )
@@ -619,7 +630,11 @@ def parse_args() -> argparse.Namespace:
         help='Optional refined trajectory validation JSONL. With --fold, defaults to fold_N/val.jsonl.',
     )
     parser.add_argument('--router-checkpoint', '--router_checkpoint', default=None)
-    parser.add_argument('--output-path', '--output_path', default='checkpoints/staged_dspr')
+    parser.add_argument('--output-path', '--output_path', default=None)
+    parser.add_argument(
+        '--prefix-routing', '--prefix_routing', choices=('router', 'label'), default='router',
+        help='Prefix training routing: router mixtures or Simple=0/Hard=1 labels. Validation uses router mixtures.',
+    )
     parser.add_argument('--router-learning-rate', '--router_learning_rate', type=float, default=1e-5)
     parser.add_argument('--prefix-learning-rate', '--prefix_learning_rate', type=float, default=4e-5)
     parser.add_argument('--router-weight-decay', '--router_weight_decay', type=float, default=1e-3)
@@ -649,6 +664,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.output_path is None:
+        args.output_path = 'checkpoints/staged_dspr_label' if args.prefix_routing == 'label' else 'checkpoints/staged_dspr'
     if args.router_learning_rate <= 0 or args.prefix_learning_rate <= 0:
         raise ValueError('All learning rates must be positive')
     if args.router_weight_decay < 0 or args.prefix_weight_decay < 0:

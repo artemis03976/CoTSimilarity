@@ -64,7 +64,7 @@ class DSPRModel(nn.Module):
             labels: (batch_size, seq_len) - optional, for training
             prompt_input_ids: (batch_size, seq_len) - optional, prompt-only input for context encoder
             prompt_attention_mask: (batch_size, seq_len) - optional, prompt-only attention mask
-            forced_alpha: float or None - if set, bypasses router and uses this value directly
+            forced_alpha: scalar or per-example tensor - bypasses the router when set
         Returns:
             (lm_loss, alpha) if labels provided, else (logits, alpha)
         """
@@ -103,12 +103,12 @@ class DSPRModel(nn.Module):
         attention_mask: torch.Tensor,
         prompt_input_ids: torch.Tensor | None = None,
         prompt_attention_mask: torch.Tensor | None = None,
-        forced_alpha: float | None = None,
+        forced_alpha: float | torch.Tensor | None = None,
     ):
         """Build prefix-augmented embeddings and masks.
 
-        alpha is either predicted from the prompt context or forced for probe
-        experiments. The final prefix is prepended at the embedding level.
+        alpha is predicted from the prompt, forced to a scalar for probes, or
+        supplied per example for label-routed training.
         """
         batch_size = input_ids.shape[0]
         if prompt_input_ids is None:
@@ -117,14 +117,17 @@ class DSPRModel(nn.Module):
             prompt_attention_mask = attention_mask
 
         if forced_alpha is not None:
-            # Probe mode: bypass the router to inspect how fixed exploration
-            # weights affect generation and downstream DAG/GED behavior.
-            alpha = torch.full(
-                (batch_size, 1),
-                fill_value=forced_alpha,
+            alpha = torch.as_tensor(
+                forced_alpha,
                 dtype=next(self.dual_prefix.parameters()).dtype,
                 device=input_ids.device,
             )
+            if alpha.ndim == 0:
+                alpha = alpha.expand(batch_size, 1)
+            elif alpha.shape in ((batch_size,), (batch_size, 1)):
+                alpha = alpha.reshape(batch_size, 1)
+            else:
+                raise ValueError('forced_alpha must be a scalar or one value per example')
         else:
             h_Q = self.context_encoder(prompt_input_ids, prompt_attention_mask)
             router_dtype = next(self.router.parameters()).dtype

@@ -354,7 +354,7 @@ COMMAND_ARGUMENTS = {
         gradient_accumulation_steps max_grad_norm prefix_train_data_path prefix_val_data_path
         max_seq_length seed device output_path logging_steps save_total_limit emit_progress_events
         prefix_trajectory_sampling router_early_stopping_patience prefix_early_stopping_patience
-        early_stopping_threshold
+        early_stopping_threshold prefix-routing
     """.split(),
     "spt": """
         train_data_path val_data_path output_path device emit_progress_events
@@ -379,7 +379,8 @@ def build_train_command(
     command = [sys.executable, str(train_script), method]
     values = {
         **vars(args),
-        "run_stage": "all", "kfold_root": args.fold_root,
+        "run_stage": "prefix" if method == "dspr" and args.router_checkpoint_root else "all",
+        "kfold_root": args.fold_root,
         "fold": spec.fold, "train_data_path": spec.train_data, "val_data_path": spec.val_data,
         "prefix_train_data_path": spec.train_data, "prefix_val_data_path": spec.val_data,
         "output_path": spec.output_path, "device": "cuda", "emit_progress_events": True,
@@ -399,6 +400,11 @@ def build_train_command(
         command.extend([f"--{name}", str(getattr(args, name))])
     command.append("--gradient_checkpointing" if args.gradient_checkpointing else "--no-gradient_checkpointing")
     if method == "dspr":
+        if args.router_checkpoint_root:
+            router_checkpoint = Path(args.router_checkpoint_root) / f"fold_{spec.fold}" / "router" / "router_trainable.pt"
+            if not router_checkpoint.is_file():
+                raise FileNotFoundError(f"Saved fold router not found: {router_checkpoint}")
+            command.extend(["--router-checkpoint", str(router_checkpoint)])
         if args.router_positive_weight is not None:
             command.extend(["--router_positive_weight", str(args.router_positive_weight)])
         name = "warmup_steps" if args.warmup_ratio is None else "warmup_ratio"
@@ -413,7 +419,7 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
         raise ValueError(f"Unsupported K-fold method: {method}")
     parser = argparse.ArgumentParser(description=f"Train {method.upper()} on the prepared Qwen folds")
     parser.add_argument("--fold-root", default="output/qwen-2.5/kfold")
-    parser.add_argument("--output-root", default=DEFAULT_OUTPUT_ROOTS[method])
+    parser.add_argument("--output-root", default=None)
     parser.add_argument("--train-script", default="scripts/train.py")
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--seed", type=int, default=42)
@@ -437,6 +443,14 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
     warmup.add_argument("--warmup-ratio", type=float, default=0.05 if method == "lora" else None)
     if method == "dspr":
         parser.add_argument("--problem-dataset", "--problem_dataset", default="data/canonical_math_paired.jsonl")
+        parser.add_argument(
+            "--prefix-routing", choices=("router", "label"), default="router",
+            help="Prefix training routing; validation and default inference use continuous router weights.",
+        )
+        parser.add_argument(
+            "--router-checkpoint-root", default=None,
+            help="Reuse fold_N/router/router_trainable.pt from this run and train fresh prefixes only.",
+        )
         parser.add_argument("--context-layer-idx", type=int, default=15)
         parser.add_argument("--prefix-length", type=int, default=15)
         parser.add_argument("--router-intermediate-dim", type=int, default=64)
@@ -472,6 +486,12 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
             parser.add_argument("--budget-tolerance", type=float, default=0.10)
             parser.add_argument("--enforce-parameter-budget", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args(argv)
+    if args.output_root is None:
+        args.output_root = (
+            f"checkpoints/qwen_staged_label_kfold_seed{args.seed}"
+            if method == "dspr" and args.prefix_routing == "label"
+            else DEFAULT_OUTPUT_ROOTS[method]
+        )
     if method == "dspr":
         if args.warmup_steps is None:
             args.warmup_steps = 100
@@ -521,6 +541,8 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
     train_script = resolve_path(REPO_ROOT, args.train_script).resolve()
     if method == "dspr":
         args.fold_root = str(fold_root)
+        if args.router_checkpoint_root:
+            args.router_checkpoint_root = str(resolve_path(REPO_ROOT, args.router_checkpoint_root).resolve())
         args.problem_dataset = str(resolve_path(REPO_ROOT, args.problem_dataset).resolve())
         if not Path(args.problem_dataset).is_file():
             raise FileNotFoundError(f"Canonical router source not found: {args.problem_dataset}")
@@ -542,6 +564,9 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
 
     print(f"Method: {method}; model: {args.model_name}; seed: {args.seed}")
     print(f"Folds: {folds}; GPUs: {gpu_ids}; output: {output_root}")
+    if method == "dspr":
+        print(f"Prefix routing: train={args.prefix_routing}; validation=router; "
+              f"router source={args.router_checkpoint_root or 'train per fold'}")
     for spec in specs:
         print(f"[fold {spec.fold}] GPU {spec.gpu} -> {spec.output_path}")
     manifest = {
