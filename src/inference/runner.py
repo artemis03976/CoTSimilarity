@@ -10,10 +10,10 @@ from typing import Any
 
 from tqdm import tqdm
 from utils.inference_progress import emit_progress
+from utils.scoring import pending_score
 
 from .common import (
     VARIANTS,
-    check_answer_strict,
     ground_truth_for,
     ground_truth_type_for,
     normalise_problem_id,
@@ -43,10 +43,8 @@ def run_greedy_evaluation(
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "all_records.jsonl"
     qc_path = output_dir / "generation_qc.json"
-    fully_correct = 0
     total_generations = 0
     valid_generations = 0
-    ungraded_generations = 0
     rejection_reasons: Counter[str] = Counter()
     generate_batch = getattr(generator, "generate_batch", None)
     batched = callable(generate_batch)
@@ -54,7 +52,7 @@ def run_greedy_evaluation(
     batch_results = []
     generated_tokens = 0
     generation_seconds = 0.0
-    evaluation_seconds = 0.0
+    validation_seconds = 0.0
     started = perf_counter()
     metadata = {
         **(run_metadata or {}),
@@ -74,14 +72,16 @@ def run_greedy_evaluation(
                 "generations": total_generations,
                 "valid_generations": valid_generations,
                 "invalid_generations": total_generations - valid_generations,
-                "ungraded_generations": ungraded_generations,
+                "scoring_status": "pending",
+                "pending_generations": total_generations,
+                "ungraded_generations": None,
                 "rejection_reasons": dict(sorted(rejection_reasons.items())),
-                "fully_correct_triplets": fully_correct,
+                "fully_correct_triplets": None,
                 "run": metadata,
                 "performance": {
                     "elapsed_seconds": perf_counter() - started,
                     "generation_seconds": generation_seconds,
-                    "evaluation_seconds": evaluation_seconds,
+                    "validation_seconds": validation_seconds,
                     "generated_tokens": generated_tokens,
                     "generation_tokens_per_second": (
                         generated_tokens / generation_seconds if generation_seconds else 0.0
@@ -114,7 +114,6 @@ def run_greedy_evaluation(
                     raise RuntimeError("Batched generator did not return one result per prompt")
             problem_id = normalise_problem_id(record.get("problem_id"))
             results: dict[str, Any] = {}
-            all_correct = True
             for variant_index, variant in enumerate(VARIANTS):
                 variant_data = record[variant]
                 problem = variant_data["problem"]
@@ -128,40 +127,20 @@ def run_greedy_evaluation(
                     generated = generator.generate(problem)
                     generation_seconds += perf_counter() - generation_started
                 generated_tokens += len(generated.token_ids)
-                evaluation_started = perf_counter()
+                validation_started = perf_counter()
                 validation = validate_cot(
                     generated.text,
                     generated.finish_reason,
                     generated.token_ids,
                     validation_config,
                 )
-                answer_correct = (
-                    check_answer_strict(
-                        problem,
-                        generated.text,
-                        ground_truth,
-                        variant,
-                        ground_truth_type,
-                    )
-                    if validation.valid
-                    else None
-                )
-                correct = bool(validation.valid and answer_correct)
-                evaluation_status = (
-                    "invalid_generation" if not validation.valid
-                    else "unsupported_reference" if answer_correct is None
-                    else "correct" if answer_correct else "incorrect"
-                )
-                ungraded_generations += int(validation.valid and answer_correct is None)
-                evaluation_seconds += perf_counter() - evaluation_started
+                validation_seconds += perf_counter() - validation_started
                 total_generations += 1
                 valid_generations += int(validation.valid)
                 rejection_reasons.update(validation.reasons)
                 sample: dict[str, Any] = {
                     "response": generated.text,
-                    "correct": correct,
-                    "answer_correct": answer_correct,
-                    "answer_evaluation_status": evaluation_status,
+                    **pending_score(),
                     "valid": validation.valid,
                     "finish_reason": generated.finish_reason,
                     "validation_errors": list(validation.reasons),
@@ -177,16 +156,14 @@ def run_greedy_evaluation(
                 if "alpha" in generated.metadata:
                     result["alpha"] = float(generated.metadata["alpha"])
                 results[variant] = result
-                all_correct = all_correct and correct
                 if emit_progress_events:
                     emit_progress("generating", completed=total_generations,
                                   total=len(records) * len(VARIANTS),
                                   problem_id=problem_id, variant=variant)
 
-            fully_correct += int(all_correct)
             progress.set_postfix(
                 problem_id=problem_id,
-                status="PASS" if all_correct else "FAIL",
+                generated=total_generations,
             )
             payload = {
                 "problem_id": problem_id,
@@ -206,6 +183,6 @@ def run_greedy_evaluation(
     print(
         f"Generated {generated_tokens} tokens in {generation_seconds:.1f}s "
         f"({generated_tokens / generation_seconds if generation_seconds else 0.0:.1f} tokens/s); "
-        f"evaluation: {evaluation_seconds:.1f}s"
+        f"quality validation: {validation_seconds:.1f}s; answer scoring pending"
     )
     return output_path, qc_path

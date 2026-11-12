@@ -18,7 +18,8 @@ def _usage() -> str:
         "Usage: python scripts/evaluate.py METHOD ACTION [ACTION OPTIONS]\n"
         "\n"
         "METHOD: dspr | spt | lora\n"
-        "ACTION: run | aggregate\n"
+        "ACTION: run (generate only) | aggregate (read scored labels)\n"
+        "Between these actions, run scripts/score_answers.py on the scoring machine.\n"
         "Use 'python scripts/evaluate.py METHOD ACTION --help' for action-specific options."
     )
 

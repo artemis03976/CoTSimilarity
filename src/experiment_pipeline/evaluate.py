@@ -316,8 +316,10 @@ def validate_generated_output(spec: FoldSpec, expected_samples: int) -> dict[str
                     f"samples; expected {expected_samples}"
                 )
             for sample in samples:
-                if not isinstance(sample, dict) or not isinstance(sample.get("correct"), bool):
-                    raise ValueError(f"Problem {pid} {variant} has an invalid correctness flag")
+                if not isinstance(sample, dict) or not isinstance(sample.get("response"), str):
+                    raise ValueError(f"Problem {pid} {variant} has no generated response")
+                if not isinstance(sample.get("valid"), bool):
+                    raise ValueError(f"Problem {pid} {variant} has no generation quality flag")
             if spec.method == "dspr":
                 alpha = variant_data.get("alpha")
                 alpha_values = alpha if isinstance(alpha, list) else [alpha]
@@ -721,4 +723,7 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
         return 1
     print(f"All {len(results)} {method.upper()} fold inference jobs passed validation.")
     print(f"Manifest: {manifest_path}")
+    print(f"Answer scoring is separate. On the scoring machine run:\n"
+          f"  python scripts/score_answers.py {str(output_root)!r} "
+          f"--folds {' '.join(map(str, folds))}")
     return 0

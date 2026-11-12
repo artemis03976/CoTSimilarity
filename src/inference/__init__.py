@@ -5,7 +5,6 @@ from .common import (
     VARIANTS,
     GenerationResult,
     read_math_records,
-    run_evaluator_self_test,
 )
 from .quality import CoTValidationConfig, ValidationResult, validate_cot
 from .revalidate import revalidate_multiple
@@ -18,6 +17,5 @@ __all__ = [
     "ValidationResult",
     "read_math_records",
     "revalidate_multiple",
-    "run_evaluator_self_test",
     "validate_cot",
 ]

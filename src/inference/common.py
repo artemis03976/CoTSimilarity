@@ -1,4 +1,4 @@
-"""Data, prompting, and evaluation helpers shared by inference pipelines."""
+"""Data and prompting helpers shared by generation-only inference pipelines."""
 
 from __future__ import annotations
 
@@ -8,12 +8,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from dspr.config import MATH_SYSTEM_PROMPT
-from utils.evaluate import (
-    UnsupportedReferenceError,
-    answer_check,
-    extract_ground_truth_answer,
-    test_parse_latex,
-)
 
 
 VARIANTS = ("original", "simple", "hard")
@@ -69,7 +63,6 @@ def read_math_records(
         records = records[:limit]
 
     seen: set[int] = set()
-    unsupported_references: list[str] = []
     for record in records:
         pid = normalise_problem_id(record.get("problem_id"))
         if pid in seen:
@@ -83,26 +76,6 @@ def read_math_records(
                 raise ValueError(f"Problem {pid} {variant} has no problem text")
             if ground_truth_for(variant_data) is None:
                 raise ValueError(f"Problem {pid} {variant} has no solution, answer, or ground_truth")
-            reference = ground_truth_for(variant_data)
-            try:
-                extract_ground_truth_answer(
-                    variant_data["problem"],
-                    reference,
-                    dataset_type_for_variant(variant),
-                    ground_truth_type_for(variant_data, variant),
-                )
-            except UnsupportedReferenceError:
-                unsupported_references.append(f"{pid}/{variant}: {reference!r}")
-            except Exception as exc:
-                raise ValueError(
-                    f"Problem {pid} {variant} has an invalid reference {reference!r}: {exc}"
-                ) from exc
-    if unsupported_references:
-        print(
-            f"Reference audit: {len(unsupported_references)} references cannot be graded; "
-            "their outputs will have answer_correct=null. "
-            + "; ".join(unsupported_references)
-        )
     return records
 
 
@@ -128,12 +101,6 @@ def build_prompt(tokenizer: Any, problem: str, system_prompt: str = DEFAULT_SYST
     )
 
 
-def dataset_type_for_variant(variant: str) -> str:
-    if variant not in VARIANTS:
-        raise ValueError(f"Unknown variant: {variant}")
-    return "original" if variant == "original" else "perturb"
-
-
 def ground_truth_for(variant_data: dict[str, Any]) -> Any:
     """Read references from canonical inputs or saved inference records."""
     for field in ("solution", "answer", "ground_truth"):
@@ -153,50 +120,6 @@ def ground_truth_type_for(variant_data: dict[str, Any], variant: str) -> str:
                 )
             return "solution" if field == "solution" else "answer"
     raise ValueError(f"No reference found for variant={variant}")
-
-
-def check_answer_strict(
-    problem: str,
-    response: str,
-    ground_truth: Any,
-    variant: str,
-    ground_truth_type: str | None = None,
-) -> bool | None:
-    """Evaluate one answer without silently converting evaluator failures to False."""
-
-    try:
-        return bool(
-            answer_check(
-                problem,
-                response,
-                ground_truth,
-                dataset_type_for_variant(variant),
-                reference_type=ground_truth_type,
-            )
-        )
-    except UnsupportedReferenceError:
-        return None
-    except Exception as exc:
-        raise RuntimeError(
-            f"Answer evaluation failed for variant={variant}, problem={problem[:80]!r}"
-        ) from exc
-
-
-def run_evaluator_self_test() -> None:
-    """Fail before model loading when symbolic answer validation is degraded."""
-
-    try:
-        test_parse_latex()
-        integer_ok = answer_check(
-            "A synthetic arithmetic problem.",
-            "The answer is \\boxed{26}.",
-            "26",
-            "perturb",
-        )
-    except Exception as exc:
-        raise RuntimeError("Answer evaluator self-test raised an exception") from exc
-    if not integer_ok:
-        raise RuntimeError("Answer evaluator self-test rejected an exact boxed integer")
 
 
 def write_json(path: Path, payload: Any) -> None:

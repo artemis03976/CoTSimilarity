@@ -13,6 +13,7 @@ import statistics
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
+from utils.scoring import require_scored
 
 from .evaluate import held_out_id_path, parse_fold_list
 
@@ -92,11 +93,11 @@ def extract_flags(record: dict[str, Any], variant: str, source: str) -> list[boo
         raise ValueError(f"{source}: problem {record.get('problem_id')} {variant} has no samples")
     flags = []
     for sample in samples:
-        if not isinstance(sample, dict) or not isinstance(sample.get("correct"), bool):
+        if not isinstance(sample, dict):
             raise ValueError(
                 f"{source}: problem {record.get('problem_id')} {variant} has invalid correctness"
             )
-        flags.append(sample["correct"])
+        flags.append(require_scored(sample, f"{source}: problem {record.get('problem_id')}/{variant}"))
     return flags
 
 

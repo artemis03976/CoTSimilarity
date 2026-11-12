@@ -2,6 +2,7 @@
 # Sequential alpha=0/0.5/1 experiments; folds within each alpha run in parallel.
 # Usage: GPUS=0,1,2,3,4 bash scripts/run_fixed_alpha_kfold.sh
 # DRY_RUN=1 checks commands; RESUME=1 (default) skips completed matching folds.
+# Generation only; score and aggregate each condition on the scoring machine.
 set -euo pipefail
 cd "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
@@ -31,8 +32,11 @@ for ALPHA in 0 0.5 1; do
   "${PYTHON}" scripts/evaluate.py dspr run \
     "${RUN_ARGS[@]}" --forced-alpha "${ALPHA}" --output-root "${RUN_DIR}"
   if [[ "${DRY_RUN:-0}" == 1 ]]; then continue; fi
-  "${PYTHON}" scripts/evaluate.py dspr aggregate \
-    --result-root "${RUN_DIR}" "${AGGREGATE_ARGS[@]}"
+  echo "Generation complete for alpha=${ALPHA}. On the scoring machine run:"
+  printf 'python scripts/score_answers.py %q --folds %s\n' "${RUN_DIR}" "${FOLD_IDS[*]}"
+  printf 'python scripts/evaluate.py dspr aggregate --result-root %q' "${RUN_DIR}"
+  printf ' %q' "${AGGREGATE_ARGS[@]}"
+  printf '\n'
 done
 
-echo "Fixed-alpha experiments finished: ${OUTPUT_ROOT}"
+echo "Fixed-alpha generation finished; answer scoring pending: ${OUTPUT_ROOT}"

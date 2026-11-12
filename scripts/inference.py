@@ -4,6 +4,7 @@
 The same entrypoint supports the frozen base model, DSPR, static prompt tuning
 (SPT), and PEFT LoRA adapters.  It intentionally exposes no stochastic
 decoding mode: each selected problem receives exactly one greedy continuation.
+Answer scoring is deferred to scripts/score_answers.py on the scoring machine.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from inference.common import VARIANTS, read_math_records, run_evaluator_self_test
+from inference.common import VARIANTS, read_math_records
 from inference.greedy import BACKENDS, BASELINES, GreedyModelConfig, load_greedy_generator
 from inference.quality import CoTValidationConfig
 from inference.runner import run_greedy_evaluation
@@ -151,11 +152,10 @@ def set_seed(seed: int) -> None:
 def main() -> int:
     args = parse_args()
     validate_args(args)
-    print(f"[{args.baseline}] Checking evaluator and references: {args.data_path}", flush=True)
+    print(f"[{args.baseline}] Loading problem records: {args.data_path}", flush=True)
     if args.emit_progress_events:
-        emit_progress("checking_references")
+        emit_progress("loading_data")
     set_seed(args.seed)
-    run_evaluator_self_test()
     records = read_math_records(
         Path(args.data_path),
         problem_id=args.problem_id,
@@ -163,7 +163,7 @@ def main() -> int:
     )
     if not records:
         raise ValueError("No evaluation records selected")
-    print(f"[{args.baseline}] References ready: {len(records)} problems, "
+    print(f"[{args.baseline}] Records ready: {len(records)} problems, "
           f"{len(records) * len(VARIANTS)} answers", flush=True)
     checkpoint = Path(args.checkpoint).resolve() if args.checkpoint is not None else None
     model_config = GreedyModelConfig(
@@ -240,6 +240,8 @@ def main() -> int:
             close()
     print(f"Predictions: {output_path}", flush=True)
     print(f"Generation QC: {qc_path}", flush=True)
+    print(f"Answer scoring pending. On the scoring machine run:\n"
+          f"  python scripts/score_answers.py {str(output_path)!r}", flush=True)
     return 0
 
 

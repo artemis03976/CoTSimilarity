@@ -228,9 +228,14 @@ def math_equal(prediction: Union[bool, float, str],
     reference = str(reference).strip()
     prediction = str(prediction).strip()
 
-    if regex.match(r'(\(|\[).+(\)|\])', prediction) is not None and regex.match(r'(\(|\[).+(\)|\])', reference) is not None:
+    if regex.fullmatch(r'(\(|\[).+(\)|\])', prediction) is not None and regex.fullmatch(r'(\(|\[).+(\)|\])', reference) is not None:
         pred_parts = prediction[1:-1].split(",")
         ref_parts = reference[1:-1].split(",")
+        # Interval brackets encode whether endpoints belong to the answer.
+        # Do not erase that distinction or let symbolic fallback accept it.
+        if len(pred_parts) > 1 and len(ref_parts) > 1:
+            if prediction[0] != reference[0] or prediction[-1] != reference[-1]:
+                return False
         if len(pred_parts) == len(ref_parts):
             if all([math_equal(pred_parts[i], ref_parts[i], include_percentage, is_close) for i in range(len(pred_parts))]):
                 return True

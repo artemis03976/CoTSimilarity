@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict
+from utils.scoring import require_scored
 
 
 VARIANTS = ("simple", "hard")
@@ -37,7 +38,7 @@ class EligibilityStrategy:
     def candidates(self, samples: List[Dict]) -> List[Dict]:
         return [
             sample for sample in samples
-            if sample.get('correct')
+            if require_scored(sample, "Trajectory selection")
             and (self.score_field is None or sample.get(self.score_field) is not None)
             and (not self.exclude_timeouts or not sample.get('timed_out', False))
         ]
@@ -71,6 +72,8 @@ class CheapScreenStrategy:
 
     def sample_stats(self, samples: List[Dict]) -> Dict:
         """Summarize saved quality/correctness labels without answer evaluation."""
+        for sample in samples:
+            require_scored(sample, "Cheap screen")
         valid = [sample for sample in samples if bool(sample.get('valid'))]
         correct = self.eligibility.candidates(valid)
         unknown = [sample for sample in valid if sample.get('answer_correct') is None]

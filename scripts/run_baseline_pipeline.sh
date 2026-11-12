@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Usage: GPUS=0 bash scripts/run_baseline_pipeline.sh spt|lora [training options]
 # STAGE=train/eval/all, FOLDS="0 1 2 3 4", DRY_RUN=1 for command validation.
+# Answer scoring and aggregation run separately on the scoring machine.
 set -euo pipefail
 cd "$(dirname -- "${BASH_SOURCE[0]}")/.."
 
@@ -34,8 +35,7 @@ fi
   --test-root "${KFOLD_ROOT}" --id-root "${KFOLD_ROOT}" \
   --gpus "${GPUS}" --folds "${FOLD_IDS[@]}" "${CHECK_ARGS[@]}"
 if [[ "${DRY_RUN:-0}" == 1 ]]; then exit 0; fi
-"${PYTHON}" scripts/evaluate.py "${METHOD}" aggregate \
-  --result-root "${OUTPUT_ROOT}" --id-root "${KFOLD_ROOT}" \
-  --raw-data data/canonical_math_paired.jsonl --folds "${FOLD_IDS[@]}" \
-  --base output/qwen-2.5/base/all_records.jsonl \
-  --dspr output/qwen_staged_kfold_seed42/oof_all_records.jsonl
+echo "Inference complete. Copy predictions to the scoring machine, then run:"
+printf 'python scripts/score_answers.py %q --folds %s\n' "${OUTPUT_ROOT}" "${FOLD_IDS[*]}"
+printf 'python scripts/evaluate.py %q aggregate --result-root %q --id-root %q --raw-data data/canonical_math_paired.jsonl --folds %s --base output/qwen-2.5/base/all_records.jsonl --dspr output/qwen_staged_kfold_seed42/oof_all_records.jsonl\n' \
+  "${METHOD}" "${OUTPUT_ROOT}" "${KFOLD_ROOT}" "${FOLD_IDS[*]}"

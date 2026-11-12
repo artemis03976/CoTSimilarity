@@ -188,20 +188,3 @@ def _strip_length_unit(answer, problem):
     if match and match.group(2) in problem:
         return match.group(1)
     return answer
-
-
-def test_parse_latex():
-    # test if parse_latex is working:
-    dataset_type = 'perturb'
-    problem = "A fake problem statement."
-    ground_truth = '1 - (x + 1)^{\\frac14}'
-    solution_str = r"""
-The answer is 
-\[ \boxed{1 - \sqrt[4]{x + 1}} \]
-"""
-    
-    assert answer_check(problem, solution_str, ground_truth, dataset_type), 'there may be error in sympy package!'
-
-if __name__ == "__main__":
-    test_parse_latex()
-    print("All tests passed!")

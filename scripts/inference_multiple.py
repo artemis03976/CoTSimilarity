@@ -5,6 +5,7 @@ By default, simple and hard perturbations receive 8 sampled trajectories;
 the original problem receives one greedy reference trajectory.  Use
 ``--sampled-variants`` to change this contract.  Invalid sampled trajectories
 remain in ``raw_generations.jsonl`` and are replaced with bounded resampling.
+Answer scoring is deferred to scripts/score_answers.py on the scoring machine.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from inference.common import VARIANTS, read_math_records, run_evaluator_self_test
+from inference.common import VARIANTS, read_math_records
 from inference.multiple import MultipleSamplingConfig, VLLMMultipleSampler
 from inference.quality import CoTValidationConfig
 
@@ -102,7 +103,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    run_evaluator_self_test()
     records = read_math_records(
         Path(args.data_path),
         problem_id=args.problem_id,
@@ -155,6 +155,8 @@ def main() -> int:
     print(f"Accepted trajectories: {output_path}")
     print(f"Raw generations: {raw_path}")
     print(f"Generation QC: {qc_path}")
+    print(f"Answer scoring pending. On the scoring machine run:\n"
+          f"  python scripts/score_answers.py {str(output_path)!r}")
     return 0
 
 

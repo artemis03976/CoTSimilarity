@@ -6,15 +6,18 @@ import json
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from utils.scoring import require_scored
+
 VARIANTS = ["original", "simple", "hard"]
 
 
 def _extract_correct_flags(question_data):
     """Extract per-sample correctness flags from one variant record."""
     if "samples" in question_data and question_data["samples"]:
-        return [bool(sample.get("correct", False)) for sample in question_data["samples"]]
+        return [require_scored(sample) for sample in question_data["samples"]]
     if "correct" in question_data:
-        return [bool(question_data["correct"])]
+        return [require_scored(question_data)]
     return []
 
 

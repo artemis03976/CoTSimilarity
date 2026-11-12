@@ -15,13 +15,13 @@ from .common import (
     DEFAULT_SYSTEM_PROMPT,
     VARIANTS,
     build_prompt,
-    check_answer_strict,
     ground_truth_for,
     ground_truth_type_for,
     normalise_problem_id,
     write_json,
 )
 from .quality import CoTValidationConfig, ValidationResult, validate_cot
+from utils.scoring import pending_score
 
 
 @dataclass(frozen=True)
@@ -436,32 +436,17 @@ class VLLMMultipleSampler:
         progress.close()
 
         task_map = {(task.record_index, task.variant): task for task in tasks}
-        fully_correct = 0
         with output_path.open("w", encoding="utf-8", newline="\n") as handle:
             for record_index, record in enumerate(records):
                 problem_id = normalise_problem_id(record.get("problem_id"))
                 results: dict[str, Any] = {}
-                all_correct = True
                 for variant in VARIANTS:
                     task = task_map[(record_index, variant)]
                     samples: list[dict[str, Any]] = []
                     for trajectory in task.trajectories:
-                        answer_correct = (
-                            check_answer_strict(
-                                task.problem,
-                                trajectory.text,
-                                task.ground_truth,
-                                variant,
-                                task.ground_truth_type,
-                            )
-                            if trajectory.validation.valid
-                            else None
-                        )
-                        correct = bool(trajectory.validation.valid and answer_correct)
                         sample: dict[str, Any] = {
                             "response": trajectory.text,
-                            "correct": correct,
-                            "answer_correct": answer_correct,
+                            **pending_score(),
                             "valid": trajectory.validation.valid,
                             "finish_reason": trajectory.finish_reason,
                             "validation_errors": list(trajectory.validation.reasons),
@@ -471,7 +456,6 @@ class VLLMMultipleSampler:
                         if save_token_ids_in_records:
                             sample["token_ids"] = list(trajectory.token_ids)
                         samples.append(sample)
-                    all_correct = all_correct and any(sample["correct"] for sample in samples)
                     results[variant] = {
                         "problem": task.problem,
                         "ground_truth": task.ground_truth,
@@ -479,7 +463,6 @@ class VLLMMultipleSampler:
                         "sampling_mode": "sample" if task.resample_invalid else "greedy",
                         "samples": samples,
                     }
-                fully_correct += int(all_correct)
                 payload = {
                     "problem_id": problem_id,
                     "type": record.get("type"),
@@ -528,7 +511,9 @@ class VLLMMultipleSampler:
             },
             "shortfalls": shortfalls,
             "invalid_greedy_anchors": invalid_anchors,
-            "fully_correct_triplets": fully_correct,
+            "scoring_status": "pending",
+            "pending_generations": sum(len(task.trajectories) for task in tasks),
+            "fully_correct_triplets": None,
             "sampling": asdict(self.config),
             "validation": asdict(self.validation_config),
         }

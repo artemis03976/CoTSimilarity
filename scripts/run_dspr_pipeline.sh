@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Staged K-fold DSPR training, held-out inference, and OOF metric reporting.
+# Staged K-fold DSPR training and held-out generation; score on a separate machine.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +26,7 @@ Usage: bash scripts/run_dspr_pipeline.sh [OPTIONS]
   --gpus IDS                 GPU IDs, e.g. 0 or 0,1; default: auto
   --folds N [N ...]           Fold subset; default: 0 1 2 3 4
   --train-only               Run router -> frozen-router prefix training only
-  --eval-only                Evaluate existing prefix checkpoints and report OOF metrics
+  --eval-only                Generate held-out responses from existing prefix checkpoints
   --dry-run                  Validate and print commands without training or inference
   --allow-existing           Allow non-empty training and inference output directories
   -h, --help                 Show this help
@@ -124,7 +124,8 @@ echo "========== Held-out K-fold DSPR inference =========="
   --max-new-tokens "${MAX_NEW_TOKENS:-2048}"
 if [[ "${DRY_RUN}" == "1" ]]; then exit 0; fi
 
-echo "========== OOF metric reporting =========="
+echo "Inference complete. Copy predictions to the scoring machine, then run:"
+printf 'python scripts/score_answers.py %q --folds %s\n' "${INFER_OUTPUT_DIR}" "${FOLD_IDS[*]}"
 AGGREGATE_ARGS=(
   --result-root "${INFER_OUTPUT_DIR}"
   --id-root "${KFOLD_ROOT}"
@@ -132,5 +133,6 @@ AGGREGATE_ARGS=(
   --folds "${FOLD_IDS[@]}"
 )
 if [[ -n "${BASELINE_PATH:-}" ]]; then AGGREGATE_ARGS+=(--baseline "${BASELINE_PATH}"); fi
-"${PYTHON}" scripts/evaluate.py dspr aggregate "${AGGREGATE_ARGS[@]}"
-echo "Pipeline complete. Checkpoints: ${CHECKPOINT_DIR}; OOF metrics: ${INFER_OUTPUT_DIR}/oof_metrics.json"
+printf 'python scripts/evaluate.py dspr aggregate'
+printf ' %q' "${AGGREGATE_ARGS[@]}"
+printf '\n'

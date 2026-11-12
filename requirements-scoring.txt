@@ -1,0 +1,8 @@
+# Separate CPU environment; intentionally excludes torch, transformers and vLLM.
+# Matches the dependency versions used for the unified SymPy 1.14.0 rescoring.
+sympy==1.14.0
+lark==1.2.2
+mpmath==1.3.0
+numpy==2.2.6
+regex==2026.9.10
+tqdm==4.67.1

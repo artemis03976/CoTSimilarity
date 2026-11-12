@@ -25,6 +25,21 @@ docker compose -f docker-compose.gpu.yml run --rm dspr
 
 All paths below are placeholders or directories for your own run. Set each artifact-file variable to the file produced by its preceding stage. Configure annotation-provider credentials locally. Use `--help` on an entry point for additional options.
 
+Answer scoring runs separately from model inference. On the scoring machine, create
+a CPU environment with the agreed SymPy 1.14.0 dependencies:
+
+```bash
+python -m venv /path/to/scoring-env
+export SCORE_PYTHON="/path/to/scoring-env/bin/python"
+"$SCORE_PYTHON" -m pip install -r requirements-scoring.txt
+```
+
+This environment does not require torch, transformers, vLLM, model weights, or a GPU.
+Keep the training/inference environment unchanged. Copy saved predictions and their
+generation QC files to the scoring machine, using the same repository code revision.
+For K-fold aggregation, also copy the fold ID files and problem dataset; checkpoints
+are not needed. Set the path variables below to their locations on that machine.
+
 ## 1. Generate Base Responses and Sampled Trajectories
 
 Generate one greedy response per Original/Simple/Hard problem for the base comparison:
@@ -53,6 +68,22 @@ export SAMPLED_RECORDS="/path/to/sampled-records.jsonl"
 
 Sampling validates responses and retries invalid trajectories within a bounded attempt budget. Greedy inference records one response without resampling. Match generation settings when comparing methods. For base inference, `--batch-size` counts problem groups; `--max-num-seqs` controls vLLM concurrency. Use `--backend transformers` when appropriate.
 
+Inference only checks generation quality. It saves `correct: null`,
+`answer_correct: null`, and `answer_evaluation_status: "pending"`. Score the saved
+responses on the scoring machine before computing accuracy or running cheap screen:
+
+```bash
+"$SCORE_PYTHON" scripts/score_answers.py "$BASE_RECORDS" "$SAMPLED_RECORDS" --workers 4
+```
+
+The scorer uses the problem text and reference saved in each prediction file and
+replaces only answer scores in place. It records evaluator versions and code hashes
+in the accompanying QC metadata. It does not regenerate responses or change quality
+flags, cheap-screen artifacts, eligible lists, or folds. Unsupported references are
+marked `unsupported_reference` with `answer_correct: null`; under the existing
+protocol, their `correct` flag remains false. Pending scores are rejected by accuracy,
+aggregation, and screening commands.
+
 To revalidate saved sampling attempts without regenerating responses:
 
 ```bash
@@ -69,7 +100,12 @@ revalidate_multiple(
     samples_per_problem=16,
 )
 PY
+
+"$SCORE_PYTHON" scripts/score_answers.py "$WORK_DIR/revalidated"
 ```
+
+Revalidation selects trajectories using mechanical quality only and resets the
+new materialisation to pending scores; score it before further selection.
 
 ## 2. Cheap Screening
 
@@ -204,7 +240,7 @@ export BASELINE_PATH="$BASE_RECORDS"
 bash scripts/run_dspr_pipeline.sh --gpus "$GPUS"
 ```
 
-The launcher runs training, held-out inference, and aggregation. It reads the exported `MODEL_NAME`, `PROBLEM_DATASET`, and `KFOLD_ROOT`. Choose a stage or a fold subset as needed:
+The launcher runs training and held-out generation, then prints the commands for offline scoring and aggregation. It reads the exported `MODEL_NAME`, `PROBLEM_DATASET`, and `KFOLD_ROOT`. Choose a stage or a fold subset as needed:
 
 ```bash
 bash scripts/run_dspr_pipeline.sh --gpus "$GPUS" --train-only
@@ -245,15 +281,17 @@ python scripts/evaluate.py "$METHOD" run \
   --output-root "$WORK_DIR/predictions/$METHOD" --gpus "$GPUS" \
   --max-new-tokens 2048
 
+# On the scoring machine, after copying the predictions:
+"$SCORE_PYTHON" scripts/score_answers.py "$WORK_DIR/predictions/$METHOD"
 export DSPR_RECORDS="/path/to/aggregated-dspr-predictions.jsonl"
-python scripts/evaluate.py "$METHOD" aggregate \
+"$SCORE_PYTHON" scripts/evaluate.py "$METHOD" aggregate \
   --result-root "$WORK_DIR/predictions/$METHOD" --id-root "$KFOLD_ROOT" \
   --raw-data "$PROBLEM_DATASET" --base "$BASE_RECORDS" --dspr "$DSPR_RECORDS"
 ```
 
 SPT accepts `--prefix-length`; LoRA accepts `--rank`, `--lora-alpha`, and `--target-modules`. Parameter-matched LoRA checks the configured DSPR budget; for another model, set `--dspr-parameter-budget` accordingly. Use `--no-enforce-parameter-budget` for an explicitly unmatched configuration. Add `--folds 0` for one fold or `--dry-run` to inspect training/inference commands. SPT aggregation can additionally take `--lora "$LORA_RECORDS"`.
 
-The baseline shell launcher supports `STAGE=train|eval|all`, `FOLDS`, `GPUS`, and `DRY_RUN`. Its evaluation and comparator settings are defined in the launcher; use the explicit commands above for custom models and comparison files. The training-only shortcut forwards method arguments:
+The baseline shell launcher supports `STAGE=train|eval|all`, `FOLDS`, `GPUS`, and `DRY_RUN`. It finishes after generation and prints the separate scoring/aggregation commands. Use the explicit commands above for custom models and comparison files. The training-only shortcut forwards method arguments:
 
 ```bash
 STAGE=train GPUS="$GPUS" KFOLD_ROOT="$KFOLD_ROOT" \
@@ -275,12 +313,14 @@ python scripts/evaluate.py dspr run \
   --test-root "$KFOLD_ROOT" --id-root "$KFOLD_ROOT" \
   --output-root "$INFER_OUTPUT_DIR" --gpus "$GPUS" --max-new-tokens 2048
 
-python scripts/evaluate.py dspr aggregate \
+# On the scoring machine, after copying the predictions:
+"$SCORE_PYTHON" scripts/score_answers.py "$INFER_OUTPUT_DIR"
+"$SCORE_PYTHON" scripts/evaluate.py dspr aggregate \
   --result-root "$INFER_OUTPUT_DIR" --id-root "$KFOLD_ROOT" \
   --raw-data "$PROBLEM_DATASET" --baseline "$BASE_RECORDS"
 ```
 
-Evaluation selects validation checkpoints and checks held-out ID coverage. Aggregation combines out-of-fold predictions and reports full, eligible, and noneligible slices; matched comparisons support paired bootstrap intervals and McNemar tests. Use the same `--folds` subset across inference and aggregation. `--expected-problems` optionally asserts the intended test population size.
+The `run` action selects validation checkpoints and checks generated response/held-out ID coverage; it does not score answers. The DSPR pipeline launcher also ends after generation. The offline scorer accepts one or more JSONL files or run directories; for a K-fold directory it scores each immediate `fold_*/all_records.jsonl`, with `--folds` available to select a subset. Aggregation combines scored out-of-fold predictions and reports full, eligible, and noneligible slices; matched comparisons support paired bootstrap intervals and McNemar tests. Use the same `--folds` subset across inference, scoring, and aggregation. `--expected-problems` optionally asserts the intended test population size. Re-run aggregation after rescoring folds to refresh existing OOF files and metrics. Comparator files must also have been scored using the agreed environment.
 
 For fixed-routing controls, reuse the learned run's per-fold checkpoints and recorded inference arguments:
 
@@ -292,13 +332,25 @@ OUTPUT_ROOT="$WORK_DIR/predictions/fixed-alpha" \
   bash scripts/run_fixed_alpha_kfold.sh
 ```
 
-The launcher runs alpha 0, 0.5, and 1 sequentially, with parallel folds within each condition,
-then aggregates each condition. Results use separate `alpha_0`, `alpha_0p5`, and `alpha_1`
+The launcher generates alpha 0, 0.5, and 1 sequentially, with parallel folds within each condition,
+then prints the offline scoring/aggregation commands. Results use separate `alpha_0`, `alpha_0p5`, and `alpha_1`
 directories. Each reference fold must have a successful `run_status.json`; its exact checkpoint
 must still exist under `CHECKPOINT_ROOT`. Recorded generation and architecture arguments are
 reused. `DRY_RUN=1` checks commands without generation; the default `RESUME=1` skips complete
 matching folds and reruns interrupted folds. A failed condition stops the sequence.
 Set `BASELINE_PATH` to a matching base prediction file to include base comparisons.
+After transferring the three condition directories to the scoring machine:
+
+```bash
+for CONDITION in alpha_0 alpha_0p5 alpha_1; do
+  RUN_DIR="$WORK_DIR/predictions/fixed-alpha/$CONDITION"
+  "$SCORE_PYTHON" scripts/score_answers.py "$RUN_DIR"
+  "$SCORE_PYTHON" scripts/evaluate.py dspr aggregate \
+    --result-root "$RUN_DIR" --id-root "$KFOLD_ROOT" \
+    --raw-data "$PROBLEM_DATASET" --baseline "$BASE_RECORDS"
+done
+```
+
 For a single condition, use `scripts/evaluate.py dspr run --forced-alpha 0.5`
 with `--reference-run-root "$LEARNED_RUN_DIR"` and the usual checkpoint, fold, and output paths.
 
@@ -315,12 +367,13 @@ python scripts/inference.py \
   --max-new-tokens 2048
 ```
 
-Match architecture arguments to the saved checkpoint. Use `--baseline spt` with its prompt length, or `--baseline lora` with an adapter directory. Score or compare prediction files with:
+Match architecture arguments to the saved checkpoint. Use `--baseline spt` with its prompt length, or `--baseline lora` with an adapter directory. Score first, then compute or compare accuracy from the saved labels:
 
 ```bash
 export PREDICTION_RECORDS="/path/to/predictions.jsonl"
-python src/utils/calculate_accuracy.py "$PREDICTION_RECORDS"
-python src/utils/calculate_accuracy.py "$PREDICTION_RECORDS" --compare-file "$BASE_RECORDS"
+"$SCORE_PYTHON" scripts/score_answers.py "$PREDICTION_RECORDS"
+"$SCORE_PYTHON" src/utils/calculate_accuracy.py "$PREDICTION_RECORDS"
+"$SCORE_PYTHON" src/utils/calculate_accuracy.py "$PREDICTION_RECORDS" --compare-file "$BASE_RECORDS"
 ```
 
 ## 9. Annotator Consistency and Ablation Workflows

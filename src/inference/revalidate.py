@@ -3,7 +3,8 @@
 The vLLM sampler keeps every attempt in ``raw_generations.jsonl``.  This
 module lets us change mechanical validation thresholds without paying for a
 second model run: attempts are revalidated, the first target number of valid
-trajectories is selected, and fresh QC/record files are written.
+trajectories is selected, and fresh QC/record files are written. The resulting
+records have pending answer scores for the separate offline scorer.
 """
 
 from __future__ import annotations
@@ -14,8 +15,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .common import VARIANTS, check_answer_strict, ground_truth_for, ground_truth_type_for, normalise_problem_id, read_jsonl
+from .common import VARIANTS, ground_truth_for, ground_truth_type_for, normalise_problem_id, read_jsonl
 from .quality import CoTValidationConfig, validate_cot
+from utils.scoring import pending_score
 
 
 def _load_optional_json(path: Path) -> dict[str, Any]:
@@ -72,20 +74,6 @@ def revalidate_multiple(
         raise ValueError(f"Unknown sampled variants: {sorted(sampled - set(VARIANTS))}")
     if require_valid_greedy_anchors is None:
         require_valid_greedy_anchors = bool(source_sampling.get("require_valid_greedy_anchors", True))
-
-    # Correctness is independent of the mechanical quality threshold.  Reuse
-    # the already computed labels for trajectories that were accepted by the
-    # original run; only newly rescued trajectories need a fresh evaluator
-    # call.  This keeps revalidation fast and avoids re-running a relatively
-    # expensive symbolic answer parser tens of thousands of times.
-    existing_samples: dict[tuple[int, str, int], dict[str, Any]] = {}
-    for source in source_records:
-        problem_id = normalise_problem_id(source.get("problem_id"))
-        for variant in VARIANTS:
-            for sample in source[variant].get("samples", []):
-                attempt_index = sample.get("attempt_index")
-                if attempt_index is not None:
-                    existing_samples[(problem_id, variant, int(attempt_index))] = sample
 
     raw_by_key: dict[tuple[int, str], list[dict[str, Any]]] = defaultdict(list)
     revalidated_raw: list[dict[str, Any]] = []
@@ -144,14 +132,12 @@ def revalidate_multiple(
     output_rows: list[dict[str, Any]] = []
     shortfalls: list[dict[str, Any]] = []
     invalid_anchors: list[dict[str, Any]] = []
-    fully_correct = 0
     total_target = 0
 
     for source in source_records:
         problem_id = normalise_problem_id(source.get("problem_id"))
         source_variants = {variant: source[variant] for variant in VARIANTS}
         results: dict[str, Any] = {}
-        all_correct = True
         for variant in VARIANTS:
             target = samples_per_problem if variant in sampled else 1
             total_target += target
@@ -168,32 +154,12 @@ def revalidate_multiple(
 
             metadata_variant = source_variants[variant]
             samples: list[dict[str, Any]] = []
-            variant_any_correct = False
             for candidate in selected:
                 validation_errors = list(candidate.get("validation_errors") or [])
                 valid = bool(candidate["valid"])
-                answer_correct: bool | None = None
-                correct = False
-                if valid:
-                    previous = existing_samples.get(
-                        (problem_id, variant, int(candidate.get("attempt_index", -1)))
-                    )
-                    if previous is not None and previous.get("valid"):
-                        answer_correct = previous.get("answer_correct")
-                        correct = bool(previous.get("correct"))
-                    else:
-                        answer_correct = check_answer_strict(
-                            metadata_variant["problem"],
-                            candidate["response"],
-                            ground_truth_for(metadata_variant),
-                            variant,
-                            ground_truth_type_for(metadata_variant, variant),
-                        )
-                        correct = bool(answer_correct)
                 sample: dict[str, Any] = {
                     "response": candidate["response"],
-                    "correct": correct,
-                    "answer_correct": answer_correct,
+                    **pending_score(),
                     "valid": valid,
                     "finish_reason": candidate.get("finish_reason"),
                     "validation_errors": validation_errors,
@@ -206,9 +172,6 @@ def revalidate_multiple(
                 ):
                     sample["token_ids"] = list(candidate.get("token_ids") or [])
                 samples.append(sample)
-                variant_any_correct = variant_any_correct or correct
-
-            all_correct = all_correct and variant_any_correct
 
             results[variant] = {
                 "problem": metadata_variant["problem"],
@@ -243,7 +206,6 @@ def revalidate_multiple(
                     }
                 )
 
-        fully_correct += int(all_correct)
         output_rows.append(
             {
                 "problem_id": problem_id,
@@ -291,7 +253,11 @@ def revalidate_multiple(
         "by_variant": {variant: dict(by_variant[variant]) for variant in VARIANTS},
         "shortfalls": shortfalls,
         "invalid_greedy_anchors": invalid_anchors,
-        "fully_correct_triplets": fully_correct,
+        "scoring_status": "pending",
+        "pending_generations": sum(
+            len(row[variant]["samples"]) for row in output_rows for variant in VARIANTS
+        ),
+        "fully_correct_triplets": None,
         "sampling": source_sampling,
         "validation": asdict(config),
         "revalidated_from": str(raw_path),
