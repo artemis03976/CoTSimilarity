@@ -54,8 +54,9 @@ or `nvidia-smi`; on a CPU machine, pass `--gpus 0` when inspecting a dry run.
 
 ## 1. Generate Base Responses and Sampled Trajectories
 
-Use `configs/infer_qwen25.yaml` for Qwen2.5-Math-7B-Instruct or
-`configs/infer_deepseek.yaml` for DeepSeek-Math-7B-Instruct. Each preset defines the
+Choose `configs/infer_qwen25.yaml` for Qwen2.5-Math-7B-Instruct,
+`configs/infer_deepseek.yaml` for DeepSeek-Math-7B-Instruct, or
+`configs/infer_phi4.yaml` for Microsoft Phi-4 (14B). Each preset defines the
 model and dataset under `common`, with separate output directories and decoding
 settings under `greedy` and `sampling`. To switch models, copy the preset and update
 the model name and both output directories. Explicit CLI options override the preset.
