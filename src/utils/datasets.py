@@ -66,6 +66,8 @@ class TrajectoryDataset(Dataset):
                 target_alpha=torch.tensor([item['target_alpha']], dtype=torch.float32),
                 variant_type=item['variant_type'],
             )
+            if 'ged_weight' in item:
+                output['ged_weight'] = torch.tensor(item['ged_weight'], dtype=torch.float32)
         return output
 
 

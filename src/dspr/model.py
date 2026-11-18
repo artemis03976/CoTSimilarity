@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .context_encoder import ContextEncoder
@@ -56,7 +58,8 @@ class DSPRModel(nn.Module):
         model.eval()
         return model, tokenizer
 
-    def forward(self, input_ids, attention_mask, labels=None, prompt_input_ids=None, prompt_attention_mask=None, forced_alpha=None):
+    def forward(self, input_ids, attention_mask, labels=None, prompt_input_ids=None,
+                prompt_attention_mask=None, forced_alpha=None, response_nll=False):
         """
         Args:
             input_ids: (batch_size, seq_len)
@@ -64,7 +67,8 @@ class DSPRModel(nn.Module):
             labels: (batch_size, seq_len) - optional, for training
             prompt_input_ids: (batch_size, seq_len) - optional, prompt-only input for context encoder
             prompt_attention_mask: (batch_size, seq_len) - optional, prompt-only attention mask
-            forced_alpha: scalar or per-example tensor - bypasses the router when set
+            forced_alpha: scalar endpoint or probe value, bypassing the router
+            response_nll: return one mean answer-token NLL per trajectory
         Returns:
             (lm_loss, alpha) if labels provided, else (logits, alpha)
         """
@@ -84,7 +88,16 @@ class DSPRModel(nn.Module):
         else:
             extended_labels = None
 
-        # 8. Forward through frozen LLM
+        if response_nll:
+            # Recompute each scoring pass separately during backward so three
+            # copies of the frozen LM's activations are not resident together.
+            args = (inputs_embeds, extended_attention_mask, extended_labels)
+            if self.training and self.config.gradient_checkpointing:
+                nll = checkpoint(self._response_nll, *args, use_reentrant=False)
+            else:
+                nll = self._response_nll(*args)
+            return nll, alpha
+
         outputs = self.frozen_llm(
             inputs_embeds=inputs_embeds,
             attention_mask=extended_attention_mask,
@@ -97,19 +110,24 @@ class DSPRModel(nn.Module):
         else:
             return outputs.logits, alpha
 
+    def _response_nll(self, embeddings, mask, labels):
+        logits = self.frozen_llm(inputs_embeds=embeddings, attention_mask=mask, use_cache=False).logits
+        targets = labels[:, 1:]
+        losses = F.cross_entropy(
+            logits[:, :-1].reshape(-1, logits.size(-1)).float(), targets.reshape(-1),
+            ignore_index=-100, reduction='none',
+        ).view_as(targets)
+        return losses.sum(1) / targets.ne(-100).sum(1).clamp_min(1)
+
     def _build_prefixed_inputs(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         prompt_input_ids: torch.Tensor | None = None,
         prompt_attention_mask: torch.Tensor | None = None,
-        forced_alpha: float | torch.Tensor | None = None,
+        forced_alpha: float | None = None,
     ):
-        """Build prefix-augmented embeddings and masks.
-
-        alpha is predicted from the prompt, forced to a scalar for probes, or
-        supplied per example for label-routed training.
-        """
+        """Mix the prefixes using the prompt router or a fixed scalar alpha."""
         batch_size = input_ids.shape[0]
         if prompt_input_ids is None:
             prompt_input_ids = input_ids
@@ -117,17 +135,7 @@ class DSPRModel(nn.Module):
             prompt_attention_mask = attention_mask
 
         if forced_alpha is not None:
-            alpha = torch.as_tensor(
-                forced_alpha,
-                dtype=next(self.dual_prefix.parameters()).dtype,
-                device=input_ids.device,
-            )
-            if alpha.ndim == 0:
-                alpha = alpha.expand(batch_size, 1)
-            elif alpha.shape in ((batch_size,), (batch_size, 1)):
-                alpha = alpha.reshape(batch_size, 1)
-            else:
-                raise ValueError('forced_alpha must be a scalar or one value per example')
+            alpha = self.dual_prefix.P_reuse.new_full((batch_size, 1), forced_alpha)
         else:
             h_Q = self.context_encoder(prompt_input_ids, prompt_attention_mask)
             router_dtype = next(self.router.parameters()).dtype

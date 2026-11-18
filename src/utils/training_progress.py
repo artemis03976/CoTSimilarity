@@ -11,11 +11,13 @@ TRAIN_LOG_PREFIX = "__DSPR_TRAIN_LOG__"
 
 
 def parse_progress_event(line: str) -> dict[str, Any] | None:
-    stripped = line.strip()
-    if not stripped.startswith(PROGRESS_EVENT_PREFIX):
+    # A carriage-return progress display on merged stderr/stdout can precede
+    # the event on the same line. The marker, rather than column zero, frames it.
+    _, marker, payload_text = line.partition(PROGRESS_EVENT_PREFIX)
+    if not marker:
         return None
     try:
-        payload = json.loads(stripped[len(PROGRESS_EVENT_PREFIX) :])
+        payload = json.loads(payload_text)
     except json.JSONDecodeError:
         return None
     if not isinstance(payload, dict):

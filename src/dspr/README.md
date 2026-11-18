@@ -7,10 +7,15 @@ and two trainable soft-prefix tables. Training runs in two stages:
 2. Freeze the router and train the prefixes on selected CoT trajectories using
    language-model loss. Router BCE in this stage is a diagnostic only.
 
-`prefix_routing: router` mixes prefixes using the frozen router during training.
-`prefix_routing: label` selects the corresponding prefix using each example's
-binary target. Validation and default inference use the continuous router mixture
-in both modes.
+Both presets use the continuous router mixture for LM training and for validation
+checkpoint selection. In `configs/dspr_ged.yaml` each sampling epoch draws one
+trajectory per prompt. For the same response let `s0` and `s1` be its mean
+answer-token log probabilities under the two fixed prefixes. The auxiliary loss
+is `weight * softplus(-gap)` where `gap = s0 - s1` for Simple and `s1 - s0` for
+Hard. With ascending within-prompt normalized GED rank `k` (average for ties)
+among `n` scored trajectories, the weight is `1-k/(n+1)` for Simple and
+`k/(n+1)` for Hard. Missing scores give zero weight. The trainer averages the
+weighted losses over all sampled examples and scales them by `ged_preference_weight`.
 
 The router dataset lives in `src/dspr_training/dataset.py`; all methods share
 trajectory encoding in `src/utils/datasets.py`. Both training stages share the

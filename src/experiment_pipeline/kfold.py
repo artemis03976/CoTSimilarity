@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from tqdm import tqdm
+from dspr_dataset.ged_weights import resolve_prefix_sampling
 from utils.config import parse_config_args, write_resolved_config
 from utils.io import write_json
 from utils.training_progress import parse_progress_event
@@ -47,6 +48,7 @@ class FoldSpec:
     error: str | None = None
     global_step: int | None = None
     max_steps: int | None = None
+    last_progress_at: str | None = None
     termination: str | None = None
     best_metric: float | None = None
     best_model_checkpoint: str | None = None
@@ -124,10 +126,12 @@ def run_fold(
         )
         assert process.stdout is not None
         for line in process.stdout:
+            # Preserve events as well as ordinary output so logs remain useful
+            # when the terminal cannot render the live progress bars.
+            log_handle.write(line)
+            log_handle.flush()
             event = parse_progress_event(line)
             if event is None:
-                log_handle.write(line)
-                log_handle.flush()
                 continue
 
             event_stage = event.get("stage")
@@ -140,6 +144,7 @@ def run_fold(
             last_progress_event = event
             spec.global_step = int(event.get("step", 0))
             spec.max_steps = int(event.get("total_steps", 0))
+            spec.last_progress_at = utc_now()
             spec.best_metric = event.get("best_metric")
             spec.best_model_checkpoint = event.get("best_model_checkpoint")
             if event.get("event") in {"early_stop", "complete"}:
@@ -148,13 +153,10 @@ def run_fold(
                     if event.get("event") == "early_stop"
                     else "completed"
                 )
-                log_handle.write(f"[progress] {line}")
-                log_handle.flush()
                 if spec.stage is not None:
                     spec.stage_results[spec.stage] = {**event, "termination": spec.termination}
-            if event.get("event") in {"start", "early_stop", "complete"}:
-                with state_lock:
-                    write_json(output_path / "run_status.json", asdict(spec))
+            with state_lock:
+                write_json(output_path / "run_status.json", asdict(spec))
 
             total_steps = max(int(event.get("total_steps", 0)), 0)
             current_step = max(int(event.get("step", 0)), 0)
@@ -231,7 +233,7 @@ COMMAND_ARGUMENTS = {
         gradient_accumulation_steps max_grad_norm prefix_train_data_path prefix_val_data_path
         max_seq_length seed device output_path logging_steps save_total_limit emit_progress_events
         prefix_trajectory_sampling router_early_stopping_patience prefix_early_stopping_patience
-        early_stopping_threshold prefix-routing
+        early_stopping_threshold ged-preference-weight
     """.split(),
     "spt": """
         train_data_path val_data_path output_path device emit_progress_events
@@ -277,6 +279,8 @@ def build_train_command(
         command.extend([f"--{name}", str(getattr(args, name))])
     command.append("--gradient_checkpointing" if args.gradient_checkpointing else "--no-gradient_checkpointing")
     if method == "dspr":
+        if args.ged_results:
+            command.extend(["--ged-results", args.ged_results])
         if args.router_checkpoint_root:
             router_checkpoint = Path(args.router_checkpoint_root) / f"fold_{spec.fold}" / "router" / "router_trainable.pt"
             if not router_checkpoint.is_file():
@@ -320,10 +324,8 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
     warmup.add_argument("--warmup-ratio", type=float, default=0.05 if method == "lora" else None)
     if method == "dspr":
         parser.add_argument("--problem-dataset", "--problem_dataset", default="data/canonical_math_paired.jsonl")
-        parser.add_argument(
-            "--prefix-routing", choices=("router", "label"), default="router",
-            help="Prefix training routing; validation and default inference use continuous router weights.",
-        )
+        parser.add_argument("--ged-preference-weight", type=float, default=0.0)
+        parser.add_argument("--ged-results", help="Trajectory GED JSONL used for the preference weights")
         parser.add_argument(
             "--router-checkpoint-root", default=None,
             help="Reuse fold_N/router/router_trainable.pt from this run and train fresh prefixes only.",
@@ -340,7 +342,7 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
         parser.add_argument("--router-positive-weight", type=float, default=None)
         parser.add_argument("--router-epochs", type=int, default=20)
         parser.add_argument("--prefix-epochs", "--num-epochs", type=int, default=15)
-        parser.add_argument("--prefix-trajectory-sampling", "--trajectory-sampling", choices=("flat", "random_one"), default="flat")
+        parser.add_argument("--prefix-trajectory-sampling", "--trajectory-sampling", choices=("flat", "random_one"))
         parser.add_argument("--early-stopping-patience", type=int, default=None)
         parser.add_argument("--router-early-stopping-patience", type=int, default=3)
         parser.add_argument("--prefix-early-stopping-patience", type=int, default=3)
@@ -366,11 +368,12 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
                              aliases={"checkpoint_root": "output_root"})
     if args.output_root is None:
         args.output_root = (
-            f"checkpoints/qwen_staged_label_kfold_seed{args.seed}"
-            if method == "dspr" and args.prefix_routing == "label"
+            f"checkpoints/qwen_staged_ged_kfold_seed{args.seed}"
+            if method == "dspr" and args.ged_preference_weight
             else DEFAULT_CHECKPOINT_ROOTS[method]
         )
     if method == "dspr":
+        resolve_prefix_sampling(args)
         if args.warmup_steps is None:
             args.warmup_steps = 100
             if args.warmup_ratio is None:
@@ -443,7 +446,7 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
     print(f"Method: {method}; model: {args.model_name}; seed: {args.seed}")
     print(f"Folds: {folds}; GPUs: {gpu_ids}; output: {output_root}")
     if method == "dspr":
-        print(f"Prefix routing: train={args.prefix_routing}; validation=router; "
+        print(f"Prefix sampling={args.prefix_trajectory_sampling}; GED weight={args.ged_preference_weight:g}; "
               f"router source={args.router_checkpoint_root or 'train per fold'}")
     for spec in specs:
         print(f"[fold {spec.fold}] GPU {spec.gpu} -> {spec.output_path}")

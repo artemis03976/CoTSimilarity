@@ -18,6 +18,9 @@ def _empty_diagnostic_accumulator() -> dict[str, Any]:
         "sample_count": 0,
         "lm_loss_sum": 0.0,
         "router_loss_sum": 0.0,
+        "preference_loss_sum": 0.0,
+        "endpoint_counts": np.zeros(2, dtype=int),
+        "endpoint_wins": np.zeros(2, dtype=int),
         "alpha": [],
         "target_alpha": [],
     }
@@ -83,8 +86,8 @@ def _binary_router_metrics(alpha: np.ndarray, target_alpha: np.ndarray) -> dict[
 class DSPRTrainer(Trainer):
     """HuggingFace Trainer for DSPR model."""
 
-    def __init__(self, *args, prefix_routing: str = "router", **kwargs):
-        self.prefix_routing = prefix_routing
+    def __init__(self, *args, ged_preference_weight: float = 0.0, **kwargs):
+        self.ged_preference_weight = ged_preference_weight
         self._train_diagnostics = _empty_diagnostic_accumulator()
         self._eval_diagnostics = _empty_diagnostic_accumulator()
         super().__init__(*args, **kwargs)
@@ -113,7 +116,7 @@ class DSPRTrainer(Trainer):
 
     @staticmethod
     def _summarize_diagnostics(
-        accumulator: dict[str, Any], *, router_diagnostics: bool = True,
+        accumulator: dict[str, Any],
     ) -> dict[str, float]:
         sample_count = accumulator["sample_count"]
         if sample_count == 0:
@@ -121,40 +124,67 @@ class DSPRTrainer(Trainer):
 
         alpha = np.concatenate(accumulator["alpha"])
         target_alpha = np.concatenate(accumulator["target_alpha"])
-        if not router_diagnostics:
-            # These are supplied labels, not router predictions. Do not report
-            # tautological router accuracy/AUC for label-routed training.
-            return {
-                "lm_loss": float(accumulator["lm_loss_sum"] / sample_count),
-                "prefix_alpha_mean": float(alpha.mean()),
-            }
+        preference_metrics = {}
+        if accumulator["endpoint_counts"].sum():
+            preference_metrics["ged_preference_loss"] = accumulator["preference_loss_sum"] / sample_count
+            for i, variant in enumerate(("simple", "hard")):
+                n = accumulator["endpoint_counts"][i]
+                if n:
+                    preference_metrics[f"{variant}_endpoint_win_rate"] = float(accumulator["endpoint_wins"][i] / n)
         return {
+            **preference_metrics,
             "lm_loss": float(accumulator["lm_loss_sum"] / sample_count),
             "router_loss": float(accumulator["router_loss_sum"] / sample_count),
             **_binary_router_metrics(alpha, target_alpha),
         }
 
+    def _ged_prefix_loss(self, model, inputs, target_alpha, accumulator):
+        """Train at the routed mixture and score the same response at both endpoints."""
+        self.model.router.eval()
+        self.model.frozen_llm.eval()
+        weights = inputs.pop("ged_weight").reshape(-1)
+        # The dataset is right-padded. Trim padding shared by the entire batch.
+        for mask, keys in (("attention_mask", ("input_ids", "labels", "attention_mask")),
+                           ("prompt_attention_mask", ("prompt_input_ids", "prompt_attention_mask"))):
+            length = int(inputs[mask].sum(1).max().item())
+            for key in keys:
+                inputs[key] = inputs[key][:, :length]
+        token_counts = inputs["labels"].ne(-100).sum(1)
+        mixed_nll, alpha = model(**inputs, response_nll=True)
+        lm_loss = (mixed_nll * token_counts).sum() / token_counts.sum().clamp_min(1)
+        loss = lm_loss
+        scored = (weights > 0) & (token_counts > 0)
+        if scored.any():
+            endpoint_inputs = {key: inputs[key][scored] for key in ("input_ids", "attention_mask", "labels")}
+            nll0, _ = model(**endpoint_inputs, forced_alpha=0.0, response_nll=True)
+            nll1, _ = model(**endpoint_inputs, forced_alpha=1.0, response_nll=True)
+            targets = target_alpha.reshape(-1)[scored]
+            # Positive when the intended endpoint gives the higher mean log probability.
+            gap = (2 * targets - 1) * (nll0 - nll1)
+            weighted_sum = (weights[scored] * F.softplus(-gap)).sum()
+            if model.training:
+                loss = lm_loss + self.ged_preference_weight * weighted_sum / weights.numel()
+            accumulator["preference_loss_sum"] += weighted_sum.detach().item()
+            labels = targets.detach().long().cpu().numpy()
+            wins = gap.detach().gt(0).cpu().numpy()
+            accumulator["endpoint_counts"] += np.bincount(labels, minlength=2)
+            accumulator["endpoint_wins"] += np.bincount(labels[wins], minlength=2)
+        return loss, lm_loss, alpha
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         target_alpha = inputs.pop("target_alpha")
         inputs.pop("variant_type", None)
-        # Validation always uses the deployed soft mixture. Only training
-        # bypasses the frozen router with the per-example binary labels.
-        label_routing = self.prefix_routing == "label" and model.training
-
-        lm_loss, alpha = model(
-            input_ids=inputs["input_ids"],
-            attention_mask=inputs["attention_mask"],
-            labels=inputs.get("labels"),
-            prompt_input_ids=inputs["prompt_input_ids"],
-            prompt_attention_mask=inputs["prompt_attention_mask"],
-            forced_alpha=target_alpha if label_routing else None,
-        )
-
-        # The prefix stage optimizes LM loss only; router BCE is diagnostic.
-        with torch.no_grad():
-            router_loss = 0.0 if label_routing else F.binary_cross_entropy(alpha, target_alpha).item()
-        loss_components = {"lm_loss": lm_loss.item(), "router_loss": router_loss}
         accumulator = self._train_diagnostics if model.training else self._eval_diagnostics
+        if self.ged_preference_weight:
+            loss, lm_loss, alpha = self._ged_prefix_loss(model, inputs, target_alpha, accumulator)
+        else:
+            lm_loss, alpha = model(**inputs)
+            loss = lm_loss
+
+        # Router BCE remains diagnostic in the prefix stage.
+        with torch.no_grad(), torch.autocast(device_type=alpha.device.type, enabled=False):
+            router_loss = F.binary_cross_entropy(alpha.float(), target_alpha.float()).item()
+        loss_components = {"lm_loss": lm_loss.item(), "router_loss": router_loss}
         self._accumulate_diagnostics(
             accumulator,
             loss_components,
@@ -162,10 +192,10 @@ class DSPRTrainer(Trainer):
             target_alpha,
         )
         if not return_outputs:
-            return lm_loss
+            return loss
 
         outputs = {"logits": alpha}
-        return lm_loss, outputs
+        return loss, outputs
 
     def save_model(self, output_dir: str | None = None, _internal_call: bool = False):
         output_dir = output_dir or self.args.output_dir
@@ -177,7 +207,7 @@ class DSPRTrainer(Trainer):
                 "dual_prefix_state_dict": self.model.dual_prefix.state_dict(),
                 "router_state_dict": self.model.router.state_dict(),
                 "training_args": self.args.to_dict(),
-                "prefix_routing": self.prefix_routing,
+                "ged_preference_weight": self.ged_preference_weight,
                 "prefix_validation_routing": "router",
             },
             os.path.join(output_dir, "dspr_trainable.pt"),
@@ -197,9 +227,7 @@ class DSPRTrainer(Trainer):
         """Attach interval-level training diagnostics to regular Trainer logs."""
         logs = dict(logs)
         if "loss" in logs or "train_loss" in logs:
-            logs.update(self._summarize_diagnostics(
-                self._train_diagnostics, router_diagnostics=self.prefix_routing == "router",
-            ))
+            logs.update(self._summarize_diagnostics(self._train_diagnostics))
             self._train_diagnostics = _empty_diagnostic_accumulator()
             if self.optimizer is not None:
                 logs["prefix_learning_rate"] = float(self.optimizer.param_groups[0]["lr"])

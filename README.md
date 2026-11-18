@@ -41,7 +41,7 @@ For K-fold aggregation, also copy the fold ID files and problem dataset; checkpo
 are not needed. Set the path variables below to their locations on that machine.
 
 Training, held-out inference, and aggregation accept `--config FILE.yaml`.
-Presets are `configs/dspr.yaml`, `configs/dspr_label.yaml`, `configs/spt.yaml`, and
+Presets are `configs/dspr.yaml`, `configs/dspr_ged.yaml`, `configs/spt.yaml`, and
 `configs/lora.yaml`. Copy a preset for each run and edit its `common`, `training`,
 `inference`, and `aggregation` sections. `common` holds shared model, path, and fold
 settings; each entrypoint reads its own section. Explicit CLI options override YAML.
@@ -282,33 +282,33 @@ are errors; router IDs are never inferred from the filtered prefix trajectories.
 An incompatible context cache is also an error: choose a new cache path when
 changing its dataset, model, or context layer.
 
-To train each prefix with its binary supervision label, select `--prefix-routing label`.
-Simple examples use alpha 0 and Hard examples use alpha 1 during prefix training.
-Validation uses the frozen router's continuous mixture, and its validation loss selects
-the checkpoint. Default inference also uses continuous routing. The default
-`--prefix-routing router` retains mixed-prefix training.
-
-Reuse the routers from a completed run to train fresh prefixes on the same folds:
+For GED-weighted endpoint preference training, use the dedicated preset. Each sampling
+epoch draws one trajectory per problem and variant. Its LM loss uses the frozen
+router mixture. The auxiliary loss scores the same answer at both endpoints.
+Supply the trajectory GED JSONL through `training.ged_results` or `--ged-results`.
 
 ```bash
-export ROUTER_CHECKPOINT_ROOT="/path/to/existing-dspr-checkpoints"
-python scripts/run_pipeline.py dspr --config configs/dspr_label.yaml \
+python scripts/run_pipeline.py dspr --config configs/dspr_ged.yaml \
   --model-name "$MODEL_NAME" --problem-dataset "$PROBLEM_DATASET" \
-  --fold-root "$KFOLD_ROOT" --gpus "$GPUS" \
-  --checkpoint-root "$WORK_DIR/models/dspr-label" \
-  --result-root "$WORK_DIR/predictions/dspr-label" \
-  --router-checkpoint-root "$ROUTER_CHECKPOINT_ROOT"
+  --fold-root "$KFOLD_ROOT" --gpus "$GPUS" --ged-results "$GED_RECORDS" \
+  --checkpoint-root "$WORK_DIR/models/dspr-ged" \
+  --result-root "$WORK_DIR/predictions/dspr-ged"
 ```
 
-Each source fold must contain `fold_N/router/router_trainable.pt`, the router saved
-after validation checkpoint selection. Only router weights are loaded; prefixes
-start from fresh seeded initialization. Match the source model, router architecture,
-seed and fold assignment. Omit `--router-checkpoint-root` to train both stages.
-The K-fold Python entrypoint accepts the same `--prefix-routing label` and
-`--router-checkpoint-root` options. For a single fold, combine `--prefix-routing label`
-with `--run-stage prefix --router-checkpoint "$ROUTER_CHECKPOINT"`.
-Use separate directories for this training condition. Checkpoints and run metadata
-record the routing mode; supplied training labels are not reported as router accuracy.
+To reuse saved fold routers, add `--router-checkpoint-root "$ROUTER_CHECKPOINT_ROOT"`.
+Each source fold must contain `fold_N/router/router_trainable.pt` and match the model,
+router architecture and fold assignment. The prefix stage starts with fresh prefixes.
+`--folds 0 --train-only` runs the first fold. For single-stage training, use
+`scripts/train.py dspr --config configs/dspr_ged.yaml --fold 0 --run-stage prefix
+--router-checkpoint "$ROUTER_CHECKPOINT" --output-path "$WORK_DIR/models/dspr-ged/fold_0"`.
+
+Within each split and prompt, usable normalized GED scores receive ascending mean
+ranks for ties. With rank `k` among `n` trajectories, Hard uses `k/(n+1)` and Simple
+uses `1-k/(n+1)`. Missing GED gives zero auxiliary weight. The preset uses
+`ged_preference_weight: 0.1` and an effective batch of 16. Sampling preserves the
+optimizer-step budget computed from the full trajectory count. Validation reports
+the fraction of scored Simple and Hard trajectories favoring their intended endpoint
+and selects checkpoints by routed LM loss.
 
 ## 7. SPT and LoRA Pipelines
 
@@ -410,6 +410,21 @@ with `--reference-run-root "$LEARNED_RUN_DIR"` and the usual checkpoint, fold, a
 Checkpoint selection `best` requires validation evidence or the final saved model;
 use `--checkpoint-selection latest` to explicitly select the latest retained step.
 
+For the paired structure probe, prepare the three scored OOF conditions and the matching
+base greedy Original graphs. The preparation step selects groups by source and reuses
+matching annotations. The annotation request contains the problem and reasoning steps.
+
+```bash
+PROBE_DIR="$WORK_DIR/alpha-structure"
+python scripts/probe_alpha_structure.py prepare --dataset "$PROBLEM_DATASET" \
+  --base-root "$WORK_DIR/base" --fixed-root "$WORK_DIR/predictions/fixed-alpha" \
+  --reference-root "$LEARNED_RUN_DIR" --output-dir "$PROBE_DIR"
+python scripts/run_dag_analysis.py --input "$PROBE_DIR/pending.jsonl" \
+  --output-dir "$PROBE_DIR/annotation" --annotator volcengine --variants simple hard
+python scripts/probe_alpha_structure.py measure --output-dir "$PROBE_DIR"
+python scripts/probe_alpha_structure.py report --output-dir "$PROBE_DIR"
+```
+
 For a smoke run, add `--folds 0 --problem-id "$PROBLEM_ID"` to inference and choose a separate run directory. Such a partial run is not a complete fold for aggregation.
 
 Evaluate a single DSPR checkpoint directly:
@@ -485,7 +500,7 @@ The CSV uses `original_vs_simple_ged` and `original_vs_hard_ged` columns. Omit
 
 | Module | Responsibility |
 | --- | --- |
-| `configs/` | YAML presets for DSPR, label-routed prefixes, SPT, and LoRA |
+| `configs/` | YAML presets for DSPR, GED-weighted endpoint preferences, SPT, and LoRA |
 | `src/dspr/`, `src/dspr_training/` | Dual prefixes, router, and staged training |
 | `src/spt/`, `src/spt_training/` | Static prompt baseline |
 | `src/dspr_dataset/` | Shared screening and trajectory-selection strategies |
