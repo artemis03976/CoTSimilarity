@@ -21,12 +21,13 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from inference.common import VARIANTS, read_math_records
 from inference.multiple import MultipleSamplingConfig, VLLMMultipleSampler
 from inference.quality import CoTValidationConfig
+from utils.config import parse_config_args
 
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-Math-7B-Instruct"
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", "--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument(
@@ -98,7 +99,8 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
     )
-    return parser.parse_args()
+    return parse_config_args(parser, argv, method="generation", section="sampling",
+                             aliases={"model_name": "model", "problem_dataset": "data_path"})
 
 
 def main() -> int:

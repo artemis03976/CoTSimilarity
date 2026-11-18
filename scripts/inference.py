@@ -22,13 +22,14 @@ from inference.common import VARIANTS, read_math_records
 from inference.greedy import BACKENDS, BASELINES, GreedyModelConfig, load_greedy_generator
 from inference.quality import CoTValidationConfig
 from inference.runner import run_greedy_evaluation
+from utils.config import parse_config_args
 from utils.inference_progress import emit_progress
 
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-Math-7B-Instruct"
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", choices=BASELINES, default="base")
     parser.add_argument("--backend", choices=BACKENDS, default="transformers")
@@ -116,7 +117,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0, help=argparse.SUPPRESS)
     parser.add_argument("--top-p", "--top_p", type=float, default=1.0, help=argparse.SUPPRESS)
     parser.add_argument("--n", type=int, default=1, help=argparse.SUPPRESS)
-    args = parser.parse_args()
+    args = parse_config_args(parser, argv, method="generation", section="greedy",
+                             aliases={"problem_dataset": "data_path"})
     if args.max_new_tokens is None:
         args.max_new_tokens = 2048 if args.backend == "vllm" else 4096
     return args

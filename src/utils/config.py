@@ -16,21 +16,29 @@ COMMON_KEYS = {
     "checkpoint_root", "result_root", "prefix_length", "context_layer_idx",
     "router_intermediate_dim", "router_dropout", "max_seq_length",
 }
+GENERATION_COMMON_KEYS = {
+    "model_name", "problem_dataset", "seed", "dtype", "max_model_len",
+    "gpu_memory_utilization", "system_prompt",
+}
 
 
 def load_experiment(path, method=None):
     with Path(path).open(encoding="utf-8") as stream:
         payload = yaml.safe_load(stream)
-    if not isinstance(payload, dict) or set(payload) - (SECTIONS | {"method"}):
-        raise ValueError(f"Expected method/common/training/inference/aggregation mappings: {path}")
-    if payload.get("method") not in {"dspr", "spt", "lora"}:
+    if not isinstance(payload, dict) or payload.get("method") not in {"dspr", "spt", "lora", "generation"}:
         raise ValueError(f"Unknown experiment method in {path}")
     if method is not None and payload["method"] != method:
         raise ValueError(f"Config method {payload['method']} differs from CLI method {method}")
-    for section in SECTIONS:
+    sections, common_keys = SECTIONS, COMMON_KEYS
+    if payload["method"] == "generation":
+        sections, common_keys = {"common", "greedy", "sampling"}, GENERATION_COMMON_KEYS
+    unknown_sections = set(payload) - sections - {"method"}
+    if unknown_sections:
+        raise ValueError(f"Unknown config sections in {path}: {sorted(unknown_sections)}")
+    for section in sections:
         if not isinstance(payload.get(section, {}), dict):
             raise ValueError(f"{path}: {section} must be a mapping")
-    unknown = set(payload.get("common", {})) - COMMON_KEYS
+    unknown = set(payload.get("common", {})) - common_keys
     if unknown:
         raise ValueError(f"Unknown common settings: {sorted(unknown)}")
     return payload

@@ -54,6 +54,18 @@ or `nvidia-smi`; on a CPU machine, pass `--gpus 0` when inspecting a dry run.
 
 ## 1. Generate Base Responses and Sampled Trajectories
 
+Use `configs/infer_qwen25.yaml` for Qwen2.5-Math-7B-Instruct or
+`configs/infer_deepseek.yaml` for DeepSeek-Math-7B-Instruct. Each preset defines the
+model and dataset under `common`, with separate output directories and decoding
+settings under `greedy` and `sampling`. To switch models, copy the preset and update
+the model name and both output directories. Explicit CLI options override the preset.
+
+```bash
+CONFIG=configs/infer_qwen25.yaml
+CUDA_VISIBLE_DEVICES=0 python scripts/inference.py --config "$CONFIG"
+CUDA_VISIBLE_DEVICES=0 python scripts/inference_multiple.py --config "$CONFIG"
+```
+
 Generate one greedy response per Original/Simple/Hard problem for the base comparison:
 
 ```bash
