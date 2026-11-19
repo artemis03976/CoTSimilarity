@@ -24,6 +24,7 @@ from inference.quality import CoTValidationConfig
 from inference.runner import run_greedy_evaluation
 from utils.config import parse_config_args
 from utils.inference_progress import emit_progress
+from utils.prompts import INSTRUCTION_PLACEMENTS
 
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-Math-7B-Instruct"
@@ -56,6 +57,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--attention-implementation", default="flash_attention_2")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--system-prompt", default=None)
+    parser.add_argument("--instruction-placement", choices=INSTRUCTION_PLACEMENTS)
     parser.add_argument("--save-token-ids", action="store_true")
     parser.add_argument("--emit-progress-events", "--emit_progress_events", action="store_true",
                         help="Send inference progress to the K-fold parent process")
@@ -175,6 +177,7 @@ def main() -> int:
         attention_implementation=args.attention_implementation,
         max_new_tokens=args.max_new_tokens,
         system_prompt=args.system_prompt,
+        instruction_placement=args.instruction_placement,
         context_layer_idx=args.context_layer_idx,
         prefix_length=args.prefix_length,
         router_intermediate_dim=args.router_intermediate_dim,
@@ -216,6 +219,7 @@ def main() -> int:
         "max_new_tokens": args.max_new_tokens,
         "seed": args.seed,
         "system_prompt": args.system_prompt,
+        "instruction_placement": model_config.instruction_placement,
         "context_layer_idx": args.context_layer_idx,
         "prefix_length": args.prefix_length,
         "router_intermediate_dim": args.router_intermediate_dim,

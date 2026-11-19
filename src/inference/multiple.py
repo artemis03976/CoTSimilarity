@@ -21,7 +21,7 @@ from .common import (
 )
 from .quality import CoTValidationConfig, ValidationResult, validate_cot
 from utils.scoring import pending_score
-from utils.prompts import build_prompt
+from utils.prompts import build_prompt, inference_instruction_placement
 
 
 @dataclass(frozen=True)
@@ -46,8 +46,11 @@ class MultipleSamplingConfig:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     require_valid_greedy_anchors: bool = True
     strict_quality: bool = True
+    instruction_placement: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "instruction_placement",
+                           inference_instruction_placement(self.model_name, self.instruction_placement))
         if not self.sampled_variants:
             raise ValueError("At least one sampled variant is required")
         unknown = set(self.sampled_variants) - set(VARIANTS)
@@ -92,7 +95,7 @@ class SamplingTask:
     variant: str
     problem: str
     ground_truth: Any
-    prompt: str
+    prompt: str | dict[str, list[int]]
     target: int
     resample_invalid: bool
     max_attempts: int
@@ -241,6 +244,11 @@ class VLLMMultipleSampler:
                 variant_data = record[variant]
                 is_sampled = variant in sampled
                 target = self.config.samples_per_problem if is_sampled else 1
+                prompt = build_prompt(self.tokenizer, variant_data["problem"], self.config.system_prompt,
+                                      instruction_placement=self.config.instruction_placement)
+                if self.config.instruction_placement == "user_suffix":
+                    # The DeepSeek chat template already emits BOS.
+                    prompt = {"prompt_token_ids": self.tokenizer.encode(prompt, add_special_tokens=False)}
                 tasks.append(
                     SamplingTask(
                         record_index=record_index,
@@ -249,11 +257,7 @@ class VLLMMultipleSampler:
                         problem=variant_data["problem"],
                         ground_truth=ground_truth_for(variant_data),
                         ground_truth_type=ground_truth_type_for(variant_data, variant),
-                        prompt=build_prompt(
-                            self.tokenizer,
-                            variant_data["problem"],
-                            self.config.system_prompt,
-                        ),
+                        prompt=prompt,
                         target=target,
                         resample_invalid=is_sampled,
                         max_attempts=(
@@ -373,7 +377,6 @@ class VLLMMultipleSampler:
                     break
                 for offset in range(0, len(pending), self.config.request_batch_size):
                     batch = pending[offset : offset + self.config.request_batch_size]
-                    prompts: list[str] = []
                     params: list[Any] = []
                     request_details: list[tuple[SamplingTask, int, int, int]] = []
                     for task in batch:
@@ -386,14 +389,13 @@ class VLLMMultipleSampler:
                             task.variant,
                             request_round,
                         )
-                        prompts.append(task.prompt)
                         params.append(self._make_sampling_params(task, draw_count, request_seed))
                         request_details.append(
                             (task, draw_count, request_seed, request_round)
                         )
                         task.request_round += 1
                     request_outputs = self.llm.generate(
-                        prompts,
+                        [task.prompt for task in batch],
                         sampling_params=params,
                         use_tqdm=False,
                     )

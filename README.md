@@ -61,6 +61,10 @@ model and dataset under `common`, with separate output directories and decoding
 settings under `greedy` and `sampling`. To switch models, copy the preset and update
 the model name and both output directories. Explicit CLI options override the preset.
 
+DeepSeekMath-7B-Instruct places the question and then the CoT instruction
+in a single user message. This applies to base greedy inference,
+the Original greedy anchor, and every Simple and Hard sample.
+
 ```bash
 CONFIG=configs/infer_qwen25.yaml
 CUDA_VISIBLE_DEVICES=0 python scripts/inference.py --config "$CONFIG"
@@ -99,18 +103,6 @@ responses on the scoring machine before computing accuracy or running cheap scre
 
 ```bash
 "$SCORE_PYTHON" scripts/score_answers.py "$BASE_RECORDS" "$SAMPLED_RECORDS" --workers 4
-```
-
-For the DeepSeekMath-Instruct prompt-placement control, generate only the
-MATH-Perturb Originals with the CoT instruction appended to the user message.
-Copy the generated directory to the scoring machine and compare it with the
-existing scored DeepSeek greedy run by problem ID.
-
-```bash
-# GPU machine
-python scripts/deepseek_prompt_control.py generate
-# Scoring machine
-"$SCORE_PYTHON" scripts/deepseek_prompt_control.py score
 ```
 
 The scorer uses the problem text and reference saved in each prediction file and

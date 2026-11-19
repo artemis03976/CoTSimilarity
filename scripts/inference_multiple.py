@@ -22,6 +22,7 @@ from inference.common import VARIANTS, read_math_records
 from inference.multiple import MultipleSamplingConfig, VLLMMultipleSampler
 from inference.quality import CoTValidationConfig
 from utils.config import parse_config_args
+from utils.prompts import INSTRUCTION_PLACEMENTS
 
 
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-Math-7B-Instruct"
@@ -63,6 +64,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--system-prompt", default=None)
+    parser.add_argument("--instruction-placement", choices=INSTRUCTION_PLACEMENTS)
     parser.add_argument("--save-token-ids-in-records", action="store_true")
     parser.add_argument(
         "--require-valid-greedy-anchors",
@@ -114,6 +116,7 @@ def main() -> int:
         raise ValueError("No records selected for multi-path inference")
     config_kwargs = {
         "model_name": args.model,
+        "instruction_placement": args.instruction_placement,
         "sampled_variants": tuple(args.sampled_variants),
         "samples_per_problem": args.samples_per_problem,
         "temperature": args.temperature,

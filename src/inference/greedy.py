@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
-from utils.prompts import build_prompt
+from utils.prompts import build_prompt, inference_instruction_placement
 
 from .common import GenerationResult
 
@@ -39,8 +39,11 @@ class GreedyModelConfig:
     max_num_seqs: int = 64
     max_num_batched_tokens: int = 8192
     enable_chunked_prefill: bool = True
+    instruction_placement: str | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "instruction_placement",
+                           inference_instruction_placement(self.model_name, self.instruction_placement))
         if self.baseline not in BASELINES:
             raise ValueError(f"baseline must be one of {BASELINES}, got {self.baseline!r}")
         if self.baseline != "base" and self.checkpoint is None:
@@ -113,20 +116,19 @@ def _finish_reason(token_ids: tuple[int, ...], tokenizer: Any, max_new_tokens: i
 class _TorchGeneratorBase:
     baseline: str
 
-    def __init__(self, tokenizer: Any, device: str, max_new_tokens: int, system_prompt: str | None):
+    def __init__(self, tokenizer: Any, device: str, max_new_tokens: int, system_prompt: str | None,
+                 instruction_placement: str):
         self.tokenizer = tokenizer
         self.device = device
         self.max_new_tokens = max_new_tokens
         self.system_prompt = system_prompt
+        self.instruction_placement = instruction_placement
 
     def _inputs(self, problem: str) -> tuple[Any, Any]:
         import torch
 
-        prompt = (
-            build_prompt(self.tokenizer, problem)
-            if self.system_prompt is None
-            else build_prompt(self.tokenizer, problem, self.system_prompt)
-        )
+        prompt = build_prompt(self.tokenizer, problem, self.system_prompt,
+                              instruction_placement=self.instruction_placement)
         prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
         input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
         return input_ids, torch.ones_like(input_ids)
@@ -173,8 +175,9 @@ class TransformersGreedyGenerator(_TorchGeneratorBase):
         device: str,
         max_new_tokens: int,
         system_prompt: str | None,
+        instruction_placement: str = "system_prefix",
     ) -> None:
-        super().__init__(tokenizer, device, max_new_tokens, system_prompt)
+        super().__init__(tokenizer, device, max_new_tokens, system_prompt, instruction_placement)
         self.model = model
         self.baseline = baseline
 
@@ -195,8 +198,9 @@ class TransformersGreedyGenerator(_TorchGeneratorBase):
 class SPTGreedyGenerator(_TorchGeneratorBase):
     baseline = "spt"
 
-    def __init__(self, model: Any, max_new_tokens: int, system_prompt: str | None) -> None:
-        super().__init__(model.tokenizer, model.config.device, max_new_tokens, system_prompt)
+    def __init__(self, model: Any, max_new_tokens: int, system_prompt: str | None,
+                 instruction_placement: str = "system_prefix") -> None:
+        super().__init__(model.tokenizer, model.config.device, max_new_tokens, system_prompt, instruction_placement)
         self.model = model
 
     def generate(self, problem: str) -> GenerationResult:
@@ -221,8 +225,9 @@ class DSPRGreedyGenerator(_TorchGeneratorBase):
         max_new_tokens: int,
         system_prompt: str | None,
         forced_alpha: float | None,
+        instruction_placement: str = "system_prefix",
     ) -> None:
-        super().__init__(model.tokenizer, model.config.device, max_new_tokens, system_prompt)
+        super().__init__(model.tokenizer, model.config.device, max_new_tokens, system_prompt, instruction_placement)
         self.model = model
         self.forced_alpha = forced_alpha
 
@@ -295,6 +300,7 @@ def load_greedy_generator(
             device=config.device,
             max_new_tokens=config.max_new_tokens,
             system_prompt=config.system_prompt,
+            instruction_placement=config.instruction_placement,
         )
 
     if config.baseline == "dspr":
@@ -323,6 +329,7 @@ def load_greedy_generator(
             config.max_new_tokens,
             config.system_prompt,
             config.forced_alpha,
+            config.instruction_placement,
         )
 
     from spt import SPTConfig, StaticPromptModel
@@ -339,4 +346,4 @@ def load_greedy_generator(
     model.soft_prompt.data.copy_(checkpoint["soft_prompt"])
     model.to(config.device)
     model.eval()
-    return SPTGreedyGenerator(model, config.max_new_tokens, config.system_prompt)
+    return SPTGreedyGenerator(model, config.max_new_tokens, config.system_prompt, config.instruction_placement)

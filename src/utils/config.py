@@ -18,7 +18,7 @@ COMMON_KEYS = {
 }
 GENERATION_COMMON_KEYS = {
     "model_name", "problem_dataset", "seed", "dtype", "max_model_len",
-    "gpu_memory_utilization", "system_prompt",
+    "gpu_memory_utilization", "system_prompt", "instruction_placement",
 }
 
 

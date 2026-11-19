@@ -32,9 +32,8 @@ def run_greedy_evaluation(
     run_metadata: dict[str, Any] | None = None,
     batch_size: int = 128,
     emit_progress_events: bool = False,
-    variants: tuple[str, ...] = VARIANTS,
 ) -> tuple[Path, Path]:
-    """Run exactly one deterministic continuation for every selected triplet variant."""
+    """Run exactly one deterministic continuation for each variant of every triplet."""
 
     if not records:
         raise ValueError("No evaluation records selected")
@@ -45,7 +44,7 @@ def run_greedy_evaluation(
     output_path = output_dir / "all_records.jsonl"
     qc_path = output_dir / "generation_qc.json"
     total_generations = 0
-    target = len(records) * len(variants)
+    target = len(records) * len(VARIANTS)
     valid_generations = 0
     rejection_reasons: Counter[str] = Counter()
     generate_batch = getattr(generator, "generate_batch", None)
@@ -68,7 +67,7 @@ def run_greedy_evaluation(
             {
                 "status": status,
                 "mode": "greedy",
-                "variants": list(variants),
+                "variants": list(VARIANTS),
                 "baseline": generator.baseline,
                 "records": completed_records,
                 "expected_records": len(records),
@@ -109,7 +108,7 @@ def run_greedy_evaluation(
         for record_index, record in enumerate(progress):
             if batched and record_index % effective_batch_size == 0:
                 batch = records[record_index : record_index + effective_batch_size]
-                problems = [record[variant]["problem"] for record in batch for variant in variants]
+                problems = [record[variant]["problem"] for record in batch for variant in VARIANTS]
                 generation_started = perf_counter()
                 batch_results = generate_batch(problems)
                 generation_seconds += perf_counter() - generation_started
@@ -117,13 +116,13 @@ def run_greedy_evaluation(
                     raise RuntimeError("Batched generator did not return one result per prompt")
             problem_id = normalise_problem_id(record.get("problem_id"))
             results: dict[str, Any] = {}
-            for variant_index, variant in enumerate(variants):
+            for variant_index, variant in enumerate(VARIANTS):
                 variant_data = record[variant]
                 problem = variant_data["problem"]
                 ground_truth = ground_truth_for(variant_data)
                 ground_truth_type = ground_truth_type_for(variant_data, variant)
                 if batched:
-                    offset = (record_index % effective_batch_size) * len(variants) + variant_index
+                    offset = (record_index % effective_batch_size) * len(VARIANTS) + variant_index
                     generated = batch_results[offset]
                 else:
                     generation_started = perf_counter()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from importlib.metadata import version
 from typing import Sequence
 
@@ -20,12 +19,10 @@ class VLLMGreedyGenerator:
         config: GreedyModelConfig,
         *,
         problems: Sequence[str] | None = None,
-        prompt_builder: Callable[..., str] = build_prompt,
     ) -> None:
         from transformers import AutoConfig, AutoTokenizer, GenerationConfig
 
         self.config = config
-        self.prompt_builder = prompt_builder
         self.tokenizer = AutoTokenizer.from_pretrained(config.model_name, trust_remote_code=True)
         self._prompt_ids: dict[str, list[int]] = {}
         for problem in problems or ():
@@ -127,11 +124,8 @@ class VLLMGreedyGenerator:
 
     def _encode_problem(self, problem: str) -> list[int]:
         if problem not in self._prompt_ids:
-            prompt = (
-                self.prompt_builder(self.tokenizer, problem)
-                if self.config.system_prompt is None
-                else self.prompt_builder(self.tokenizer, problem, self.config.system_prompt)
-            )
+            prompt = build_prompt(self.tokenizer, problem, self.config.system_prompt,
+                                  instruction_placement=self.config.instruction_placement)
             self._prompt_ids[problem] = self.tokenizer.encode(prompt, add_special_tokens=False)
         return self._prompt_ids[problem]
 
