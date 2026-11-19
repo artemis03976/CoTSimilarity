@@ -18,6 +18,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from inference.alpha_swap import PARTNER, load_native_alphas
 from inference.common import VARIANTS, read_math_records
 from inference.greedy import BACKENDS, BASELINES, GreedyModelConfig, load_greedy_generator
 from inference.quality import CoTValidationConfig
@@ -89,7 +90,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     parser.add_argument("--router-dropout", "--router_dropout", type=float, default=0.05)
     parser.add_argument("--max-seq-length", "--max_seq_length", type=int, default=4096)
-    parser.add_argument("--forced-alpha", type=float, default=None)
+    control = parser.add_mutually_exclusive_group()
+    control.add_argument("--forced-alpha", type=float, default=None)
+    control.add_argument("--swap-alpha-from", help="Learned predictions for this fold with native Simple/Hard alphas")
 
     # Mechanical trajectory validation.  Invalid greedy outputs remain in the
     # evaluation file and count as model outputs; they are never resampled.
@@ -127,6 +130,8 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.swap_alpha_from and args.baseline != "dspr":
+        raise ValueError("--swap-alpha-from requires --baseline dspr")
     if args.baseline == "base" and args.checkpoint is not None:
         raise ValueError("--checkpoint must be omitted for --baseline base")
     if args.baseline != "base" and args.checkpoint is None:
@@ -165,8 +170,14 @@ def main() -> int:
     )
     if not records:
         raise ValueError("No evaluation records selected")
+    swap_alphas = None
+    if args.swap_alpha_from:
+        reference = Path(args.swap_alpha_from).resolve()
+        if reference == (Path(args.output_dir) / "all_records.jsonl").resolve():
+            raise ValueError("Swapped predictions need their own output directory")
+        swap_alphas = load_native_alphas(records, reference)
     print(f"[{args.baseline}] Records ready: {len(records)} problems, "
-          f"{len(records) * len(VARIANTS)} answers", flush=True)
+          f"{len(records) * (len(PARTNER) if swap_alphas is not None else len(VARIANTS))} answers", flush=True)
     checkpoint = Path(args.checkpoint).resolve() if args.checkpoint is not None else None
     model_config = GreedyModelConfig(
         baseline=args.baseline,
@@ -227,6 +238,8 @@ def main() -> int:
         "max_seq_length": args.max_seq_length,
         "forced_alpha": args.forced_alpha,
     }
+    if swap_alphas is not None:
+        run_metadata["swap_alpha_from"] = str(reference)
     try:
         output_path, qc_path = run_greedy_evaluation(
             generator,
@@ -237,6 +250,7 @@ def main() -> int:
             run_metadata=run_metadata,
             batch_size=args.batch_size,
             emit_progress_events=args.emit_progress_events,
+            swap_alphas=swap_alphas,
         )
     finally:
         close = getattr(generator, "close", None)

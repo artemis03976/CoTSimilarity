@@ -12,6 +12,7 @@ from tqdm import tqdm
 from utils.inference_progress import emit_progress
 from utils.scoring import pending_score
 
+from .alpha_swap import PARTNER, check_swapped_pair
 from .common import (
     VARIANTS,
     ground_truth_for,
@@ -19,7 +20,7 @@ from .common import (
     normalise_problem_id,
     write_json,
 )
-from .greedy import GreedyGenerator
+from .greedy import DSPRGreedyGenerator, GreedyGenerator
 from .quality import CoTValidationConfig, validate_cot
 
 
@@ -32,19 +33,23 @@ def run_greedy_evaluation(
     run_metadata: dict[str, Any] | None = None,
     batch_size: int = 128,
     emit_progress_events: bool = False,
+    swap_alphas: dict[int, dict[str, float]] | None = None,
 ) -> tuple[Path, Path]:
-    """Run exactly one deterministic continuation for each variant of every triplet."""
+    """Generate triplets, or just the two intervened-on perturbations for a swap."""
 
     if not records:
         raise ValueError("No evaluation records selected")
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
+    if swap_alphas is not None and not isinstance(generator, DSPRGreedyGenerator):
+        raise ValueError("Swapped routing requires the DSPR generator")
     validation_config = validation_config or CoTValidationConfig()
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "all_records.jsonl"
     qc_path = output_dir / "generation_qc.json"
     total_generations = 0
-    target = len(records) * len(VARIANTS)
+    variants = tuple(PARTNER) if swap_alphas is not None else VARIANTS
+    target = len(records) * len(variants)
     valid_generations = 0
     rejection_reasons: Counter[str] = Counter()
     generate_batch = getattr(generator, "generate_batch", None)
@@ -67,7 +72,7 @@ def run_greedy_evaluation(
             {
                 "status": status,
                 "mode": "greedy",
-                "variants": list(VARIANTS),
+                "variants": list(variants),
                 "baseline": generator.baseline,
                 "records": completed_records,
                 "expected_records": len(records),
@@ -108,7 +113,7 @@ def run_greedy_evaluation(
         for record_index, record in enumerate(progress):
             if batched and record_index % effective_batch_size == 0:
                 batch = records[record_index : record_index + effective_batch_size]
-                problems = [record[variant]["problem"] for record in batch for variant in VARIANTS]
+                problems = [record[variant]["problem"] for record in batch for variant in variants]
                 generation_started = perf_counter()
                 batch_results = generate_batch(problems)
                 generation_seconds += perf_counter() - generation_started
@@ -116,17 +121,20 @@ def run_greedy_evaluation(
                     raise RuntimeError("Batched generator did not return one result per prompt")
             problem_id = normalise_problem_id(record.get("problem_id"))
             results: dict[str, Any] = {}
-            for variant_index, variant in enumerate(VARIANTS):
+            for variant_index, variant in enumerate(variants):
                 variant_data = record[variant]
                 problem = variant_data["problem"]
                 ground_truth = ground_truth_for(variant_data)
                 ground_truth_type = ground_truth_type_for(variant_data, variant)
                 if batched:
-                    offset = (record_index % effective_batch_size) * len(VARIANTS) + variant_index
+                    offset = (record_index % effective_batch_size) * len(variants) + variant_index
                     generated = batch_results[offset]
                 else:
                     generation_started = perf_counter()
-                    generated = generator.generate(problem)
+                    if swap_alphas is None:
+                        generated = generator.generate(problem)
+                    else:
+                        generated = generator.generate(problem, forced_alpha=swap_alphas[problem_id][PARTNER[variant]])
                     generation_seconds += perf_counter() - generation_started
                 generated_tokens += len(generated.token_ids)
                 validation_started = perf_counter()
@@ -157,6 +165,8 @@ def run_greedy_evaluation(
                 }
                 if "alpha" in generated.metadata:
                     result["alpha"] = float(generated.metadata["alpha"])
+                if swap_alphas is not None:
+                    result["native_alpha"] = swap_alphas[problem_id][variant]
                 results[variant] = result
                 if emit_progress_events:
                     emit_progress("generating", completed=total_generations,
@@ -173,6 +183,8 @@ def run_greedy_evaluation(
                 "level": record.get("level"),
                 **results,
             }
+            if swap_alphas is not None:
+                check_swapped_pair(payload, swap_alphas[problem_id])
             handle.write(json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n")
             handle.flush()
             if (record_index + 1) % effective_batch_size == 0 or record_index + 1 == len(records):

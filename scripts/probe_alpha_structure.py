@@ -1,4 +1,4 @@
-"""Measure fixed-alpha OOF trajectories against the same base Original graph."""
+"""Measure held-out fixed or swapped routing against the same base Original graph."""
 import argparse
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -11,6 +11,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from data_analysis.annotation.parsing import validate_dag
 from data_analysis.cot_segmenter import process_record
 from data_analysis.records import iter_samples
+from inference.alpha_swap import check_swapped_pair, native_alphas
+from utils.scoring import require_scored
 from utils.artifacts import response_hash
 from utils.io import read_json, read_jsonl, write_json, write_jsonl
 
@@ -46,33 +48,49 @@ def subset(path, selected):
 
 def prepare(args):
     out = args.output_dir
-    selected = cohort(args.dataset)
-    fixed = [subset(args.fixed_root / run / "oof_all_records.jsonl", selected) for run in RUNS]
+    previous_probe = args.fixed_probe or args.fixed_root / "structure_probe"
+    if args.swapped_root:
+        if out.resolve() == previous_probe.resolve():
+            raise ValueError("Use a separate output directory for the swap probe")
+        selected = {int(pid): source for pid, source in read_json(previous_probe / "cohort.json")["sample"].items()}
+        roots = {"native": args.reference_root, "swapped": args.swapped_root}
+    else:
+        selected = cohort(args.dataset)
+        roots = {alpha: args.fixed_root / run for alpha, run in zip(ALPHAS, RUNS)}
+    predictions = {condition: subset(root / "oof_all_records.jsonl", selected)
+                   for condition, root in roots.items()}
+    first = next(iter(predictions.values()))
     base = subset(args.base_root / "all_records.jsonl", selected)
     base_dags = args.base_root / "dag_analysis/deepseek/analyzed_records.jsonl"
-    originals = subset(base_dags, selected)
+    originals = subset(previous_probe / "anchors.jsonl" if args.swapped_root else base_dags, selected)
     checkpoints = {}
-    for pid in sorted(selected):
-        fold = fixed[0][pid]["outer_fold"]
-        if fold in checkpoints:
-            continue
-        paths = []
-        for alpha, run in zip(ALPHAS, RUNS):
-            status = read_json(args.fixed_root / run / f"fold_{fold}/run_status.json")
-            if status["status"] != "succeeded" or status["forced_alpha"] != alpha:
-                raise ValueError(f"Incorrect fixed-alpha run: {run}/fold_{fold}")
-            paths.append(status["checkpoint"])
-        if len(set(paths)) != 1:
-            raise ValueError(f"Different checkpoints for fold {fold}")
-        learned = read_json(args.reference_root / f"fold_{fold}/run_status.json")
-        if (learned["status"] != "succeeded" or learned.get("forced_alpha") is not None
-                or learned["checkpoint"] != paths[0]):
-            raise ValueError(f"Fixed controls do not match the dynamic reference for fold {fold}")
-        checkpoints[fold] = paths[0]
+    for fold in sorted({row["outer_fold"] for row in first.values()}):
+        status_file = Path(f"fold_{fold}") / "run_status.json"
+        learned = read_json(args.reference_root / status_file)
+        if learned["status"] != "succeeded" or learned.get("forced_alpha") is not None or learned.get("swap_alpha_from"):
+            raise ValueError(f"Expected learned routing for fold {fold}")
+        checkpoints[fold] = learned["checkpoint"]
+        for condition, root in roots.items():
+            status = read_json(root / status_file)
+            if condition == "swapped":
+                matches = (status.get("swap_alpha_from") and
+                           status["checkpoint_selection"]["recorded_checkpoint"] == learned["checkpoint"])
+            else:
+                expected = None if condition == "native" else condition
+                matches = status.get("forced_alpha") == expected and status["checkpoint"] == learned["checkpoint"]
+            if status["status"] != "succeeded" or not matches:
+                raise ValueError(f"Mismatched {condition} checkpoint or control in fold {fold}")
+    if args.swapped_root:
+        native = native_alphas(predictions["swapped"].values(), predictions["native"])
+        for pid, record in predictions["swapped"].items():
+            check_swapped_pair(record, native[pid])
 
     # Only the problem and exact segmented response identify a reusable annotation.
     known = {}
-    for path in [base_dags, args.base_root.parent / "multiple_n16/dag_analysis/deepseek/analyzed_records.jsonl"]:
+    graph_files = [base_dags, args.base_root.parent / "multiple_n16/dag_analysis/deepseek/analyzed_records.jsonl"]
+    if args.swapped_root:
+        graph_files.insert(0, previous_probe / "variant_graphs.jsonl")
+    for path in graph_files:
         if not path.exists():
             continue
         for r in read_jsonl(path):
@@ -93,14 +111,15 @@ def prepare(args):
         validate_dag(anchor["dag_analysis"], anchor["steps"])
         anchors.append({"problem_id":pid, "original":orig})
         row, todo = {"problem_id":pid}, {"problem_id":pid}
-        fold = fixed[0][pid]["outer_fold"]
+        fold = first[pid]["outer_fold"]
         for variant in VARIANTS:
             problem = base[pid][variant]["problem"]
             samples, by_text = [], {}
-            for index, (alpha, run) in enumerate(zip(ALPHAS, fixed)):
+            for index, (condition, run) in enumerate(predictions.items()):
                 entry = run[pid][variant]
                 item, = entry["samples"]
-                if entry["alpha"] != alpha or entry["problem"] != problem or run[pid]["outer_fold"] != fold:
+                alpha = native[pid][variant] if condition == "native" else entry["alpha"]
+                if (not args.swapped_root and alpha != condition) or entry["problem"] != problem or run[pid]["outer_fold"] != fold:
                     raise ValueError(f"Mismatched condition: {pid}/{variant}/{alpha}")
                 response = item["response"]
                 if response not in by_text:
@@ -108,8 +127,10 @@ def prepare(args):
                     by_text[response] = sid
                     samples.append(dict(item, sample_id=sid))
                 conditions.append(dict(problem_id=pid, source=source, fold=fold, variant=variant,
-                    alpha=alpha, sample_id=by_text[response], correct=item["correct"], valid=item["valid"],
+                    alpha=alpha, sample_id=by_text[response], correct=require_scored(item, str(pid)), valid=item["valid"],
                     response_hash=response_hash(response), anchor_hash=response_hash(anchor["response"])))
+                if args.swapped_root:
+                    conditions[-1]["condition"] = condition
             row[variant] = {"problem":problem, "samples":samples}
         process_record(row)
         for key, entry, s in iter_samples([row], VARIANTS):
@@ -125,7 +146,8 @@ def prepare(args):
             pending.append(todo)
     write_json(out / "cohort.json", dict(seed=SEED, allocation="proportional largest remainder by source",
         sample=dict(sorted(selected.items())), checkpoints=checkpoints, annotator=MODEL,
-        ged_revision=REVISION, ged_timeout_seconds=120, primary="normalized GED on complete triples",
+        ged_revision=REVISION, ged_timeout_seconds=120, conditions=list(roots),
+        primary="paired native vs swapped GED" if args.swapped_root else "normalized GED on complete triples",
         tie="equal at pipeline precision (4 decimals)"))
     write_jsonl(out / "conditions.jsonl", conditions)
     write_jsonl(out / "anchors.jsonl", anchors)
@@ -156,7 +178,7 @@ def measure(args):
     subprocess.run([sys.executable, str(ROOT / "scripts/run_ged_analysis.py"),
         "--output-root", str(out), "--original-records", str(out / "anchors.jsonl"),
         "--variant-records", str(out / "variant_graphs.jsonl"), "--correctness-file", str(out / "trajectories.jsonl"),
-        "--all-results-output", str(out / "ged.jsonl"), "--num-samples", "3", "--ged-timeout", "120",
+        "--all-results-output", str(out / "ged.jsonl"), "--num-samples", str(len(read_json(out / "cohort.json").get("conditions", ALPHAS))), "--ged-timeout", "120",
         "--text-similarity-revision", REVISION, "--embedding-device", "cpu", "--workers", str(args.workers),
         "--rebuild-graph-cache"], check=True)
 
@@ -168,9 +190,13 @@ def main():
     parser.add_argument("--base-root", type=Path, default=ROOT / "output/qwen-2.5/base")
     parser.add_argument("--fixed-root", type=Path, default=ROOT / "output/qwen_fixed_alpha_seed42")
     parser.add_argument("--reference-root", type=Path, default=ROOT / "output/qwen_staged_kfold_seed42")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "output/qwen_fixed_alpha_seed42/structure_probe")
+    parser.add_argument("--swapped-root", type=Path, help="Scored swap run; reuse the fixed probe cohort and graphs")
+    parser.add_argument("--fixed-probe", type=Path, help="Original fixed probe directory if stored outside --fixed-root/structure_probe")
+    parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
+    if args.output_dir is None:
+        args.output_dir = (args.swapped_root or args.fixed_root) / "structure_probe"
     if args.stage == "prepare":
         prepare(args)
     elif args.stage == "measure":

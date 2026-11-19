@@ -231,7 +231,7 @@ class DSPRGreedyGenerator(_TorchGeneratorBase):
         self.model = model
         self.forced_alpha = forced_alpha
 
-    def generate(self, problem: str) -> GenerationResult:
+    def generate(self, problem: str, *, forced_alpha: float | None = None) -> GenerationResult:
         import torch
 
         input_ids, attention_mask = self._inputs(problem)
@@ -241,7 +241,7 @@ class DSPRGreedyGenerator(_TorchGeneratorBase):
                 attention_mask=attention_mask,
                 prompt_input_ids=input_ids.clone(),
                 prompt_attention_mask=attention_mask.clone(),
-                forced_alpha=self.forced_alpha,
+                forced_alpha=self.forced_alpha if forced_alpha is None else forced_alpha,
                 **self._prefix_model_generation_kwargs(),
             )
         return self._result(continuation, {"alpha": float(alpha.item())})

@@ -26,7 +26,6 @@ from dspr_training.router_cache import load_or_build_router_context_cache
 from dspr_training.router_trainer import RouterPromptTrainer, compute_router_metrics
 from dspr_training.trainer import DSPRTrainer, compute_dspr_metrics
 from utils.config import parse_config_args, write_resolved_config
-from dspr_dataset.ged_weights import assign_ged_weights, load_ged_scores, resolve_prefix_sampling
 from utils.datasets import TrajectoryDataset, ProblemResampledDataset
 from utils.io import read_json, read_jsonl
 from utils.training import (
@@ -156,8 +155,6 @@ def resolve_data_paths(args: argparse.Namespace) -> dict[str, Path | set[int] | 
         val_ids = val_ids or (fold_dir / 'val_ids.json')
 
     if args.run_stage in ('all', 'prefix'):
-        if args.ged_preference_weight and args.ged_results and not Path(args.ged_results).is_file():
-            raise FileNotFoundError(f'Prefix GED file not found: {args.ged_results}')
         if prefix_train is None or not prefix_train.is_file():
             raise FileNotFoundError(
                 'Prefix training data is required. Set --fold/--kfold-root or '
@@ -348,14 +345,6 @@ def build_prefix_datasets(
     val_dataset = None
     if val_path is not None:
         val_dataset = TrajectoryDataset(val_path, **options)
-    if args.ged_preference_weight:
-        scores = load_ged_scores(args.ged_results) if args.ged_results else None
-        for split, dataset in (('train', train_dataset), ('val', val_dataset)):
-            if dataset is not None:
-                matched = assign_ged_weights(dataset.data, scores)
-                print(f'[prefix] {split} GED coverage: {matched}/{len(dataset.data)} trajectories', flush=True)
-                if split == 'train' and not matched:
-                    raise ValueError('No usable training GED. Supply --ged-results or fold rows with ged_normalized.')
     return train_dataset, val_dataset, resampled, flat_steps
 
 
@@ -416,12 +405,10 @@ def run_prefix_stage(
         eval_dataset=val_dataset,
         data_collator=default_data_collator,
         compute_metrics=compute_dspr_metrics if val_dataset is not None else None,
-        ged_preference_weight=args.ged_preference_weight,
         callbacks=callbacks,
     )
     print(
         f'[{stage_name}] trajectories={len(train_dataset)} sampling={args.prefix_trajectory_sampling} '
-        f'ged_preference_weight={args.ged_preference_weight:g} '
         f'lr={args.prefix_learning_rate:g} weight_decay={args.prefix_weight_decay:g}',
         flush=True,
     )
@@ -484,8 +471,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument('--router-checkpoint', '--router_checkpoint', default=None)
     parser.add_argument('--output-path', '--output_path', default=None)
-    parser.add_argument('--ged-preference-weight', type=float, default=0.0)
-    parser.add_argument('--ged-results', help='Normalized trajectory GED JSONL for folds without embedded scores')
     parser.add_argument('--router-learning-rate', '--router_learning_rate', type=float, default=1e-5)
     parser.add_argument('--prefix-learning-rate', '--prefix_learning_rate', type=float, default=4e-5)
     parser.add_argument('--router-weight-decay', '--router_weight_decay', type=float, default=1e-3)
@@ -508,7 +493,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--early-stopping-threshold', '--early_stopping_threshold', type=float, default=0.0)
     parser.add_argument('--router-early-stopping-patience', '--router_early_stopping_patience', type=int, default=3)
     parser.add_argument('--prefix-early-stopping-patience', '--prefix_early_stopping_patience', type=int, default=3)
-    parser.add_argument('--prefix-trajectory-sampling', '--prefix_trajectory_sampling', choices=('flat', 'random_one'))
+    parser.add_argument('--prefix-trajectory-sampling', '--prefix_trajectory_sampling', choices=('flat', 'random_one'), default='flat')
     parser.add_argument('--gradient-checkpointing', '--gradient_checkpointing', action=argparse.BooleanOptionalAction, default=defaults.gradient_checkpointing)
     return parse_config_args(parser, method='dspr', section='training', aliases={
         'fold_root': 'kfold_root', 'checkpoint_root': 'output_path',
@@ -517,9 +502,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    resolve_prefix_sampling(args)
     if args.output_path is None:
-        args.output_path = 'checkpoints/staged_dspr_ged' if args.ged_preference_weight else 'checkpoints/staged_dspr'
+        args.output_path = 'checkpoints/staged_dspr'
     if args.router_learning_rate <= 0 or args.prefix_learning_rate <= 0:
         raise ValueError('All learning rates must be positive')
     if args.router_weight_decay < 0 or args.prefix_weight_decay < 0:

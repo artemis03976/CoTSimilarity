@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
+from inference.alpha_swap import PARTNER, check_swapped_pair, load_native_alphas
+from utils.artifacts import fingerprint
 from utils.config import parse_config_args, write_resolved_config
 from utils.io import read_json, read_records as read_jsonl, write_json
 from utils.inference_progress import parse_progress
@@ -76,6 +78,12 @@ class FoldSpec:
     total_generations: int = 0
     method: str = "dspr"
     forced_alpha: float | None = None
+    swap_alpha_from: str | None = None
+    reference_alphas_sha256: str | None = None
+
+    @property
+    def variants(self):
+        return tuple(PARTNER) if self.swap_alpha_from else VARIANTS
 
 
 def run_fold(
@@ -94,7 +102,7 @@ def run_fold(
     with state_lock:
         spec.status = "running"
         spec.stage = "starting"
-        spec.total_generations = len(spec.expected_problem_ids) * len(VARIANTS)
+        spec.total_generations = len(spec.expected_problem_ids) * len(spec.variants)
         spec.started_at = utc_now()
         write_json(output_dir / "run_status.json", asdict(spec))
 
@@ -211,9 +219,18 @@ def validate_generated_output(spec: FoldSpec, expected_samples: int) -> dict[str
         extra = sorted(set(ids) - set(spec.expected_problem_ids))
         raise ValueError(f"Fold {spec.fold} output ID mismatch: missing={missing}, extra={extra}")
 
+    native = None
+    if spec.swap_alpha_from:
+        native = load_native_alphas(records, Path(spec.swap_alpha_from))
+        if fingerprint(native) != spec.reference_alphas_sha256:
+            raise ValueError("Learned routing values changed since this fold was prepared")
     for record in records:
         pid = normalise_id(record.get("problem_id"))
-        for variant in VARIANTS:
+        if native is not None:
+            if "original" in record:
+                raise ValueError("Unexpected Original prediction in swapped routing output")
+            check_swapped_pair(record, native[pid])
+        for variant in spec.variants:
             variant_data = record.get(variant)
             if not isinstance(variant_data, dict):
                 raise ValueError(f"Problem {pid} lacks {variant} result")
@@ -247,7 +264,7 @@ def validate_generated_output(spec: FoldSpec, expected_samples: int) -> dict[str
                         raise ValueError(
                             f"Problem {pid} {variant} alpha={numeric}; expected fixed alpha={spec.forced_alpha}"
                         )
-    return {"records": len(records), "variants": len(records) * len(VARIANTS)}
+    return {"records": len(records), "variants": len(records) * len(spec.variants)}
 
 
 def checkpoint_artifact(directory: Path, method: str) -> Path | None:
@@ -386,7 +403,8 @@ def resolve_reference_fold(
     if not isinstance(command, list) or len(command) < 3 or not all(isinstance(x, str) for x in command):
         raise ValueError(f"Reference fold has no inference command: {status_path}")
     options = {token.split("=", 1)[0].replace("_", "-") for token in command[2:] if token.startswith("--")}
-    if status.get("forced_alpha") is not None or "--forced-alpha" in options:
+    if (status.get("forced_alpha") is not None or status.get("swap_alpha_from")
+            or options.intersection({"--forced-alpha", "--swap-alpha-from"})):
         raise ValueError(f"Reference must use the learned router: {status_path}")
     if command_option(command, "--baseline") != "dspr":
         raise ValueError(f"Reference is not a DSPR inference run: {status_path}")
@@ -439,9 +457,13 @@ def replay_reference_command(
         index += 1
     command.extend([
         "--checkpoint", spec.checkpoint, "--data-path", spec.data_path,
-        "--output-dir", spec.output_dir, "--forced-alpha", str(spec.forced_alpha),
-        "--emit-progress-events",
+        "--output-dir", spec.output_dir,
     ])
+    if spec.swap_alpha_from:
+        command.extend(["--swap-alpha-from", spec.swap_alpha_from])
+    else:
+        command.extend(["--forced-alpha", str(spec.forced_alpha)])
+    command.append("--emit-progress-events")
     if problem_id is not None:
         command.extend(["--problem-id", str(problem_id)])
     return command
@@ -455,6 +477,7 @@ def resume_completed_fold(spec: FoldSpec, expected_samples: int) -> bool:
     saved = read_json(status_path)
     if (saved.get("command") != spec.command
             or saved.get("expected_problem_ids") != spec.expected_problem_ids
+            or saved.get("reference_alphas_sha256") != spec.reference_alphas_sha256
             or saved.get("forced_alpha") != spec.forced_alpha):
         raise ValueError(f"Resume settings differ from the saved run: {status_path}")
     if saved.get("status") != "succeeded":
@@ -497,10 +520,12 @@ def parse_args(method: str = "dspr", argv: list[str] | None = None) -> argparse.
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--prefix-length", type=int, default=15 if method == "dspr" else None)
     if method == "dspr":
-        parser.add_argument("--forced-alpha", type=float, default=None)
+        control = parser.add_mutually_exclusive_group()
+        control.add_argument("--forced-alpha", type=float, default=None)
+        control.add_argument("--swap-alpha", action="store_true", help="Exchange the recorded Simple/Hard alphas within each held-out group")
         parser.add_argument(
             "--reference-run-root", default=None,
-            help="For fixed-alpha runs, replay each learned fold's checkpoint and inference arguments; "
+            help="For routing controls, replay each learned fold's checkpoint and inference arguments; "
                  "recorded model/generation settings take precedence over CLI defaults",
         )
         parser.add_argument("--context-layer-idx", type=int, default=15)
@@ -518,9 +543,12 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
     if forced_alpha is not None and (not math.isfinite(forced_alpha) or not 0.0 <= forced_alpha <= 1.0):
         raise ValueError("--forced-alpha must be finite and in [0, 1]")
     reference_root = getattr(args, "reference_run_root", None)
+    swap = getattr(args, "swap_alpha", False)
+    if swap and (not reference_root or forced_alpha is not None):
+        raise ValueError("--swap-alpha requires --reference-run-root and excludes --forced-alpha")
     if reference_root is not None:
-        if forced_alpha is None:
-            raise ValueError("--reference-run-root requires --forced-alpha")
+        if forced_alpha is None and not swap:
+            raise ValueError("--reference-run-root requires --forced-alpha or --swap-alpha")
         reference_root = resolve_path(reference_root).resolve()
     if args.temperature != 0.0 or args.top_p != 1.0 or args.samples_per_problem != 1:
         raise ValueError(
@@ -530,6 +558,8 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
     if args.problem_id is not None and len(folds) != 1:
         raise ValueError("--problem-id requires exactly one selected fold")
     print(f"{method.upper()} held-out evaluation: folds={folds}; forced_alpha={forced_alpha}", flush=True)
+    if swap:
+        print("Swapping the recorded Simple and Hard alphas within each problem group.", flush=True)
     if reference_root is not None:
         print(f"Reusing checkpoints and inference settings from: {reference_root}", flush=True)
     print("Resolving GPUs and checkpoints...", flush=True)
@@ -539,7 +569,7 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
     id_root = resolve_path(args.id_root).resolve()
     output_root = resolve_path(args.output_root).resolve()
     if reference_root is not None and output_root == reference_root:
-        raise ValueError("Fixed-alpha output must be separate from the learned reference run")
+        raise ValueError("Routing control output must be separate from the learned reference run")
     inference_script = resolve_path(args.inference_script).resolve()
     if not inference_script.is_file():
         raise FileNotFoundError(f"Inference entrypoint not found: {inference_script}")
@@ -565,7 +595,8 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
         data_path = test_root / f"fold_{fold}" / "test.jsonl"
         if not data_path.is_file():
             raise FileNotFoundError(f"Missing Fold {fold} test data: {data_path}")
-        raw_ids = [normalise_id(record.get("problem_id")) for record in read_jsonl(data_path)]
+        raw = read_jsonl(data_path)
+        raw_ids = [normalise_id(record.get("problem_id")) for record in raw]
         if len(raw_ids) != len(set(raw_ids)) or set(raw_ids) != set(all_expected_ids):
             raise ValueError(f"Fold {fold} raw test IDs differ from test_ids.json")
         output_dir = output_root / f"fold_{fold}"
@@ -577,6 +608,13 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
             output_dir=str(output_dir.resolve()), log_path=str((output_dir / "inference.log").resolve()),
             command=[], method=method, forced_alpha=forced_alpha,
         )
+        if swap:
+            path = reference_root / f"fold_{fold}" / "all_records.jsonl"
+            targets = raw if args.problem_id is None else [
+                row for row in raw if normalise_id(row["problem_id"]) == args.problem_id
+            ]
+            spec.swap_alpha_from = str(path)
+            spec.reference_alphas_sha256 = fingerprint(load_native_alphas(targets, path, all_expected_ids))
         if reference_command is not None:
             spec.command = replay_reference_command(reference_command, inference_script, spec, args.problem_id)
         else:
@@ -603,7 +641,7 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
         # Do not record unused CLI model/generation defaults as effective settings.
         manifest["settings"] = {key: value for key, value in vars(args).items() if key in {
             "checkpoint_root", "test_root", "id_root", "output_root", "inference_script", "folds", "gpus",
-            "problem_id", "allow_existing", "resume", "dry_run", "forced_alpha", "reference_run_root",
+            "problem_id", "allow_existing", "resume", "dry_run", "forced_alpha", "swap_alpha", "reference_run_root",
         }}
     if args.dry_run:
         print("Dry run: no inference processes started.")

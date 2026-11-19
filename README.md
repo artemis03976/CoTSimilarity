@@ -41,7 +41,7 @@ For K-fold aggregation, also copy the fold ID files and problem dataset; checkpo
 are not needed. Set the path variables below to their locations on that machine.
 
 Training, held-out inference, and aggregation accept `--config FILE.yaml`.
-Presets are `configs/dspr.yaml`, `configs/dspr_ged.yaml`, `configs/spt.yaml`, and
+Presets are `configs/dspr.yaml`, `configs/spt.yaml`, and
 `configs/lora.yaml`. Copy a preset for each run and edit its `common`, `training`,
 `inference`, and `aggregation` sections. `common` holds shared model, path, and fold
 settings; each entrypoint reads its own section. Explicit CLI options override YAML.
@@ -299,33 +299,10 @@ are errors; router IDs are never inferred from the filtered prefix trajectories.
 An incompatible context cache is also an error: choose a new cache path when
 changing its dataset, model, or context layer.
 
-For GED-weighted endpoint preference training, use the dedicated preset. Each sampling
-epoch draws one trajectory per problem and variant. Its LM loss uses the frozen
-router mixture. The auxiliary loss scores the same answer at both endpoints.
-Supply the trajectory GED JSONL through `training.ged_results` or `--ged-results`.
-
-```bash
-python scripts/run_pipeline.py dspr --config configs/dspr_ged.yaml \
-  --model-name "$MODEL_NAME" --problem-dataset "$PROBLEM_DATASET" \
-  --fold-root "$KFOLD_ROOT" --gpus "$GPUS" --ged-results "$GED_RECORDS" \
-  --checkpoint-root "$WORK_DIR/models/dspr-ged" \
-  --result-root "$WORK_DIR/predictions/dspr-ged"
-```
-
 To reuse saved fold routers, add `--router-checkpoint-root "$ROUTER_CHECKPOINT_ROOT"`.
 Each source fold must contain `fold_N/router/router_trainable.pt` and match the model,
 router architecture and fold assignment. The prefix stage starts with fresh prefixes.
-`--folds 0 --train-only` runs the first fold. For single-stage training, use
-`scripts/train.py dspr --config configs/dspr_ged.yaml --fold 0 --run-stage prefix
---router-checkpoint "$ROUTER_CHECKPOINT" --output-path "$WORK_DIR/models/dspr-ged/fold_0"`.
-
-Within each split and prompt, usable normalized GED scores receive ascending mean
-ranks for ties. With rank `k` among `n` trajectories, Hard uses `k/(n+1)` and Simple
-uses `1-k/(n+1)`. Missing GED gives zero auxiliary weight. The preset uses
-`ged_preference_weight: 0.1` and an effective batch of 16. Sampling preserves the
-optimizer-step budget computed from the full trajectory count. Validation reports
-the fraction of scored Simple and Hard trajectories favoring their intended endpoint
-and selects checkpoints by routed LM loss.
+`--folds 0 --train-only` runs the first fold.
 
 ## 7. SPT and LoRA Pipelines
 
@@ -441,6 +418,57 @@ python scripts/run_dag_analysis.py --input "$PROBE_DIR/pending.jsonl" \
 python scripts/probe_alpha_structure.py measure --output-dir "$PROBE_DIR"
 python scripts/probe_alpha_structure.py report --output-dir "$PROBE_DIR"
 ```
+
+### Within-group alpha swap
+
+Use the original staged DSPR folds. For each held-out group, replay its learned
+Hard alpha on Simple and its learned Simple alpha on Hard. This produces two
+new greedy answers per group and keeps reversed and tied pairs in the cohort.
+Each variant records its native alpha and the alpha actually used for generation.
+
+```bash
+SWAP_DIR="$WORK_DIR/predictions/alpha-swap"
+python scripts/evaluate.py dspr run --swap-alpha \
+  --reference-run-root "$LEARNED_RUN_DIR" --checkpoint-root "$CHECKPOINT_DIR" \
+  --test-root "$KFOLD_ROOT" --id-root "$KFOLD_ROOT" \
+  --output-root "$SWAP_DIR" --gpus "$GPUS" --resume
+```
+
+On the scoring machine, point `LEARNED_RUN_DIR` at the matching scored native
+folds. The paired report gives native-only and swapped-only correct counts,
+native minus swapped accuracy, and paired intervals for Simple and Hard.
+
+```bash
+"$SCORE_PYTHON" scripts/score_answers.py "$SWAP_DIR"
+"$SCORE_PYTHON" scripts/evaluate.py dspr aggregate --result-root "$SWAP_DIR" \
+  --reference-run-root "$LEARNED_RUN_DIR" --id-root "$KFOLD_ROOT"
+```
+
+For structure, reuse the Original anchors and the cohort saved in the fixed
+probe above. Annotate the missing trajectories listed in `pending.jsonl` when
+that file is nonempty, then compute and summarize paired distances.
+
+```bash
+SWAP_PROBE="$SWAP_DIR/structure_probe"
+python scripts/probe_alpha_structure.py prepare --swapped-root "$SWAP_DIR" \
+  --reference-root "$LEARNED_RUN_DIR" --fixed-probe "$PROBE_DIR" \
+  --base-root "$WORK_DIR/base" --output-dir "$SWAP_PROBE"
+if [ -s "$SWAP_PROBE/pending.jsonl" ]; then
+  python scripts/run_dag_analysis.py --input "$SWAP_PROBE/pending.jsonl" \
+    --output-dir "$SWAP_PROBE/annotation" --annotator volcengine --variants simple hard
+fi
+python scripts/probe_alpha_structure.py measure --output-dir "$SWAP_PROBE"
+python scripts/probe_alpha_structure.py report --output-dir "$SWAP_PROBE"
+```
+
+`paired_ged.csv` records the answer flips and both distances for each variant.
+A positive `type_aligned_ged_change` means that native routing produced a closer
+Simple graph or a more distant Hard graph. In `swap_summary.json`, `up`, `down`
+and `tie` describe the sign of the learned Hard alpha minus the learned Simple
+alpha. Accuracy counts include variants whose graph distance could not be computed.
+For groups with all four distances, the report also compares the Hard-minus-Simple
+GED gap under native and swapped routing. A positive difference means native
+routing separated Hard from Simple more strongly in the expected direction.
 
 For a smoke run, add `--folds 0 --problem-id "$PROBLEM_ID"` to inference and choose a separate run directory. Such a partial run is not a complete fold for aggregation.
 

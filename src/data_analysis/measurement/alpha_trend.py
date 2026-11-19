@@ -1,4 +1,4 @@
-"""Paired three-point structural probe; the problem group is the bootstrap unit."""
+"""Paired fixed-alpha and swapped-alpha probes with problem-group bootstrap intervals."""
 from collections import Counter, defaultdict
 import csv
 from pathlib import Path
@@ -44,6 +44,70 @@ def summarize(rows, field="ged_normalized"):
     return result
 
 
+def group_mean_interval(values):
+    # Each value is one independent held-out problem group.
+    rng = np.random.default_rng(42)
+    draws = rng.choice(values, (10000, len(values)), replace=True).mean(axis=1)
+    return float(np.mean(values)), np.quantile(draws, [.025, .975]).tolist()
+
+
+def report_swap(out, by_question):
+    rows = []
+    aligned_by_group = defaultdict(dict)
+    for (pid, variant), pair in sorted(by_question.items()):
+        conditions = {x["condition"]: x for x in pair}
+        if (len(pair) != 2 or set(conditions) != {"native", "swapped"}
+                or len({x["anchor_hash"] for x in pair}) != 1):
+            raise ValueError(f"Missing paired swap condition or mismatched anchor: {pid}/{variant}")
+        native, swapped = conditions["native"], conditions["swapped"]
+        sign = 1 if variant == "hard" else -1
+        alpha_difference = native["alpha"] - swapped["alpha"]
+        row = dict(problem_id=pid, fold=native["fold"], variant=variant,
+                   alpha_order=direction(sign * alpha_difference),
+                   correctness_change=int(native["correct"]) - int(swapped["correct"]))
+        for name, result in conditions.items():
+            for field in ("alpha", "correct", "status", "ged_normalized", "sample_id", "response_hash"):
+                row[f"{name}_{field}"] = result[field]
+        complete = native["status"] == swapped["status"] == "ok"
+        delta = native["ged_normalized"] - swapped["ged_normalized"] if complete else None
+        # Positive alignment means closer for Simple or farther for Hard with native routing.
+        row["native_minus_swapped_ged"] = delta
+        row["type_aligned_ged_change"] = sign * delta if complete else None
+        row["higher_alpha_minus_lower_ged"] = None
+        if complete:
+            aligned_by_group[pid][variant] = sign * delta
+            if alpha_difference:
+                row["higher_alpha_minus_lower_ged"] = delta if alpha_difference > 0 else -delta
+        rows.append(row)
+    with atomic_text(out / "paired_ged.csv") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    summary = {}
+    for variant in ("simple", "hard"):
+        for order in ("all", "up", "down", "tie"):
+            selected = [r for r in rows if r["variant"] == variant and (order == "all" or r["alpha_order"] == order)]
+            if not selected:
+                continue
+            aligned = [r["type_aligned_ged_change"] for r in selected if r["type_aligned_ged_change"] is not None]
+            result = dict(planned=len(selected), complete=len(aligned),
+                          native_only=sum(r["correctness_change"] == 1 for r in selected),
+                          swapped_only=sum(r["correctness_change"] == -1 for r in selected),
+                          ged_directions=dict(Counter(map(direction, aligned))))
+            if aligned:
+                result["mean_aligned_ged"], result["ci95"] = group_mean_interval(aligned)
+            summary[f"{variant}/{order}"] = result
+    # (Hard - Simple) under native routing minus (Hard - Simple) after the swap.
+    gaps = [round(pair["hard"] + pair["simple"], 4) for pair in aligned_by_group.values() if len(pair) == 2]
+    gap_result = {"planned": len({r["problem_id"] for r in rows}), "complete": len(gaps)}
+    if gaps:
+        gap_result["mean"], gap_result["ci95"] = group_mean_interval(gaps)
+        gap_result["directions"] = dict(Counter(map(direction, gaps)))
+    summary["native_minus_swapped_hard_simple_gap"] = gap_result
+    write_json(out / "swap_summary.json", summary)
+    print(f"Swapped routing: {len(rows)} paired variants. Results: {out / 'paired_ged.csv'}")
+
+
 def report(out: Path):
     good = {r["sample_id"]:r for r in read_jsonl(out/"ged.jsonl")}
     failures = {r["sample_id"]:r for r in read_jsonl(out/"ged.failures.jsonl")}
@@ -62,6 +126,9 @@ def report(out: Path):
             x.update(status=failures[sid]["status"], ged_normalized=None, ged=None)
         counts[x["status"]] += 1
         by_question[x["problem_id"],x["variant"]].append(x)
+    if read_json(out / "cohort.json").get("conditions") == ["native", "swapped"]:
+        report_swap(out, by_question)
+        return
     rows = []
     for conditions in by_question.values():
         triple = sorted(conditions, key=lambda x:x["alpha"])

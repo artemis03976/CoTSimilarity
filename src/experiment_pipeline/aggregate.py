@@ -9,12 +9,14 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from inference.alpha_swap import PARTNER, check_swapped_pair, native_alphas
+from utils.artifacts import fingerprint
 from utils.config import parse_config_args
 from utils.io import read_json, read_records as read_jsonl, write_json, write_jsonl
 
 from .metrics import (
     alpha_summary, build_metrics, compare_records, comparison_fields,
-    extract_alpha_values, extract_flags,
+    extract_alpha_values, extract_flags, first_outcome, paired_comparison,
 )
 from .common import (
     DEFAULT_FOLDS, DEFAULT_RESULT_ROOTS, VARIANTS, held_out_id_path, normalise_id,
@@ -38,6 +40,7 @@ def validate_records(
     source: str,
     expected_samples: int | None,
     require_alpha: bool,
+    variants=VARIANTS,
 ) -> None:
     actual_ids = set(records)
     if actual_ids != expected_ids:
@@ -45,7 +48,7 @@ def validate_records(
         extra = sorted(actual_ids - expected_ids)
         raise ValueError(f"{source}: ID mismatch; missing={missing}, extra={extra}")
     for pid, record in records.items():
-        for variant in VARIANTS:
+        for variant in variants:
             flags = extract_flags(record, variant, source)
             if expected_samples is not None and len(flags) != expected_samples:
                 raise ValueError(
@@ -175,6 +178,70 @@ def write_alpha_csv(path: Path, summaries: dict[str, dict[str, Any]]) -> None:
             writer.writerow({"variant": variant, **summary})
 
 
+def aggregate_swap(args, result_root, fold_ids, eligible):
+    """Report native minus swapped first-answer accuracy on the two perturbations."""
+    reference_root = resolve_path(args.reference_run_root).resolve()
+    if reference_root == result_root.resolve() or args.base:
+        raise ValueError("Use separate swapped and learned run roots; the comparator is the learned run")
+    learned, swapped = {}, {}
+    for fold, ids in fold_ids.items():
+        folder = f"fold_{fold}"
+        status = read_json(result_root / folder / "run_status.json")
+        source_status = read_json(reference_root / folder / "run_status.json")
+        if (not status.get("swap_alpha_from") or status.get("status") != "succeeded"
+                or source_status.get("status") != "succeeded" or source_status.get("swap_alpha_from")
+                or source_status.get("forced_alpha") is not None
+                or status["checkpoint_selection"]["recorded_checkpoint"] != source_status["checkpoint"]):
+            raise ValueError(f"Fold {fold}: expected a successful swap and its original learned checkpoint")
+        source = reference_root / folder / "all_records.jsonl"
+        path = result_root / folder / "all_records.jsonl"
+        normal = load_id_map(read_jsonl(source), source)
+        control = load_id_map(read_jsonl(path), path)
+        validate_records(normal, ids, str(source), 1, True)
+        validate_records(control, ids, str(path), 1, True, variants=PARTNER)
+        native = native_alphas(control.values(), normal)
+        if fingerprint(native) != status["reference_alphas_sha256"]:
+            raise ValueError(f"Fold {fold}: learned routing differs from the recorded intervention")
+        for pid, record in control.items():
+            check_swapped_pair(record, native[pid])
+            swapped[pid] = {**record, "outer_fold": fold}
+        learned.update(normal)
+
+    all_ids = set(swapped)
+    rows = []
+    for variant in PARTNER:
+        for scope, ids in (("full", all_ids), ("eligible", eligible[variant]),
+                           ("noneligible", all_ids - eligible[variant])):
+            if not ids:
+                continue
+            pair = paired_comparison(
+                ids, lambda pid: first_outcome(learned, pid, variant),
+                lambda pid: first_outcome(swapped, pid, variant),
+                args.bootstrap_samples, args.bootstrap_seed, f"swap/{scope}/{variant}",
+            )
+            low, high = pair["paired_bootstrap_95_ci"]
+            rows.append(dict(scope=scope, variant=variant, total=pair["total"],
+                             native_correct=pair["method_correct"], swapped_correct=pair["comparator_correct"],
+                             native_accuracy=pair["method_accuracy"], swapped_accuracy=pair["comparator_accuracy"],
+                             native_only=pair["method_only_correct"], swapped_only=pair["comparator_only_correct"],
+                             native_minus_swapped=pair["delta"], ci95_low=low, ci95_high=high,
+                             mcnemar_exact_p=pair["mcnemar_exact_p"]))
+    write_jsonl(result_root / "oof_all_records.jsonl", (swapped[i] for i in sorted(swapped)))
+    write_json(result_root / "oof_metrics.json", dict(
+        reference_run_root=str(reference_root), selected_folds=sorted(fold_ids),
+        problem_groups=len(swapped), bootstrap_samples=args.bootstrap_samples,
+        bootstrap_seed=args.bootstrap_seed, comparisons=rows,
+    ))
+    with (result_root / "oof_metrics.csv").open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    for row in rows:
+        print(f"{row['scope']} {row['variant']}: native {row['native_correct']}/{row['total']}, "
+              f"swapped {row['swapped_correct']}/{row['total']}, delta {row['native_minus_swapped']:+.2%}")
+    return 0
+
+
 def parse_args(method: str, argv: list[str] | None = None) -> argparse.Namespace:
     if method not in DEFAULT_RESULT_ROOTS:
         raise ValueError(f"Unsupported aggregation method: {method}")
@@ -182,6 +249,8 @@ def parse_args(method: str, argv: list[str] | None = None) -> argparse.Namespace
     parser.add_argument("--result-root", default=DEFAULT_RESULT_ROOTS[method])
     parser.add_argument("--id-root", default="output/qwen-2.5/kfold")
     parser.add_argument("--raw-data", default="data/canonical_math_paired.jsonl")
+    if method == "dspr":
+        parser.add_argument("--reference-run-root", help="Compare scored swapped folds to their learned DSPR folds")
     parser.add_argument(
         "--baseline", "--base", dest="base",
         default=None if method == "dspr" else "output/qwen-2.5/base/all_records.jsonl",
@@ -224,16 +293,18 @@ def main(method: str = "dspr", argv: list[str] | None = None) -> int:
     print(f"{method.upper()} aggregation: folds={folds}; results={result_root}", flush=True)
     print("Checking held-out IDs and reference dataset...", flush=True)
     fold_ids, eligible = load_fold_expectations(id_root, folds)
-    raw_records = load_id_map(read_jsonl(raw_path), raw_path)
     all_ids = set().union(*fold_ids.values())
     if args.expected_problems is not None and len(all_ids) != args.expected_problems:
         raise ValueError(f"Selected OOF problem count is {len(all_ids)}; expected {args.expected_problems}")
-    missing = all_ids - set(raw_records)
-    if missing:
-        raise ValueError(f"Fold held-out IDs are absent from raw data: {sorted(missing)}")
     expected_eligible, eligible_count_sources = resolve_eligible_count_expectations(
         eligible, {"simple": args.expected_simple_eligible, "hard": args.expected_hard_eligible},
     )
+    if getattr(args, "reference_run_root", None):
+        return aggregate_swap(args, result_root, fold_ids, eligible)
+    raw_records = load_id_map(read_jsonl(raw_path), raw_path)
+    missing = all_ids - set(raw_records)
+    if missing:
+        raise ValueError(f"Fold held-out IDs are absent from raw data: {sorted(missing)}")
 
     merged: dict[int, dict[str, Any]] = {}
     fold_counts: dict[str, int] = {}

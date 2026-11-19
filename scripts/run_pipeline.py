@@ -26,13 +26,12 @@ def main():
     parser.add_argument("--seed", type=int, help="Override the training seed")
     for name in ("model-name", "fold-root", "checkpoint-root", "result-root", "problem-dataset"):
         parser.add_argument(f"--{name}")
-    parser.add_argument("--ged-results")
     parser.add_argument("--router-checkpoint-root")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-existing", action="store_true")
     args = parser.parse_args()
-    if args.method != "dspr" and (args.ged_results or args.router_checkpoint_root):
-        parser.error("GED supervision and saved routers apply only to DSPR")
+    if args.method != "dspr" and args.router_checkpoint_root:
+        parser.error("Saved routers apply only to DSPR")
     config_path = Path(args.config or ROOT / "configs" / f"{args.method}.yaml").resolve()
     config = load_experiment(config_path, args.method)
     common = config.get("common", {})
@@ -53,9 +52,8 @@ def main():
         train += ["--seed", str(args.seed)]
     if args.method == "dspr":
         train += ["--problem-dataset", paths["problem_dataset"]]
-        for name in ("ged_results", "router_checkpoint_root"):
-            if getattr(args, name):
-                train += ["--" + name.replace("_", "-"), getattr(args, name)]
+        if args.router_checkpoint_root:
+            train += ["--router-checkpoint-root", args.router_checkpoint_root]
     infer = [sys.executable, "scripts/evaluate.py", args.method, "run", *shared,
              "--checkpoint-root", paths["checkpoint_root"], "--output-root", paths["result_root"],
              "--test-root", paths["fold_root"], "--id-root", paths["fold_root"]]
