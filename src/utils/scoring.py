@@ -135,6 +135,10 @@ def score_file(path: Path, evaluator: dict[str, Any], workers: int) -> dict[str,
     qc = json.loads(qc_path.read_text(encoding="utf-8")) if qc_path.exists() else {}
     if qc.get("status") == "running":
         raise ValueError(f"Generation is still running: {qc_path}")
+    variants = tuple(qc.get("variants", VARIANTS))
+    selected = set(variants)
+    if not selected or selected.difference(VARIANTS) or len(selected) != len(variants):
+        raise ValueError(f"Invalid scored variant selection in {qc_path}: {variants}")
     tasks, samples = [], []
     seen = set()
     for record in records:
@@ -142,7 +146,9 @@ def score_file(path: Path, evaluator: dict[str, Any], workers: int) -> dict[str,
         if pid in seen:
             raise ValueError(f"{path}: duplicate problem_id={pid}")
         seen.add(pid)
-        for variant in VARIANTS:
+        if selected != set(record).intersection(VARIANTS):
+            raise ValueError(f"{path}: problem {pid} variants differ from the run selection {variants}")
+        for variant in variants:
             data = record.get(variant)
             context = f"{path}: problem {pid}/{variant}"
             if not isinstance(data, dict) or not isinstance(data.get("samples"), list):
@@ -175,9 +181,10 @@ def score_file(path: Path, evaluator: dict[str, Any], workers: int) -> dict[str,
         "records": len(records), "scored_generations": len(samples), "pending_generations": 0,
         "correct_generations": sum(sample["correct"] for sample in samples),
         "ungraded_generations": sum(sample["answer_evaluation_status"] == "unsupported_reference" for sample in samples),
-        "fully_correct_triplets": sum(
-            all(any(s["correct"] for s in record[variant]["samples"]) for variant in VARIANTS)
-            for record in records
+        "fully_correct_triplets": (
+            sum(all(any(s["correct"] for s in record[v]["samples"]) for v in VARIANTS)
+                for record in records)
+            if len(variants) == len(VARIANTS) else None
         ),
     }
     if hashlib.sha256(path.read_bytes()).hexdigest() != source_hash:

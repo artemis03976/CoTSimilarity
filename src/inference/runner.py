@@ -32,6 +32,7 @@ def run_greedy_evaluation(
     run_metadata: dict[str, Any] | None = None,
     batch_size: int = 128,
     emit_progress_events: bool = False,
+    variants: tuple[str, ...] = VARIANTS,
 ) -> tuple[Path, Path]:
     """Run exactly one deterministic continuation for every selected triplet variant."""
 
@@ -44,6 +45,7 @@ def run_greedy_evaluation(
     output_path = output_dir / "all_records.jsonl"
     qc_path = output_dir / "generation_qc.json"
     total_generations = 0
+    target = len(records) * len(variants)
     valid_generations = 0
     rejection_reasons: Counter[str] = Counter()
     generate_batch = getattr(generator, "generate_batch", None)
@@ -66,6 +68,7 @@ def run_greedy_evaluation(
             {
                 "status": status,
                 "mode": "greedy",
+                "variants": list(variants),
                 "baseline": generator.baseline,
                 "records": completed_records,
                 "expected_records": len(records),
@@ -102,11 +105,11 @@ def run_greedy_evaluation(
         progress = tqdm(records, desc=f"Greedy inference ({generator.baseline})",
                         disable=emit_progress_events)
         if emit_progress_events:
-            emit_progress("generating", completed=0, total=len(records) * len(VARIANTS))
+            emit_progress("generating", completed=0, total=target)
         for record_index, record in enumerate(progress):
             if batched and record_index % effective_batch_size == 0:
                 batch = records[record_index : record_index + effective_batch_size]
-                problems = [record[variant]["problem"] for record in batch for variant in VARIANTS]
+                problems = [record[variant]["problem"] for record in batch for variant in variants]
                 generation_started = perf_counter()
                 batch_results = generate_batch(problems)
                 generation_seconds += perf_counter() - generation_started
@@ -114,13 +117,13 @@ def run_greedy_evaluation(
                     raise RuntimeError("Batched generator did not return one result per prompt")
             problem_id = normalise_problem_id(record.get("problem_id"))
             results: dict[str, Any] = {}
-            for variant_index, variant in enumerate(VARIANTS):
+            for variant_index, variant in enumerate(variants):
                 variant_data = record[variant]
                 problem = variant_data["problem"]
                 ground_truth = ground_truth_for(variant_data)
                 ground_truth_type = ground_truth_type_for(variant_data, variant)
                 if batched:
-                    offset = (record_index % effective_batch_size) * len(VARIANTS) + variant_index
+                    offset = (record_index % effective_batch_size) * len(variants) + variant_index
                     generated = batch_results[offset]
                 else:
                     generation_started = perf_counter()
@@ -158,7 +161,7 @@ def run_greedy_evaluation(
                 results[variant] = result
                 if emit_progress_events:
                     emit_progress("generating", completed=total_generations,
-                                  total=len(records) * len(VARIANTS),
+                                  total=target,
                                   problem_id=problem_id, variant=variant)
 
             progress.set_postfix(
@@ -179,7 +182,7 @@ def run_greedy_evaluation(
     write_qc("completed", len(records))
     if emit_progress_events:
         emit_progress("completed", completed=total_generations,
-                      total=len(records) * len(VARIANTS))
+                      total=target)
     print(
         f"Generated {generated_tokens} tokens in {generation_seconds:.1f}s "
         f"({generated_tokens / generation_seconds if generation_seconds else 0.0:.1f} tokens/s); "

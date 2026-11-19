@@ -101,6 +101,18 @@ responses on the scoring machine before computing accuracy or running cheap scre
 "$SCORE_PYTHON" scripts/score_answers.py "$BASE_RECORDS" "$SAMPLED_RECORDS" --workers 4
 ```
 
+For the DeepSeekMath-Instruct prompt-placement control, generate only the
+MATH-Perturb Originals with the CoT instruction appended to the user message.
+Copy the generated directory to the scoring machine and compare it with the
+existing scored DeepSeek greedy run by problem ID.
+
+```bash
+# GPU machine
+python scripts/deepseek_prompt_control.py generate
+# Scoring machine
+"$SCORE_PYTHON" scripts/deepseek_prompt_control.py score
+```
+
 The scorer uses the problem text and reference saved in each prediction file and
 replaces only answer scores in place. It records evaluator versions and code hashes
 in the accompanying QC metadata. It does not regenerate responses or change quality
